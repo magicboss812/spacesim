@@ -1,0 +1,72 @@
+{
+  "name": "Sonnensystem",
+  "bodies": [
+    {
+      "name": "Sonne",
+      "mass": 1.989e30,
+      "radius": 6.96e8,
+      "position": [0, 0],
+      "velocity": [0, 0],
+      "fixed": true,
+      "color": "#ffff00",
+      "light_intensity": 1.0,
+      "has_atmosphere": true,
+      "atmos_density": 50
+    },
+    {
+      "name": "Erde",
+      "mass": 5.972e24,
+      "radius": 6.371e6,
+      "position": [0, 0],
+      "velocity": [0, 0],
+      "fixed": true,
+      "semi_major_axis": 149600000000,
+      "eccentricity": 0.0167,
+      "theta0": 0.0,
+      "is_moon_of": "Sonne",
+      "color": "#4488ff",
+      "has_atmosphere": true,
+      "atmos_density": 20.0,
+      "atmosphere_color": "#87ceeb"
+    },
+    {
+      "name": "Mond",
+      "mass": 7.342e22,
+      "radius": 1.737e6,
+      "position": [0, 0],
+      "velocity": [0, 0],
+      "fixed": true,
+      "semi_major_axis": 384400000,
+      "eccentricity": 0.0549,
+      "theta0": 0.0,
+      "is_moon_of": "Erde",
+      "color": "#c0c0c0"
+    },
+    {
+      "name": "Mars",
+      "mass": 6.39e23,
+      "radius": 3.39e6,
+      "position": [0, 0],
+      "velocity": [0, 0],
+      "fixed": true,
+      "semi_major_axis": 227900000000,
+      "eccentricity": 0.0934,
+      "theta0": 0.0,
+      "is_moon_of": "Sonne",
+      "color": "#ff4500",
+      "has_atmosphere": true,
+      "atmos_density": 5.0,
+      "atmosphere_color": "#ff6347"
+    },
+    {
+      "name": "SaturnV",
+      "mass": 0.0,
+      "radius": 1.0,
+      "position": [80000000000, 0],
+      "velocity": [0, 20000],
+      "fixed": false,
+      "color": "#ffffff",
+      "is_ship": true
+    }
+  ]
+}
