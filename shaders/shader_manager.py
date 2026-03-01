@@ -43,14 +43,6 @@ class ShaderManager:
     def create_program(self, name: str, vertex_source: str, fragment_source: str) -> int:
         """
         Erstellt ein Shader-Programm aus Vertex- und Fragment-Shader.
-        
-        Args:
-            name: Name für das Programm (zum späteren Abrufen)
-            vertex_source: GLSL-Quellcode für Vertex-Shader
-            fragment_source: GLSL-Quellcode für Fragment-Shader
-            
-        Returns:
-            Program-ID
         """
         vertex_shader = self.compile_shader(vertex_source, GL_VERTEX_SHADER)
         fragment_shader = self.compile_shader(fragment_source, GL_FRAGMENT_SHADER)

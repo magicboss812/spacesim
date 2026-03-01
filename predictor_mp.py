@@ -68,8 +68,6 @@ def predictor_worker(input_queue, output_queue, stop_event):
             if stop_event.is_set():
                 return
 
-            # --- Velocity Verlet ---
-
             new_x = pos_x + vel_x * dt + 0.5 * acc_x * dt * dt
             new_y = pos_y + vel_y * dt + 0.5 * acc_y * dt * dt
 
@@ -82,8 +80,6 @@ def predictor_worker(input_queue, output_queue, stop_event):
             pos_y = new_y
             acc_x = new_acc_x
             acc_y = new_acc_y
-
-            # --- Distanz prüfen ---
 
             dx_move = pos_x - last_x
             dy_move = pos_y - last_y

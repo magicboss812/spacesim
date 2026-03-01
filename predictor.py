@@ -10,16 +10,10 @@ class Predictor:
         self.spacing = spacing  # gewünschter Abstand zwischen Punkten (Distanzbasiert)
 
         self.points = []
-
-        # Persistenter Integrationszustand
         self.sim_pos = None
         self.sim_vel = None
 
         self.initialized = False
-
-    # --------------------------------------------------------
-    # Public API
-    # --------------------------------------------------------
 
     def reset(self):
         self.points.clear()
@@ -68,10 +62,8 @@ class Predictor:
             self.initialize(ship, world)
             return
 
-        # 1️⃣ Alte Punkte entfernen
         self._remove_passed_points(ship)
 
-        # 2️⃣ Neue Punkte anhängen (distanzbasiert)
         accumulated_distance = 0.0
         while len(self.points) < self.num_points:
             prev_pos = self.sim_pos.copy()
@@ -87,10 +79,6 @@ class Predictor:
 
     def get_points(self):
         return self.points
-
-    # --------------------------------------------------------
-    # Intern
-    # --------------------------------------------------------
 
     def _remove_passed_points(self, ship):
         if len(self.points) < 2:
