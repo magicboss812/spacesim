@@ -1,6 +1,10 @@
 # Stand 11.03.2026
 Dies ist der heutige Stand des Spiels. Das meiste wurde bereits im Logbuch dokumentiert und erklärt, sowie mit der Lehrkraft evaluiert
 
+Wie lässt es sich starten?
+- letzte Version von Python
+- mit pip ausführen: pip install pygame pyopengl pyopengl-accelerate
+
 ### bodies.py
 Erstellt eine Liste mit den Objekten "body" mit vorbestimmten Attributen, sowie Keplerbahnen.
 ### camera.py
