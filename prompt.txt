@@ -1,0 +1,298 @@
+26.02.2026
+Sehr gute Entscheidung, das jetzt sauber zu planen.
+Wenn du vorher präzise definierst, was du willst, wird dein Projekt halb so chaotisch.
+
+Du möchtest also ein 2D-Simulationsspiel, bei dem:
+
+* Planeten feste Umlaufbahnen haben
+* Nur das Raumschiff Gravitation spürt
+* Es physikalisch konsistent wirkt
+* Der Code strukturiert und auf mehrere Dateien verteilt ist
+
+Ich stelle dir jetzt extrem viele Detailfragen. Wirklich tiefgehend.
+Beantworte sie gesammelt, möglichst konkret. Danach baue ich dir daraus ein sehr präzises Master-Prompt, das du für die Entwicklung verwenden kannst.
+
+---
+
+# I. Physikalisches Modell
+
+## 1. Grundannahmen
+
+1. Soll die Sonne im Zentrum fixiert sein?
+2. Bewegen sich die Planeten auf:
+
+   * perfekten Kreisbahnen?
+   * elliptischen Bahnen?
+   * echten simulierten Bahnen (aber ohne gegenseitige Beeinflussung)?
+3. Sind die Umlaufbahnen vorgegeben (analytisch berechnet) oder numerisch integriert?
+4. Willst du reale astronomische Daten verwenden (z. B. von NASA) oder skalierte Modellwerte?
+5. Arbeitest du mit:
+
+   * SI-Einheiten?
+   * Astronomischen Einheiten?
+   * vollständig skalierten Spieleinheiten?
+
+---
+
+## 2. Gravitation
+
+6. Soll das Raumschiff von:
+
+   * nur der Sonne beeinflusst werden?
+   * Sonne + allen Planeten?
+7. Addieren sich die Kräfte klassisch vektoriell?
+8. Gibt es eine minimale Distanz, um Singularitäten zu vermeiden?
+9. Soll es eine maximale Einflussreichweite geben?
+10. Wird Kollision physikalisch behandelt oder nur als Trigger?
+
+---
+
+## 3. Numerische Integration
+
+11. Welche Methode möchtest du verwenden?
+
+* Expliziter Euler
+* Semi-impliziter Euler
+* Verlet
+* Runge-Kutta 4
+
+12. Soll die Zeit:
+
+* Echtzeit sein?
+* beschleunigbar sein?
+* pausierbar sein?
+
+13. Soll der Zeitschritt fix oder variabel sein?
+14. Möchtest du Energieerhaltung analysieren?
+15. Möchtest du Bahnfehler dokumentieren?
+
+---
+
+# II. Raumschiff-Physik
+
+## 4. Bewegung
+
+16. Hat das Raumschiff Masse?
+17. Gibt es Trägheit ohne künstliche Dämpfung?
+18. Gibt es Luftwiderstand? (vermutlich nein)
+19. Gibt es Maximalgeschwindigkeit?
+20. Wird Impuls vollständig physikalisch behandelt?
+
+---
+
+## 5. Steuerung
+
+21. Rotation frei oder instant?
+22. Drehmoment realistisch oder vereinfacht?
+23. Schub:
+
+* konstant
+* regelbar
+* mit Treibstoffverbrauch?
+
+24. Soll es mehrere Schubrichtungen geben?
+25. Gibt es Autopilot-Funktionen?
+
+---
+
+# III. Spielmechanik
+
+## 6. Zielsystem
+
+26. Gibt es Missionen?
+27. Muss man Planeten „erreichen“?
+28. Gibt es Landemechanik oder nur Annäherung?
+29. Gibt es Bewertungssystem?
+30. Oder ist es rein explorativ?
+
+---
+
+## 7. Schwierigkeitsgrad
+
+31. Realistische Orbitalmechanik oder spielerisch vereinfacht?
+32. Sind stabile Orbits schwer zu erreichen?
+33. Gibt es Hilfslinien für Bahnen?
+34. Wird die aktuelle Bahn projiziert?
+35. Gibt es ein Tutorial?
+
+---
+
+# IV. Visualisierung
+
+## 8. Darstellung
+
+36. Top-Down-View?
+37. Zoom möglich?
+38. Dynamische Skalierung?
+39. Zeigst du Bahnkurven?
+40. Zeigst du Geschwindigkeitsvektor?
+41. Zeigst du Beschleunigungsvektor?
+42. Zeigst du Einflussradien?
+
+---
+
+## 9. Grafikstil
+
+43. Minimalistisch (Kreise)?
+44. Texturierte Planeten?
+45. Hintergrund mit Sternen?
+46. UI modern oder technisch?
+47. Debug-Overlay einblendbar?
+
+---
+
+# V. Technische Architektur
+
+## 10. Engine / Framework
+
+48. Welche Engine?
+
+* Godot
+* Unity
+* Pygame
+* Web (Three.js / Canvas)
+
+49. Welche Sprache?
+50. Soll das Projekt objektorientiert sein?
+51. Oder komponentenbasiert?
+
+---
+
+## 11. Dateistruktur
+
+52. Separate Datei für Physik?
+53. Separate Datei für Planeten?
+54. Separate Datei für Raumschiff?
+55. Separate Datei für Integrator?
+56. Konfigurationsdatei für Parameter?
+57. JSON für Planetendaten?
+58. Debug-Modul?
+59. Mathematische Utility-Datei?
+60. Rendering getrennt von Logik?
+
+---
+
+## 12. Klassenstruktur
+
+61. Klasse CelestialBody?
+62. Klasse PlayerShip?
+63. Klasse PhysicsEngine?
+64. Klasse Integrator?
+65. Klasse GameManager?
+66. Interface für Gravitationsquellen?
+67. Event-System?
+68. MVC-Struktur?
+
+---
+
+# VI. Performance & Stabilität
+
+69. Maximale Anzahl an Planeten?
+70. Ziel-FPS?
+71. Soll Simulation deterministisch sein?
+72. Floating-Point-Genauigkeit wichtig?
+73. Umgang mit sehr großen Zahlen?
+74. Logarithmische Skalierung?
+75. Fixed Timestep Loop?
+
+---
+
+# VII. Wissenschaftlicher Anspruch
+
+76. Möchtest du reale Planetendaten dokumentieren?
+77. Möchtest du Bahnparameter (a, e, T) berechnen?
+78. Vergleich mit Keplerschen Gesetzen?
+79. Energieanalyse?
+80. Impulserhaltung?
+81. Dokumentation numerischer Fehler?
+82. Diskussion Modellgrenzen?
+
+---
+
+# VIII. Erweiterbarkeit
+
+83. Später 3D möglich?
+84. Später echtes N-Body möglich?
+85. Modularer Integrator-Wechsel?
+86. Plugin-System?
+87. Speichersystem?
+88. Replays?
+
+---
+
+# IX. Benutzerinteraktion
+
+89. Maus oder Tastatur?
+90. Kamera folgt Schiff?
+91. Mini-Map?
+92. UI mit Planeteninfos?
+93. Tooltip bei Hover?
+94. Zeitraffer per Slider?
+95. Pause-Analyse-Modus?
+
+---
+
+# X. Dokumentationsstrategie
+
+96. Willst du Code kommentieren wissenschaftlich?
+97. Diagramme im Schreibteil?
+98. UML-Klassendiagramm?
+99. Flussdiagramm der Simulation?
+100. Mathematische Herleitung im Anhang?
+101. Git-Versionierung?
+102. Versionshistorie als Entwicklungsnachweis?
+
+---
+
+Beantworte alles so konkret wie möglich.
+Wenn du bei etwas unsicher bist, sag es.
+
+Danach erstelle ich dir:
+
+* Ein extrem detailliertes Master-Prompt
+* Eine empfohlene Dateistruktur
+* Eine Architekturübersicht
+* Einen physikalisch konsistenten Entwicklungsplan
+* Und optional eine „wissenschaftlich wirkende“ Projektbeschreibung für deine Arbeit
+
+Jetzt bin ich gespannt auf deine Antworten.
+
+26.02.2026 Nr.2
+
+Absolutely. I’ll now write this as a very detailed, technically rigorous project specification in continuous English prose. Think of it as a hybrid between a scientific modeling description and a professional technical design document.
+
+This project consists of the development of a two-dimensional gravitational simulation game implemented in Python using the Pygame framework. The primary objective is to construct a physically consistent simulation of orbital mechanics within a stellar system while maintaining a clean separation between simulation logic and rendering. The system models Newtonian gravitation in strict SI units and aims to achieve high numerical stability, architectural modularity, and scientific clarity.
+
+The simulated environment represents a star-centered planetary system. The central star is fixed at the origin of the inertial coordinate system and does not move. All planetary bodies orbit this central star under Newtonian gravity, but they do not gravitationally interact with each other. Their motion is numerically integrated solely under the gravitational influence of the star. The player-controlled spacecraft, however, experiences the combined gravitational influence of both the star and all planets. This setup corresponds physically to a restricted N-body problem in which the planets are treated as independent bodies orbiting a dominant central mass, and the spacecraft is treated as a test particle influenced by all major masses.
+
+The gravitational model is fully vectorial. For any gravitational source body i with mass Mi and position vector ri, and for the spacecraft located at position r, the gravitational acceleration acting on the spacecraft is computed as
+
+a = G · Σ [Mi / |ri − r|³ · (ri − r)]
+
+where G is the universal gravitational constant, |ri − r| is the Euclidean distance between bodies, and the vector difference (ri − r) defines the direction of the force. All gravitational contributions are summed vectorially. No scalar approximations are used. All calculations are performed using double-precision floating-point values to minimize numerical errors.
+
+Collisions between the spacecraft and a planet are detected when the Euclidean distance between their centers is less than or equal to the planet’s physical radius. No complex rigid-body response is implemented. Instead, collision detection serves as a state transition trigger, such as landing or stopping further integration. This approach avoids unnecessary computational overhead while preserving physical plausibility. Additionally, the gravitational influence of bodies may be parameterized to allow experimentation with artificial cut-off radii, though by default gravity acts without truncation.
+
+Planetary motion is computed numerically rather than analytically prescribed. Initial orbital parameters such as mass, radius, initial position, and initial velocity are loaded from external JSON configuration files, enabling modular extensibility and the later addition of new planets or entirely new stellar systems. The integrator used for both planetary motion and spacecraft motion is the Velocity-Verlet method. This method is chosen due to its symplectic nature and superior long-term energy behavior compared to explicit Euler methods. The integrator operates with a fixed physics timestep to ensure numerical stability and determinism. Rendering and input processing are decoupled from the physics loop.
+
+The simulation clock supports pausing, acceleration, and deceleration. Time scaling modifies the rate at which the physics timestep is applied but does not alter the timestep resolution itself, thereby preserving integration consistency. Future trajectory prediction for the spacecraft is implemented via a separate forward simulation that uses a copy of the spacecraft’s current state. This orbit prediction system iteratively computes future positions over a configurable time horizon. The number of iterations, the temporal projection window, and acceptable numerical tolerance are all adjustable parameters.
+
+A key feature of the trajectory projection system is the ability to compute and display the predicted orbit relative to a selectable reference body. The reference frame can be switched dynamically between the star and any planet. The relative trajectory is computed by subtracting the position vector of the reference body from the spacecraft’s projected position at each timestep. This ensures that the geometric appearance of the orbit changes correctly depending on the chosen frame. For example, a heliocentric elliptical orbit may appear as a looping path when viewed in a geocentric frame. This transformation must be mathematically consistent at every iteration.
+
+The spacecraft itself is modeled as a massless test particle in the sense that it does not gravitationally influence any celestial body. It obeys Newton’s second law under gravitational and thrust acceleration. No artificial damping or drag forces are applied. There is no atmospheric resistance. The spacecraft does not have a hard-coded maximum velocity, although an optional configurable limit such as the speed of light may be enforced for numerical safety. Rotational dynamics are simplified: the spacecraft rotates in the two-dimensional plane with constant angular acceleration when rotational input is applied. Angular velocity accumulates naturally, providing physically intuitive rotational inertia. Translational thrust is applied strictly along the instantaneous orientation vector of the spacecraft. Thrust magnitude is continuously adjustable and consumes no fuel.
+
+An optional orientation assistance system is implemented to automatically rotate the spacecraft toward prograde, retrograde, or target-body directions. This system only affects angular orientation and does not alter translational velocity vectors directly.
+
+A floating origin system is implemented to mitigate floating-point precision loss over large spatial scales. All physical positions are stored internally in double precision. When the spacecraft exceeds a predefined radial distance from the origin, a global translation is applied to all simulated bodies such that the spacecraft is repositioned near the origin. The translation vector is applied uniformly to every object in the simulation. Because all positions shift consistently, relative distances and velocities remain unchanged, and physical correctness is preserved. This technique significantly reduces precision degradation in large-scale simulations.
+
+The visual layer is strictly separated from the simulation layer. Rendering operates in screen space and converts world coordinates to display coordinates through a camera abstraction. A zoom function is implemented to allow inspection of both planetary scales and orbital trajectories. No automatic dynamic scaling of object sizes is performed. Planets are initially rendered as simple geometric primitives, such as circles, with optional texture loading separated into independent asset files for easy modification. Background star fields may be loaded from configurable texture resources.
+
+Visual diagnostics include optional display of the spacecraft’s instantaneous velocity vector, acceleration vector, historical trajectory curve, and predicted future trajectory. All debug overlays are modular and can be toggled independently without affecting simulation logic.
+
+The software architecture follows a strict object-oriented design. Core entities include a base class representing celestial bodies, specialized subclasses for planets and the central star, a spacecraft class, a physics engine responsible for force aggregation and integration calls, a dedicated integrator class implementing the Velocity-Verlet algorithm, a floating origin manager, an orbit predictor module, a renderer, a camera system, a debug overlay module, and a central game manager coordinating input, update cycles, and rendering. Data files are separated from logic, and utility modules provide vector operations and unit handling.
+
+The system targets approximately 60 frames per second under normal conditions. The physics loop is deterministic under identical initial conditions and time scaling factors. A save system serializes spacecraft state variables, including position, velocity, orientation, and current reference frame, to JSON format. Additionally, the historical path of the spacecraft is continuously recorded for visualization purposes.
+
+The scientific ambition of the project lies in the faithful implementation of Newtonian gravity in vector form, the use of a symplectic numerical integrator, consistent SI-unit handling, rigorous reference-frame transformations, and proactive mitigation of numerical precision errors. The game is designed to be exploratory rather than mission-based, emphasizing the physical difficulty of achieving stable orbits and performing realistic gravitational maneuvers.
+
+If you would like, I can next expand this into a formal scientific methodology section suitable for a written thesis, or alternatively translate it into a concrete implementation roadmap with development milestones in logical order.
