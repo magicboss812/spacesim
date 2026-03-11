@@ -39,7 +39,7 @@ def main():
     w.body = bodies
 
     # Parameter für die Simulation
-    dt = 9000  # zeitschritt in Sekunden (1 Schritt = 15 Minuten)
+    dt = 900  # zeitschritt in Sekunden (1 Schritt = 15 Minuten)
     running = True  # Hauptschleife der Simulation
 
     # Kamera initialisieren
