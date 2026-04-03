@@ -105,12 +105,35 @@ class world:
         for body in self.body:
             if body.scripted_orbit:
                 continue
-            old_acc = body.acceleration.copy()
-            body.position += body.velocity * dt + 0.5 * old_acc * dt**2
-            body._old_acc = old_acc
-        self.calculate_forces()
-        for body in self.body:
-            if body.scripted_orbit:
-                continue
-            body.velocity += 0.5 * (body._old_acc + body.acceleration) * dt
+            
+            # RK4 Stage 1
+            self.calculate_forces()
+            k1_v = body.acceleration.copy()
+            k1_p = body.velocity.copy()
+            
+            # RK4 Stage 2
+            body.position += k1_p * (dt / 2)
+            body.velocity += k1_v * (dt / 2)
+            self.calculate_forces()
+            k2_v = body.acceleration.copy()
+            k2_p = body.velocity.copy()
+            
+            # RK4 Stage 3
+            body.position += k2_p * (dt / 2) - k1_p * (dt / 2)
+            body.velocity += k2_v * (dt / 2) - k1_v * (dt / 2)
+            self.calculate_forces()
+            k3_v = body.acceleration.copy()
+            k3_p = body.velocity.copy()
+            
+            # RK4 Stage 4
+            body.position += k3_p * dt - k2_p * (dt / 2)
+            body.velocity += k3_v * dt - k2_v * (dt / 2)
+            self.calculate_forces()
+            k4_v = body.acceleration.copy()
+            k4_p = body.velocity.copy()
+            
+            # Combine all stages (weighted average)
+            body.position += (k1_p + 2*k2_p + 2*k3_p + k4_p) * (dt / 6) - k3_p * dt
+            body.velocity += (k1_v + 2*k2_v + 2*k3_v + k4_v) * (dt / 6) - k3_v * dt
+        
         self.time += dt

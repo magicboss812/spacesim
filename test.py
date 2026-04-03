@@ -1,4 +1,5 @@
 import time
+import math
 import pygame
 from pygame.locals import *
 from OpenGL.GL import *
@@ -39,7 +40,7 @@ def main():
     w.body = bodies
 
     # Parameter für die Simulation
-    dt = 900  # zeitschritt in Sekunden (1 Schritt = 15 Minuten)
+    dt = 9000  # zeitschritt in Sekunden (1 Schritt = 15 Minuten)
     running = True  # Hauptschleife der Simulation
 
     # Kamera initialisieren
@@ -98,21 +99,20 @@ def main():
                     ship = b
                     break
 
-            if ship:
-                predictor.update(ship, w)
-                points = predictor.get_points()
-            else:
-                for b in w.body:
-                    if not b.fixed:
-                        predictor.update(b, w)
-                        points = predictor.get_points()
-                        break # Ergebnisse der Vorhersage abrufen
+            target = ship if ship else next((b for b in w.body if not b.fixed), None)
+
+            if target:
+                # Initialize on first frame only
+                if not predictor.initialized:
+                    predictor.initialize(target, w)
+                # Update trajectory (add new points) on even frames
+                elif frame_count % 1 == 0:
+                    predictor.update(target, w)
+                # On odd frames: just advance state so coordinates stay current
+                else:
+                    predictor.advance_state(w)
+
         points = predictor.get_points()
-        if frame_count % 60 == 0:
-            print(f"Vorhersagepunkte: {len(points)}")
-            if len(points) > 0:
-                print(f"DEBUG: First point: {points[0]}, Last point: {points[-1]}")
-                print(f"DEBUG: Camera position: {camera.position}, scale: {camera.scale}")
         # Rendern
 
         

@@ -324,6 +324,18 @@ class Renderer:
             
             self._apply_fxaa()
         
+        # Restore projection matrix for trajectory rendering
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluOrtho2D(0, self.width, 0, self.height)
+        
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        
+        # Re-enable blending for trajectory
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
         if prediction_points:
             self.draw_prediction(prediction_points, camera)
         self._render_hud(camera)
@@ -425,6 +437,10 @@ class Renderer:
 
         # Textur deaktivieren falls HUD sie aktiviert hat
         glDisable(GL_TEXTURE_2D)
+        
+        # Ensure blend is enabled
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         glColor4f(1.0, 1.0, 1.0, 0.6)
         glLineWidth(2.0)
