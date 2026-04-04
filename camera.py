@@ -5,10 +5,16 @@ import math
 class Camera:
     """Verwaltet die Ansicht der Simulation: Position, Zoom und Koordinatentransformation."""
     
-    def __init__(self, screen, width, height):
+    def __init__(self, screen, width, height, sim_dt=9000.0):
         self.screen = screen  # Wird für eventuelle Direktzugriffe behalten
         self.width = width
         self.height = height
+
+        # Simulation time step (seconds per simulation update)
+        self.sim_dt = float(sim_dt)
+        self.min_sim_dt = 1.0
+        self.max_sim_dt = 1e12
+        self.sim_dt_factor = 1.5
         
         # Kamera-Position (Weltkoordinaten des Bildzentrums)
         self.position = Vec2(0.0, 0.0)
@@ -33,13 +39,13 @@ class Camera:
         screen_x = self.width / 2 + rel.x * self.scale
         screen_y = self.height / 2 - rel.y * self.scale
         
-        # PRÜFUNG vor int()
+        # PRÜFUNG vor Rückgabe
         if not (math.isfinite(screen_x) and math.isfinite(screen_y)):
             print(f"WARNING: Invalid screen coords: {screen_x}, {screen_y}")
-            return (self.width // 2, self.height // 2)
+            return (self.width / 2.0, self.height / 2.0)
         
-        # Jetzt sicher in int umwandeln
-        return (int(screen_x), int(screen_y))
+        # Subpixel-Präzision behalten, damit Bewegung nicht stufig wirkt.
+        return (screen_x, screen_y)
     def screen_to_world(self, screen_pos):
         """Wandelt Bildschirmkoordinaten in Weltkoordinaten um."""
         screen_x, screen_y = screen_pos
@@ -84,14 +90,16 @@ class Camera:
             self.scale *= zoom_factor
             self.scale = max(self.min_scale, min(self.max_scale, self.scale))
         
+        
         elif event.type == pygame.KEYDOWN:
-            # Tasten für Zoom
-            if event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
-                self.scale *= 1.5
-            elif event.key == pygame.K_MINUS:
-                self.scale /= 1.5
-            
             # Verfolgung umschalten
             if event.key == pygame.K_f:
                 if self.target is not None:
                     self.unfollow()
+            # Simulation timestep control (PageUp/PageDown)
+            if event.key == pygame.K_PAGEUP:
+                self.sim_dt *= self.sim_dt_factor
+                self.sim_dt = min(self.sim_dt, self.max_sim_dt)
+            elif event.key == pygame.K_PAGEDOWN:
+                self.sim_dt /= self.sim_dt_factor
+                self.sim_dt = max(self.sim_dt, self.min_sim_dt)

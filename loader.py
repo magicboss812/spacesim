@@ -1,12 +1,26 @@
 import json
+from pathlib import Path
 from vec import Vec2
 from bodies import body, schiff
 
 class SystemLoader:
     """Lädt ein Planetensystem aus einer JSON-Datei."""
     
-    def __init__(self, filepath):
-        self.filepath = filepath
+    def __init__(self, filepath=None):
+        """Initialisiert den Loader.
+
+        If `filepath` is omitted or given as a relative path, it will be
+        resolved relative to this module's directory so the loader works
+        regardless of the current working directory.
+        """
+        base_dir = Path(__file__).parent
+        if filepath is None:
+            self.filepath = base_dir / "solar_system.json"
+        else:
+            p = Path(filepath)
+            if not p.is_absolute():
+                p = base_dir / p
+            self.filepath = p
         self.data = None
     
     def load(self):
