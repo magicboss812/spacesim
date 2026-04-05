@@ -42,7 +42,7 @@ class SystemLoader:
             if "is_moon_of" in entry and entry["is_moon_of"]:
                 bodies[i].is_moon_of = body_refs.get(entry["is_moon_of"])
                 bodies[i].scripted_orbit = True
-        
+
         return bodies
     
     def hex_to_rgb(self, hex_color):

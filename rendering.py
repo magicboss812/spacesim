@@ -8,6 +8,9 @@ from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
 import math
+from collections import deque
+
+from reference_frames import IdentityReferenceFrame
 
 
 class Renderer:
@@ -52,7 +55,7 @@ class Renderer:
         # but adapt point density to screen-space curvature/error.
         self.prediction_sampling_tolerance_px = 1.5
         self.prediction_sampling_min_step_px = 0.35
-        self.prediction_sampling_max_points = 5000
+        self.prediction_sampling_max_points = 1000
         # Allow very fine screen-space tolerance when zoomed in.
         # Lowering this enables more detail at extreme zoom levels.
         self.prediction_sampling_min_tolerance_px = 0.005
@@ -60,6 +63,29 @@ class Renderer:
         self.prediction_sampling_max_segment_px = 4.0
         self.prediction_sampling_reference_scale = 1e-6
         self.prediction_visibility_margin_px = 128.0
+
+        # Frame state (Principia-like): physics remains absolute, rendering
+        # applies the currently selected plotting frame plus optional target
+        # overlay frame.
+        self._plotting_frame = IdentityReferenceFrame()
+        self._plotting_frame_label = "Barycentric"
+        self._target_frame = None
+        self._target_frame_label = None
+        self._frame_time_s = 0.0
+        # Debugging: enable to periodically print active frame and selected
+        # bodies' world/frame coordinates for inspection.
+        self.debug_frame = False
+        self._frame_debug_counter = 0
+        self._frame_debug_period = 30
+
+        # Reference-frame trajectory trails (history in frame-space).
+        # These replace static scripted orbit ellipses and show relative
+        # epicyclic motion for all bodies in the active frame.
+        self.reference_trajectories_enabled = True
+        self.reference_trajectories_max_points = 2400
+        self.reference_trajectories_sample_step_s = 0.0
+        self._reference_traj_last_sample_time = None
+        self._reference_traj_points = {}
     
     def _init_opengl(self):
         """Initialisiert OpenGL-Einstellungen."""
@@ -321,8 +347,202 @@ class Renderer:
         
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
+
+    def set_plotting_frame(self, frame, label=None):
+        self._plotting_frame = frame if frame is not None else IdentityReferenceFrame()
+        if label is not None:
+            self._plotting_frame_label = str(label)
+        else:
+            self._plotting_frame_label = getattr(self._plotting_frame, 'label', 'Barycentric')
+        self._reset_reference_trajectories()
+
+    def set_target_frame(self, frame, label=None):
+        self._target_frame = frame
+        if frame is None:
+            self._target_frame_label = None
+            self._reset_reference_trajectories()
+            return
+        if label is not None:
+            self._target_frame_label = str(label)
+        else:
+            self._target_frame_label = getattr(frame, 'label', 'Target overlay')
+        self._reset_reference_trajectories()
+
+    def clear_target_frame(self):
+        self._target_frame = None
+        self._target_frame_label = None
+        self._reset_reference_trajectories()
+
+    def set_frame_time(self, time_s):
+        try:
+            self._frame_time_s = float(time_s)
+        except Exception:
+            self._frame_time_s = 0.0
+
+        for frame in (self._plotting_frame, self._target_frame):
+            if frame is None:
+                continue
+            try:
+                frame.set_epoch_time(self._frame_time_s)
+            except Exception:
+                pass
+
+    def _active_frame(self):
+        return self._target_frame if self._target_frame is not None else self._plotting_frame
+
+    def _frame_transform_xy(self, x, y):
+        frame = self._active_frame()
+        try:
+            return frame.to_this_frame_xy(self._frame_time_s, float(x), float(y))
+        except Exception:
+            return float(x), float(y)
+
+    def _frame_camera_xy(self, camera):
+        return self._frame_transform_xy(float(camera.position.x), float(camera.position.y))
+
+    def _world_to_screen_xy(self, world_x, world_y, camera, camera_frame_xy=None):
+        if camera_frame_xy is None:
+            camera_frame_xy = self._frame_camera_xy(camera)
+        frame_x, frame_y = self._frame_transform_xy(world_x, world_y)
+        scale = float(camera.scale)
+        sx = self.width * 0.5 + (frame_x - camera_frame_xy[0]) * scale
+        sy = self.height * 0.5 - (frame_y - camera_frame_xy[1]) * scale
+        return sx, sy
+
+    def _world_to_screen_xy_at_time(self, world_x, world_y, camera, time_s):
+        """Convert a world-space point at a specific simulation time to screen coordinates.
+
+        This uses the active frame's time-dependent transform so prediction
+        points (which include per-sample sim times) are projected correctly
+        into a moving/rotating plotting frame.
+        """
+        frame = self._active_frame()
+        try:
+            frame_x, frame_y = frame.to_this_frame_xy(float(time_s), float(world_x), float(world_y))
+        except Exception:
+            # Fallback to current frame transform
+            frame_x, frame_y = self._frame_transform_xy(world_x, world_y)
+
+        # Compute camera origin in frame-space at the same time
+        try:
+            cam_fx, cam_fy = frame.to_this_frame_xy(float(time_s), float(camera.position.x), float(camera.position.y))
+        except Exception:
+            cam_fx, cam_fy = self._frame_transform_xy(float(camera.position.x), float(camera.position.y))
+
+        scale = float(camera.scale)
+        sx = self.width * 0.5 + (frame_x - cam_fx) * scale
+        sy = self.height * 0.5 - (frame_y - cam_fy) * scale
+        return sx, sy
+
+    def _reset_reference_trajectories(self):
+        self._reference_traj_points = {}
+        self._reference_traj_last_sample_time = None
+
+    def _record_reference_trajectories(self, bodies):
+        if not self.reference_trajectories_enabled:
+            return
+
+        sample_step = max(0.0, float(self.reference_trajectories_sample_step_s))
+        if self._reference_traj_last_sample_time is not None and sample_step > 0.0:
+            if abs(float(self._frame_time_s) - float(self._reference_traj_last_sample_time)) < sample_step:
+                return
+
+        active_ids = set()
+        for body in bodies:
+            if getattr(body, 'is_ship', False):
+                continue
+
+            body_id = id(body)
+            active_ids.add(body_id)
+            trail = self._reference_traj_points.get(body_id)
+            if trail is None:
+                trail = deque(maxlen=max(64, int(self.reference_trajectories_max_points)))
+                self._reference_traj_points[body_id] = trail
+
+            try:
+                fx, fy = self._frame_transform_xy(float(body.position.x), float(body.position.y))
+            except Exception:
+                continue
+
+            if trail:
+                lx, ly = trail[-1]
+                dx = fx - lx
+                dy = fy - ly
+                if dx * dx + dy * dy < 1e-18:
+                    continue
+            trail.append((float(fx), float(fy)))
+
+        stale_ids = [k for k in self._reference_traj_points.keys() if k not in active_ids]
+        for stale_id in stale_ids:
+            del self._reference_traj_points[stale_id]
+
+        self._reference_traj_last_sample_time = float(self._frame_time_s)
+
+    def _draw_reference_trajectories(self, bodies, camera):
+        if not self.reference_trajectories_enabled:
+            return
+
+        camera_frame_xy = self._frame_camera_xy(camera)
+        half_w = self.width * 0.5
+        half_h = self.height * 0.5
+        scale = float(camera.scale)
+
+        glDisable(GL_TEXTURE_2D)
+        glLineWidth(1.0)
+
+        for body in bodies:
+            if getattr(body, 'is_ship', False):
+                continue
+
+            trail = self._reference_traj_points.get(id(body))
+            if trail is None or len(trail) < 2:
+                continue
+
+            base = getattr(body, 'color', (200, 200, 200))
+            cr = min(1.0, max(0.0, base[0] / 255.0))
+            cg = min(1.0, max(0.0, base[1] / 255.0))
+            cb = min(1.0, max(0.0, base[2] / 255.0))
+            glColor4f(cr, cg, cb, 0.42)
+
+            screen_points = []
+            for fx, fy in trail:
+                sx = half_w + (fx - camera_frame_xy[0]) * scale
+                sy = half_h - (fy - camera_frame_xy[1]) * scale
+                screen_points.append((sx, sy))
+
+            runs = self._visible_window_runs(screen_points, margin_px=self.prediction_visibility_margin_px)
+            for run in runs:
+                if len(run) < 2:
+                    continue
+                glBegin(GL_LINE_STRIP)
+                for sx, sy in run:
+                    glVertex2f(float(sx), float(sy))
+                glEnd()
     
-    def render(self, bodies, camera, prediction_points=None, predictor=None):
+    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None):
+
+        if sim_time is not None:
+            self.set_frame_time(sim_time)
+
+        self._record_reference_trajectories(bodies)
+
+        # Optional periodic debug output to inspect frame transforms.
+        if getattr(self, 'debug_frame', False):
+            self._frame_debug_counter += 1
+            if self._frame_debug_counter % getattr(self, '_frame_debug_period', 30) == 0:
+                try:
+                    sun = next((b for b in bodies if 'sonn' in getattr(b, 'name', '').lower() or getattr(b, 'name', '').lower() in ('sun', 'sonne')), None)
+                    earth = next((b for b in bodies if getattr(b, 'name', '').lower() in ('earth', 'erde')), None)
+                    active = self._active_frame()
+                    label = getattr(active, 'label', None)
+                    if sun is not None and earth is not None:
+                        swx, swy = float(sun.position.x), float(sun.position.y)
+                        exx, exy = float(earth.position.x), float(earth.position.y)
+                        sfx, sfy = self._frame_transform_xy(swx, swy)
+                        efx, efy = self._frame_transform_xy(exx, exy)
+                        print(f"FRAME_DBG: label={label} time={self._frame_time_s:.3f} sun_world=({swx:.6e},{swy:.6e}) sun_frame=({sfx:.6e},{sfy:.6e}) earth_world=({exx:.6e},{exy:.6e}) earth_frame=({efx:.6e},{efy:.6e})")
+                except Exception:
+                    pass
 
         self.debug_info['bodies_rendered'] = 0
         self.debug_info['prediction_points_in'] = 0
@@ -340,10 +560,13 @@ class Renderer:
 
         glClear(GL_COLOR_BUFFER_BIT)
 
+        self._draw_reference_trajectories(bodies, camera)
+
         # Render all non-ship bodies first (they may be FXAA-processed).
         for body in bodies:
             if getattr(body, 'is_ship', False):
                 continue
+
             self._draw_body(body, camera)
 
         if self.enable_fxaa and self.fbo:
@@ -379,8 +602,14 @@ class Renderer:
         pygame.display.flip()
     
     def _draw_body(self, body, camera):
-
-        screen_pos = camera.world_to_screen(body.position)
+        camera_frame_xy = self._frame_camera_xy(camera)
+        x, y = self._world_to_screen_xy(
+            float(body.position.x),
+            float(body.position.y),
+            camera,
+            camera_frame_xy=camera_frame_xy,
+        )
+        screen_pos = (x, y)
         radius = max(3, int(body.radius * camera.scale))  # Mindestens 3 Pixel
         
         self.debug_info['bodies_rendered'] += 1
@@ -388,7 +617,12 @@ class Renderer:
         x, y = float(screen_pos[0]), float(screen_pos[1])
 
         if body.is_ship:
-            self._draw_ship_arrow(body, x, y, r, g, b)
+            theta_frame = float(getattr(body, 'theta', 0.0))
+            try:
+                theta_frame = self._active_frame().transform_heading(self._frame_time_s, theta_frame)
+            except Exception:
+                pass
+            self._draw_ship_arrow(body, x, y, r, g, b, theta_override=theta_frame)
             self._draw_body_label(body.name, screen_pos, 12)
             return
 
@@ -417,13 +651,13 @@ class Renderer:
         if radius > 5:
             self._draw_body_label(body.name, screen_pos, radius)
 
-    def _draw_ship_arrow(self, body, x, y, r, g, b):
+    def _draw_ship_arrow(self, body, x, y, r, g, b, theta_override=None):
         # Draw in fixed screen pixels so ship size stays constant while zooming.
         arrow_length = 18.0
         arrow_half_width = 7.0
         tail_offset = 6.0
 
-        theta = float(getattr(body, 'theta', 0.0))
+        theta = float(theta_override) if theta_override is not None else float(getattr(body, 'theta', 0.0))
 
         # Match camera.world_to_screen() y-inversion to keep visual heading correct.
         hx = math.cos(theta)
@@ -534,6 +768,81 @@ class Renderer:
             glColor4f(r, g, b, 0.0)
             glVertex2f(outer_x, outer_y)
         glEnd()
+    def _draw_orbit(self, body, camera, segments=None, color=None, width=1.0):
+        """
+        Draws a full orbital ellipse for bodies using scripted orbits.
+        Uses `semi_major_axis` (a) and `eccentricity` (e). If `is_moon_of`
+        is set to a body object, the orbit is drawn around that parent's
+        position; otherwise the focus is at world origin.
+        The number of segments is chosen adaptively based on the orbit
+        circumference in screen pixels to keep the line smooth but
+        performant.
+        """
+        a = getattr(body, 'semi_major_axis', None)
+        e = getattr(body, 'eccentricity', None)
+        if a is None or e is None:
+            return
+        try:
+            a = float(a)
+            e = float(e)
+        except Exception:
+            return
+        if a <= 0:
+            return
+
+        parent = getattr(body, 'is_moon_of', None)
+        if parent is not None and hasattr(parent, 'position'):
+            cx = float(parent.position.x)
+            cy = float(parent.position.y)
+        else:
+            cx, cy = 0.0, 0.0
+
+        # screen transform params
+        half_w = self.width * 0.5
+        half_h = self.height * 0.5
+        cam_frame_x, cam_frame_y = self._frame_camera_xy(camera)
+        scale = abs(float(camera.scale))
+
+        # adaptive segment count: aim for ~1 segment per ~4px of circumference
+        circ_px = 2.0 * math.pi * a * scale
+        if segments is None:
+            est = int(max(48, min(1024, circ_px / 4.0))) if circ_px > 0 else 128
+            segments = max(48, min(2048, est))
+
+        # build screen-space polyline
+        screen_points = []
+        for i in range(segments + 1):
+            phi = 2.0 * math.pi * i / segments
+            r = a * (1.0 - e * e) / (1.0 + e * math.cos(phi))
+            wx = cx + r * math.cos(phi)
+            wy = cy + r * math.sin(phi)
+            frame_x, frame_y = self._frame_transform_xy(wx, wy)
+            sx = half_w + (frame_x - cam_frame_x) * scale
+            sy = half_h - (frame_y - cam_frame_y) * scale
+            screen_points.append((sx, sy))
+
+        # Only draw visible runs to avoid wasted GPU work
+        runs = self._visible_window_runs(screen_points, margin_px=self.prediction_visibility_margin_px)
+        if not runs:
+            return
+
+        if color is None:
+            base = getattr(body, 'color', (200, 200, 200))
+            cr, cg, cb = (base[0] / 255.0 * 0.8, base[1] / 255.0 * 0.8, base[2] / 255.0 * 0.8)
+        else:
+            cr, cg, cb = color
+
+        glDisable(GL_TEXTURE_2D)
+        glColor4f(cr, cg, cb, 0.6)
+        glLineWidth(width)
+        for run in runs:
+            if len(run) < 2:
+                continue
+            glBegin(GL_LINE_STRIP)
+            for sx, sy in run:
+                glVertex2f(float(sx), float(sy))
+            glEnd()
+
     def _points_count(self, points):
         if points is None:
             return 0
@@ -760,6 +1069,7 @@ class Renderer:
         ship_x, ship_y = self._point_xy(path_points[0])
         half_w = self.width * 0.5
         half_h = self.height * 0.5
+        camera_frame_xy = self._frame_camera_xy(camera)
 
         # Debug output: show ship world position and predictor's first point
         try:
@@ -776,9 +1086,11 @@ class Renderer:
             ship_x = float(anchor_world[0])
             ship_y = float(anchor_world[1])
 
-        ship_screen = (
-            half_w + (ship_x - float(camera.position.x)) * float(camera.scale),
-            half_h - (ship_y - float(camera.position.y)) * float(camera.scale),
+        ship_screen = self._world_to_screen_xy(
+            ship_x,
+            ship_y,
+            camera,
+            camera_frame_xy=camera_frame_xy,
         )
 
         effective_tolerance = self._effective_sampling_tolerance(camera)
@@ -788,10 +1100,23 @@ class Renderer:
         anchor_first_run = True
         if input_count >= 2:
             n0x, n0y = self._point_xy(path_points[1])
-            next_screen = (
-                half_w + (n0x - float(camera.position.x)) * float(camera.scale),
-                half_h - (n0y - float(camera.position.y)) * float(camera.scale),
-            )
+            # If predictor points include timestamps, project using per-sample time
+            sample_time = None
+            try:
+                if hasattr(path_points[1], '__len__') and len(path_points[1]) >= 3:
+                    sample_time = float(path_points[1][2])
+            except Exception:
+                sample_time = None
+
+            if sample_time is not None:
+                next_screen = self._world_to_screen_xy_at_time(n0x, n0y, camera, sample_time)
+            else:
+                next_screen = self._world_to_screen_xy(
+                    n0x,
+                    n0y,
+                    camera,
+                    camera_frame_xy=camera_frame_xy,
+                )
             margin = self.prediction_visibility_margin_px
             anchor_first_run = self._segment_intersects_rect(
                 ship_screen[0],
@@ -823,17 +1148,17 @@ class Renderer:
             if sampled_runs and len(sampled_runs[0]) > 0:
                 sample_n = min(5, len(sampled_runs[0]))
                 screen_samples = [sampled_runs[0][i] for i in range(sample_n)]
-                world_samples = []
+                frame_samples = []
                 for sx, sy in screen_samples:
-                    wx = float(camera.position.x) + (sx - half_w) / float(camera.scale)
-                    wy = float(camera.position.y) - (sy - half_h) / float(camera.scale)
-                    world_samples.append((wx, wy))
+                    fx = camera_frame_xy[0] + (sx - half_w) / float(camera.scale)
+                    fy = camera_frame_xy[1] - (sy - half_h) / float(camera.scale)
+                    frame_samples.append((fx, fy))
                 self.debug_info['prediction_sample_screen'] = screen_samples
-                self.debug_info['prediction_sample_world'] = world_samples
+                self.debug_info['prediction_sample_frame'] = frame_samples
                 if self.debug_predictor:
                     print('PRED_DBG: in=', input_count, 'drawn=', self.debug_info['prediction_points_drawn'])
                     print('PRED_DBG: screen_samples=', screen_samples)
-                    print('PRED_DBG: world_samples=', world_samples)
+                    print('PRED_DBG: frame_samples=', frame_samples)
         except Exception:
             pass
 
@@ -927,8 +1252,7 @@ class Renderer:
                                            anchor_world=None):
         half_w = self.width * 0.5
         half_h = self.height * 0.5
-        cam_x = float(camera.position.x)
-        cam_y = float(camera.position.y)
+        camera_frame_xy = self._frame_camera_xy(camera)
         scale = float(camera.scale)
 
         # If an anchor_world is provided, compute the world-space delta
@@ -959,8 +1283,20 @@ class Renderer:
                     px = float(px) + delta_world_x
                     py = float(py) + delta_world_y
 
-            sx = half_w + (px - cam_x) * scale
-            sy = half_h - (py - cam_y) * scale
+            # If point includes timestamp (x,y,t), use time-aware projection.
+            sample_time = None
+            try:
+                if hasattr(point, '__len__') and len(point) >= 3:
+                    sample_time = float(point[2])
+            except Exception:
+                sample_time = None
+
+            if sample_time is not None:
+                sx, sy = self._world_to_screen_xy_at_time(px, py, camera, sample_time)
+            else:
+                frame_x, frame_y = self._frame_transform_xy(px, py)
+                sx = half_w + (frame_x - camera_frame_xy[0]) * scale
+                sy = half_h - (frame_y - camera_frame_xy[1]) * scale
             screen_points.append((sx, sy))
 
         runs = self._visible_window_runs(screen_points, margin_px)
@@ -1125,6 +1461,9 @@ class Renderer:
             f"Scale: {camera.scale:.2e} px/m",
             f"Position: ({camera.position.x:.2e}, {camera.position.y:.2e})",
             f"Target: {camera.target.name if camera.target else 'None'}",
+            f"Plot frame: {self._plotting_frame_label}",
+            f"Target overlay: {self._target_frame_label if self._target_frame_label else 'OFF'}",
+            f"Ref trails: {'ON' if self.reference_trajectories_enabled else 'OFF'}",
             f"Time step: {camera.sim_dt:.2e} s/step",
             f"Bodies rendered: {self.debug_info['bodies_rendered']}",
             f"FXAA: {'ON' if self.enable_fxaa else 'OFF'}",
@@ -1147,11 +1486,11 @@ class Renderer:
                     f"pending={async_status['pending']} swapped={async_status['swapped_jobs']}"
                 )
 
-        texts.append("[WASD] Move | [F] Unfollow | [Scroll] Zoom")
+        texts.append("[WASD] Move | [F] Unfollow | [Scroll] Zoom | [R] Cycle ref | [1]/[2] Frame mode | [T] Target overlay")
         
         # Pygame Surface für HUD erstellen
         line_height = 22
-        hud_width = 520
+        hud_width = 980
         hud_height = max(40, len(texts) * line_height + 8)
         hud_surface = pygame.Surface((hud_width, hud_height), pygame.SRCALPHA)
         

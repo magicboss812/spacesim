@@ -24,6 +24,8 @@ class body:
         self.theta = theta0
         self.is_moon_of = is_moon_of
         self.scripted_orbit = fixed
+        # Argument of periapsis / orbit rotation (radians)
+        self.arg_periapsis = 0.0
         self.released = False
         self.color = color
         
@@ -34,20 +36,33 @@ class body:
         self.atmosphere_color = atmosphere_color if self.has_atmosphere else (0, 0, 0)
     def orbit_position(self, dt, parent_position=None, mu=None):
             """Berechnet Position basierend auf Orbit, nur für Planeten"""
-            if self.semi_major_axis == 0.0 or mu == 0.0:
+            if self.semi_major_axis == 0.0 or mu is None or mu == 0.0:
                 return self.position
-            a = self.semi_major_axis
-            e = self.eccentricity
-            # Aktueller Radius
-            r = a * (1 - e**2) / (1 + e * math.cos(self.theta))
-            # Momentane Geschwindigkeit tangential
-            v = math.sqrt(mu * (2/r - 1/a))
-            # Winkelgeschwindigkeit: omega = v / r
-            omega = v / r
-            # true anomaly update
+
+            a = float(self.semi_major_axis)
+            e = float(self.eccentricity)
+
+            # Aktueller Radius aus Kepler-Formel
+            r = a * (1.0 - e * e) / (1.0 + e * math.cos(self.theta))
+
+            # Momentane Geschwindigkeit (approx) und Winkelgeschwindigkeit
+            # Use vis-viva for speed magnitude; angular speed approx = v / r
+            v = math.sqrt(max(0.0, mu * (2.0 / r - 1.0 / a)))
+            omega = v / max(1e-12, r)
+
+            # Advance true anomaly
             self.theta += omega * dt
-            x = r * math.cos(self.theta)
-            y = r * math.sin(self.theta)
+
+            # Position in orbital plane (periapsis at angle 0)
+            x_orb = r * math.cos(self.theta)
+            y_orb = r * math.sin(self.theta)
+
+            # Rotate by argument of periapsis to world coordinates
+            c = math.cos(self.arg_periapsis)
+            s = math.sin(self.arg_periapsis)
+            x = x_orb * c - y_orb * s
+            y = x_orb * s + y_orb * c
+
             pos = Vec2(x, y)
             if parent_position is not None:
                 pos += parent_position
