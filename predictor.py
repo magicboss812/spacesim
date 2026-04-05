@@ -13,7 +13,7 @@ NUMBA_AVAILABLE = True
 
 
 if NUMBA_AVAILABLE:
-    @njit(cache=True, nogil=True, fastmath=True)
+    @njit(cache=True, nogil=True, fastmath=True, parallel=True)
     def _compute_acc_numba(x, y, body_x, body_y, body_m, body_fixed, G):
         ax = 0.0
         ay = 0.0
@@ -177,7 +177,7 @@ class Predictor:
         # Keep recompute cadence frame-based so it is independent from sim timestep.
         self.recompute_every_update = recompute_every_update
 
-        self.workers = 7 if workers is None else int(workers)
+        self.workers = 12 if workers is None else int(workers)
         self.use_numba = True
 
         # Optional zoom-aware precision: when zooming in, use finer spacing
@@ -231,7 +231,12 @@ class Predictor:
         self._view_scale_changed = False
 
         if self.async_compute:
-            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="predictor")
+            max_workers = 1
+            self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
+            # Use `_pending_futures` for multi-worker mode; keep
+            # `_pending_future` for backward compatibility.
+            self._pending_futures = []
+            self._single_flight = True
 
     def reset(self):
         self._cancel_pending_job()
@@ -298,7 +303,7 @@ class Predictor:
             # If zoom changed significantly, cancel any pending async job so
             # we don't accept results computed with the previous precision.
             try:
-                if old is not None and self.async_compute and self._pending_future is not None:
+                if old is not None and self.async_compute and len(getattr(self, "_pending_futures", [])) > 0:
                     rel = abs(self._view_scale - old) / max(abs(old), 1e-30)
                     if rel > 0.02:
                         if self.debug:
@@ -443,11 +448,25 @@ class Predictor:
         return pts
 
     def _cancel_pending_job(self):
-        if self._pending_future is None:
+    # Cancel all pending futures (supports multi-worker mode).
+        pending = getattr(self, "_pending_futures", None)
+        if pending is None:
+            # backward compat: single future
+            if self._pending_future is None:
+                return
+            if not self._pending_future.done():
+                self._pending_future.cancel()
+            self._pending_future = None
+            self._pending_job_id = 0
             return
-        if not self._pending_future.done():
-            self._pending_future.cancel()
-        self._pending_future = None
+
+        for job_id, fut in list(pending):
+            try:
+                if not fut.done():
+                    fut.cancel()
+            except Exception:
+                pass
+        pending.clear()
         self._pending_job_id = 0
 
     def _make_snapshot(self, ship, world, max_points):
@@ -530,36 +549,61 @@ class Predictor:
         return {"points": points, "snapshot": snapshot}
 
     def _submit_async_compute(self, ship, world, max_points):
-        if self._executor is None:
-            return
-        # Don't submit new compute jobs while view-change cooldown is active.
-        try:
-            if time.time() < getattr(self, '_view_change_cooldown_until', 0.0):
-                if self.debug:
-                    print("PRED_DBG_SUBMIT_SKIPPED: view-change cooldown active")
+        pending = getattr(self, "_pending_futures", [])
+
+        # 🚀 SINGLE-FLIGHT: only allow ONE job at a time
+        if self._single_flight:
+            if len(pending) > 0:
+                # Already computing → don't queue more
                 return
-        except Exception:
-            pass
+
         snapshot = self._make_snapshot(ship, world, max_points)
-        if self.debug:
-            print(
-                f"PRED_DBG_SUBMIT: job={self._next_job_id} submit_ts={snapshot.get('submit_ts',0.0):.6f} "
-                f"view_scale={snapshot.get('view_scale',None)} "
-                f"ship_v=({snapshot['ship_vx']:.3f},{snapshot['ship_vy']:.3f}) max_pts={snapshot['max_points']}"
-            )
-        self._pending_future = self._executor.submit(self._compute_from_snapshot, snapshot)
-        self._pending_job_id = self._next_job_id
+        fut = self._executor.submit(self._compute_from_snapshot, snapshot)
+        job_id = self._next_job_id
+
+        # Replace queue instead of appending endlessly
+        if self._single_flight:
+            self._pending_futures = [(job_id, fut)]
+        else:
+            self._pending_futures.append((job_id, fut))
+
         self._next_job_id += 1
         self._jobs_submitted += 1
 
     def _swap_ready_result(self, current_ship=None, current_world=None):
-        if self._pending_future is None or not self._pending_future.done():
-            return False
+        pending = getattr(self, "_pending_futures", None)
 
-        finished_future = self._pending_future
-        finished_job_id = self._pending_job_id
-        self._pending_future = None
-        self._pending_job_id = 0
+        # Ensure pending is always a list (simplifies logic)
+        if pending is None:
+            pending = []
+
+        if not pending:
+            # backward compatibility to single-future mode
+            if self._pending_future is None or not self._pending_future.done():
+                return False
+            finished_future = self._pending_future
+            finished_job_id = self._pending_job_id
+            self._pending_future = None
+            self._pending_job_id = 0
+        else:
+            finished_future = None
+            finished_job_id = None
+
+            # Optional: prevent queue buildup (THIS is where your bug came from)
+            if len(pending) > 2:
+                # Drop oldest jobs (keep newest 2)
+                pending[:] = pending[-2:]
+
+            # find first completed future
+            for idx, (jid, fut) in enumerate(pending):
+                if fut.done():
+                    finished_future = fut
+                    finished_job_id = jid
+                    pending.pop(idx)
+                    break
+
+            if finished_future is None:
+                return False
 
         try:
             result = finished_future.result()
@@ -618,33 +662,21 @@ class Predictor:
                 is_stale_pos = pos_delta > allowed_pos
 
                 if is_stale_view or is_stale_speed or is_stale_pos:
-                    if self.debug:
-                        print(
-                            f"PRED_DBG_STALE: job={finished_job_id} submit_ts={submit_ts:.6f} "
-                            f"dv=({dvx:.3f},{dvy:.3f}) |dv|={delta_speed:.3f} allowed_speed={allowed_speed:.3f} "
-                            f"pos_delta={pos_delta:.3f} allowed_pos={allowed_pos:.3f} age={age:.3f} view_stale={is_stale_view}"
-                        )
                     # If staleness is caused by a view/zoom change, just discard
                     # the result and do NOT force a synchronous recompute; a
                     # fresh job will be (re)submitted after the view cooldown.
                     if is_stale_view:
-                        if self.debug:
-                            print(f"PRED_DBG_STALE_VIEW: job={finished_job_id} snap_view={snap_view} cur_view={self._view_scale}")
                         return False
 
                     # For dynamics-based staleness (velocity/position), optionally
                     # force a synchronous recompute to get an up-to-date curve.
                     if self.force_sync_on_stale and current_world is not None:
-                        if self.debug:
-                            print("PREDICTOR: forcing synchronous recompute due to stale snapshot (dynamics)")
                         self._compute_full(current_ship, current_world)
                         self._anchor_first_point(current_ship)
                         self._last_swapped_job_id = finished_job_id
                         self._jobs_swapped += 1
                         return True
                     else:
-                        if self.debug:
-                            print("PREDICTOR: discarding stale async snapshot (dynamics)")
                         return False
 
             # Accept result
@@ -662,13 +694,8 @@ class Predictor:
                     svx = float(snapshot.get("ship_vx", 0.0))
                     svy = float(snapshot.get("ship_vy", 0.0))
                     stime = snapshot.get("time", 0.0)
-                    print(
-                        f"PRED_DBG_SWAP: job={finished_job_id} time={stime:.6f} ship_v=({svx:.3f},{svy:.3f}) pts={cnt}"
-                    )
             return True
         except Exception as exc:
-            if self.debug:
-                print(f"PREDICTOR: async compute failed ({exc})")
             return False
 
     def _get_target_point_cap(self):
@@ -727,11 +754,6 @@ class Predictor:
                 return
 
             if self.recompute_every_update:
-                if self.debug:
-                    print(
-                        f"PREDICTOR_UPDATE: recomputing full predictor "
-                        f"num_points={self.num_points} current_points={self._points_count()} removed=0 mode=frame"
-                    )
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship)
                 return
@@ -739,11 +761,6 @@ class Predictor:
             removed = self.remove_passed_points(ship)
             target_points = self._get_target_point_cap()
             if self._points_count() < target_points:
-                if self.debug:
-                    print(
-                        f"PREDICTOR_UPDATE: recomputing full predictor "
-                        f"target_points={target_points} current_points={self._points_count()} removed={removed}"
-                    )
                 self._compute_full(ship, world)
             self._anchor_first_point(ship)
             return
@@ -752,8 +769,6 @@ class Predictor:
         # now so the predictor matches the new zoom on the same frame.
         if getattr(self, '_view_scale_changed', False):
             if ship is not None and world is not None:
-                if self.debug:
-                    print("PRED_DBG_SYNC_RECOMPUTE: view-scale changed, computing synchronously now")
                 # Cancel any pending async job and compute immediately.
                 self._cancel_pending_job()
                 self._compute_full(ship, world)
@@ -764,16 +779,15 @@ class Predictor:
         swapped = self._swap_ready_result(ship, world)
         target_points = self._get_target_point_cap()
 
-        if not self.initialized and self._pending_future is None:
+        if not self.initialized:
             self._submit_async_compute(ship, world, target_points)
             return
 
         if not self.recompute_every_update:
             self.remove_passed_points(ship)
 
-        if self._pending_future is None:
-            if self.recompute_every_update or self._points_count() < target_points or swapped:
-                self._submit_async_compute(ship, world, target_points)
+        if self.recompute_every_update or self._points_count() < target_points or swapped:
+            self._submit_async_compute(ship, world, target_points)
 
         if self.initialized:
             self._anchor_first_point(ship)
@@ -830,7 +844,7 @@ class Predictor:
     def get_async_status(self):
         return {
             "enabled": self.async_compute,
-            "pending": self._pending_future is not None,
+            "pending": len(getattr(self, "_pending_futures", [])) > 0,
             "submitted_jobs": self._jobs_submitted,
             "swapped_jobs": self._jobs_swapped,
             "last_swapped_job_id": self._last_swapped_job_id,
@@ -857,44 +871,64 @@ class Predictor:
         sx = float(ship.position.x)
         sy = float(ship.position.y)
 
+        # Optimized numpy branch: compute distances vectorized and remove
+        # a single contiguous prefix in one slice operation to avoid
+        # repeated copying on the main thread.
         if np is not None and isinstance(self.points, np.ndarray):
-            while self.points.shape[0] > 1:
-                dx0 = self.points[0, 0] - sx
-                dy0 = self.points[0, 1] - sy
-                d0 = dx0 * dx0 + dy0 * dy0
-                dx1 = self.points[1, 0] - sx
-                dy1 = self.points[1, 1] - sy
-                d1 = dx1 * dx1 + dy1 * dy1
-                if d1 < d0:
-                    self.points = self.points[1:]
-                    removed += 1
-                else:
-                    break
+            if self.points.shape[0] <= 1:
+                return 0
+            coords = self.points[:, :2]
+            dx = coords[:, 0] - sx
+            dy = coords[:, 1] - sy
+            dsq = dx * dx + dy * dy
+            # diffs between consecutive distances
+            diffs = dsq[1:] - dsq[:-1]
+            idxs = np.nonzero(diffs >= 0)[0]
+            if idxs.size == 0:
+                # distances strictly decreasing: remove all but last point
+                remove_count = max(0, self.points.shape[0] - 1)
+            else:
+                remove_count = int(idxs[0])
+            if remove_count > 0:
+                self.points = self.points[remove_count:]
+                removed += remove_count
         else:
-            while len(self.points) > 1:
-                try:
-                    p0 = self.points[0]
-                    p1 = self.points[1]
-                    # handle triples (x,y,t) or Vec2
+            # List/Vec2 branch: scan for the first non-decreasing pair,
+            # then delete the prefix in one operation to reduce copies.
+            n = len(self.points)
+            if n <= 1:
+                return 0
+            remove_count = 0
+            try:
+                for i in range(n - 1):
+                    p0 = self.points[i]
+                    p1 = self.points[i + 1]
                     if hasattr(p0, 'distance_squared_to'):
                         d0 = p0.distance_squared_to(ship.position)
                         d1 = p1.distance_squared_to(ship.position)
                     else:
                         x0 = float(p0[0]); y0 = float(p0[1])
                         x1 = float(p1[0]); y1 = float(p1[1])
-                        dx0 = x0 - sx
-                        dy0 = y0 - sy
-                        dx1 = x1 - sx
-                        dy1 = y1 - sy
+                        dx0 = x0 - sx; dy0 = y0 - sy
+                        dx1 = x1 - sx; dy1 = y1 - sy
                         d0 = dx0 * dx0 + dy0 * dy0
                         d1 = dx1 * dx1 + dy1 * dy1
-
                     if d1 < d0:
-                        self.points.pop(0)
-                        removed += 1
+                        remove_count += 1
                     else:
                         break
+            except Exception:
+                remove_count = 0
+            if remove_count > 0:
+                try:
+                    del self.points[:remove_count]
                 except Exception:
-                    break
+                    # fallback to repeated pops if del fails for some types
+                    for _ in range(remove_count):
+                        try:
+                            self.points.pop(0)
+                        except Exception:
+                            break
+                removed += remove_count
 
         return removed
