@@ -67,7 +67,7 @@ def main():
     # distance_interval: Abstand zwischen Punkten in Metern (kleiner = genauer)
     predictor = Predictor(num_points=10000, dt=1000.0, recompute_every_update=True)  # 1M Meter pro Punkt
     # Diagnostic: force synchronous recompute on stale async snapshots
-    predictor.force_sync_on_stale = True
+    predictor.force_sync_on_stale = False
     print("PREDICTOR DEBUG: force_sync_on_stale = True")
 
     # Schiff-Steuerung initialisieren

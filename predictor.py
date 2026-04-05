@@ -7,8 +7,7 @@ import poliastro
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from numba import njit
-
-# Predictor is intentionally Numba-only in this workspace.
+# Predictor ist absichtlich Numba-only
 NUMBA_AVAILABLE = True
 
 
@@ -147,6 +146,136 @@ if NUMBA_AVAILABLE:
             t += dt
 
         return out, count
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _compute_distance_points_numba_state(
+        init_px,
+        init_py,
+        init_vx,
+        init_vy,
+        init_t,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        G,
+        dt,
+        precision,
+        max_points,
+        max_iters,
+    ):
+        # Columns: x, y, t, vx, vy
+        out = np.empty((max_points, 5), dtype=np.float64)
+        out[0, 0] = init_px
+        out[0, 1] = init_py
+        out[0, 2] = init_t
+        out[0, 3] = init_vx
+        out[0, 4] = init_vy
+
+        count = 1
+        px = init_px
+        py = init_py
+        vx = init_vx
+        vy = init_vy
+        accumulated = 0.0
+
+        t = init_t
+        for _ in range(max_iters):
+            if count >= max_points:
+                break
+
+            k1_ax, k1_ay = _compute_acc_numba(px, py, body_x, body_y, body_m, body_fixed, G)
+            k1_vx, k1_vy = vx, vy
+
+            p2x = px + k1_vx * (dt / 2.0)
+            p2y = py + k1_vy * (dt / 2.0)
+            v2x = vx + k1_ax * (dt / 2.0)
+            v2y = vy + k1_ay * (dt / 2.0)
+            k2_ax, k2_ay = _compute_acc_numba(p2x, p2y, body_x, body_y, body_m, body_fixed, G)
+            k2_vx, k2_vy = v2x, v2y
+
+            p3x = px + k2_vx * (dt / 2.0)
+            p3y = py + k2_vy * (dt / 2.0)
+            v3x = vx + k2_ax * (dt / 2.0)
+            v3y = vy + k2_ay * (dt / 2.0)
+            k3_ax, k3_ay = _compute_acc_numba(p3x, p3y, body_x, body_y, body_m, body_fixed, G)
+            k3_vx, k3_vy = v3x, v3y
+
+            p4x = px + k3_vx * dt
+            p4y = py + k3_vy * dt
+            v4x = vx + k3_ax * dt
+            v4y = vy + k3_ay * dt
+            k4_ax, k4_ay = _compute_acc_numba(p4x, p4y, body_x, body_y, body_m, body_fixed, G)
+            k4_vx, k4_vy = v4x, v4y
+
+            next_px = px + (k1_vx + 2.0 * k2_vx + 2.0 * k3_vx + k4_vx) * (dt / 6.0)
+            next_py = py + (k1_vy + 2.0 * k2_vy + 2.0 * k3_vy + k4_vy) * (dt / 6.0)
+            next_vx = vx + (k1_ax + 2.0 * k2_ax + 2.0 * k3_ax + k4_ax) * (dt / 6.0)
+            next_vy = vy + (k1_ay + 2.0 * k2_ay + 2.0 * k3_ay + k4_ay) * (dt / 6.0)
+
+            seg_dx = next_px - px
+            seg_dy = next_py - py
+            seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+
+            if seg_len <= 0.0:
+                px = next_px
+                py = next_py
+                vx = next_vx
+                vy = next_vy
+                t += dt
+                continue
+
+            local_px = px
+            local_py = py
+            local_vx = vx
+            local_vy = vy
+            rem_dx = seg_dx
+            rem_dy = seg_dy
+            rem_len = seg_len
+
+            while rem_len + accumulated >= precision and count < max_points:
+                if rem_len <= 0.0:
+                    break
+
+                distance_to_place = precision - accumulated
+                frac = distance_to_place / rem_len
+
+                sample_px = local_px + rem_dx * frac
+                sample_py = local_py + rem_dy * frac
+                sample_t = t + frac * dt
+                sample_vx = local_vx + (next_vx - local_vx) * frac
+                sample_vy = local_vy + (next_vy - local_vy) * frac
+
+                out[count, 0] = sample_px
+                out[count, 1] = sample_py
+                out[count, 2] = sample_t
+                out[count, 3] = sample_vx
+                out[count, 4] = sample_vy
+                count += 1
+
+                local_px = sample_px
+                local_py = sample_py
+                local_vx = sample_vx
+                local_vy = sample_vy
+
+                rem_dx = next_px - local_px
+                rem_dy = next_py - local_py
+                rem_len = math.sqrt(rem_dx * rem_dx + rem_dy * rem_dy)
+                accumulated = 0.0
+
+            if rem_len + accumulated < precision:
+                accumulated += rem_len
+
+            px = next_px
+            py = next_py
+            vx = next_vx
+            vy = next_vy
+            t += dt
+
+        return out, count
+
+
 class Predictor:
     def __init__(
         self,
@@ -160,87 +289,70 @@ class Predictor:
         use_numba=True,
         async_compute=True,
     ):
-        # num_points: hard cap on returned points
-        # dt: internal integration timestep (seconds)
-        # precision: desired spacing between successive predictor points (meters)
-        # length: optional total distance horizon (meters). If None, num_points is used as cap.
+        
         self.num_points = int(num_points)
         self.dt = float(dt)
         self.precision = float(precision)
-        # base_precision is the reference spacing used to compute point budget when length is set
         self.base_precision = float(precision)
         self.length = None if length is None else float(length)
 
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
         self.initialized = False
-        # Keep recompute cadence frame-based so it is independent from sim timestep.
         self.recompute_every_update = recompute_every_update
 
         self.workers = 12 if workers is None else int(workers)
         self.use_numba = True
 
-        # Optional zoom-aware precision: when zooming in, use finer spacing
-        # so rendering can show more local detail without manual key presses.
         self.auto_precision_from_zoom = True
         self.target_screen_step_px = 2.0
         self.min_precision = 1.0
         self._view_scale = None
 
         self.async_compute = bool(async_compute)
+
+        self.rolling_mode = True
+        self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self._executor = None
         self._pending_future = None
+        self._pending_futures = []
         self._pending_job_id = 0
         self._next_job_id = 1
         self._last_swapped_job_id = 0
         self._jobs_submitted = 0
         self._jobs_swapped = 0
+        self._single_flight = True
+
+        self._computed_since_last_update = 0
         
-        # Metadata about the last swapped async result (snapshot dict)
+
         self._last_swapped_snapshot = None
 
-        # Tolerances for detecting stale async snapshots. If the speed
-        # difference between the snapshot and the current ship exceeds
-        # max(abs_tol, rel_tol * current_speed) the snapshot is considered stale.
         self.snapshot_velocity_rel_tol = 0.01
         self.snapshot_velocity_abs_tol = 100.0
-        # Position-based staleness threshold (meters). If the distance
-        # between snapshot ship position and current ship position exceeds
-        # this (or the velocity*age allowance below), the snapshot is stale.
+
         self.snapshot_position_abs_tol = 1000.0
 
-        # If True, force a synchronous recompute when a stale snapshot
-        # is detected (may cause frame hitching). Default: False.
         self.force_sync_on_stale = False
 
-        # View-change cooldown: while zoom is changing, avoid submitting or
-        # swapping predictor results to prevent visual jumps. Seconds.
-        # Default to 0.0 so we don't artificially delay submitting new
-        # computations after a zoom; use view-scale checks at swap time
-        # instead to reject mismatched results.
+
         self.view_change_cooldown = 0.0
         self._view_change_cooldown_until = 0.0
-        # Relative tolerance for considering a snapshot computed at a
-        # different view scale as stale. Tighten this to avoid accepting
-        # results computed for a slightly different zoom level.
+
         self.snapshot_view_rel_tol = 1e-6
 
-        # Internal flag set when view-scale changes significantly. When True
-        # `update()` will perform a synchronous recompute immediately so the
-        # predictor matches the new zoom on the same frame.
         self._view_scale_changed = False
 
-        if self.async_compute:
-            max_workers = 1
+        if self.async_compute and not self.rolling_mode:
+            max_workers = max(1, int(self.workers))
             self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
-            # Use `_pending_futures` for multi-worker mode; keep
-            # `_pending_future` for backward compatibility.
+
             self._pending_futures = []
-            self._single_flight = True
 
     def reset(self):
         self._cancel_pending_job()
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+        self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
 
     def _points_count(self):
@@ -264,6 +376,65 @@ class Predictor:
                 t0 = 0.0
             self.points[0] = (sx, sy, t0)
 
+    def _count_recomputed_points(self, old_points, new_points, tol=1e-6):
+        """Return number of entries in `new_points` that differ from `old_points`.
+
+        Comparison skips the first point (anchor) and treats any extra tail
+        in `new_points` beyond `old_points` as newly computed.
+        """
+        try:
+            if old_points is None:
+                old_len = 0
+            else:
+                if np is not None and isinstance(old_points, np.ndarray):
+                    old_len = int(old_points.shape[0])
+                else:
+                    old_len = len(old_points)
+        except Exception:
+            old_len = 0
+
+        try:
+            if new_points is None:
+                return 0
+            if np is not None and isinstance(new_points, np.ndarray):
+                new_len = int(new_points.shape[0])
+            else:
+                new_len = len(new_points)
+        except Exception:
+            return 0
+
+        if old_len <= 0:
+            return max(0, new_len)
+
+        try:
+            if np is not None and isinstance(new_points, np.ndarray) and isinstance(old_points, np.ndarray):
+                old_arr = old_points
+                new_arr = new_points
+            else:
+                old_arr = np.array(old_points, dtype=np.float64)
+                new_arr = np.array(new_points, dtype=np.float64)
+        except Exception:
+            try:
+                old_arr = np.array(old_points, dtype=np.float64)
+                new_arr = np.array(new_points, dtype=np.float64)
+            except Exception:
+                return max(0, new_len)
+
+        min_len = min(int(old_arr.shape[0]), int(new_arr.shape[0]))
+
+        if min_len <= 1:
+            changed_in_overlap = 0
+        else:
+            a = old_arr[1:min_len, :2]
+            b = new_arr[1:min_len, :2]
+            diffs = np.abs(a - b) > float(tol)
+            rows_changed = np.any(diffs, axis=1)
+            changed_in_overlap = int(np.count_nonzero(rows_changed))
+
+        added_tail = max(0, int(new_arr.shape[0]) - int(old_arr.shape[0]))
+
+        return changed_in_overlap + added_tail
+
     def set_view_scale(self, scale: float):
         try:
             scale = float(scale)
@@ -272,9 +443,6 @@ class Predictor:
         if scale > 0.0:
             old = self._view_scale
 
-            # If the scale hasn't changed meaningfully, do nothing.
-            # This avoids resetting the short view-change cooldown every frame
-            # when `set_view_scale` is called repeatedly with the same value.
             if old is not None:
                 try:
                     rel_change = abs(scale - old) / max(abs(old), 1e-30)
@@ -283,10 +451,9 @@ class Predictor:
                 if rel_change <= self.snapshot_view_rel_tol:
                     return
 
-            # Apply the new scale and emit debug info for real changes.
+
             self._view_scale = scale
-            # Flag that the view scale changed so the next update() call
-            # can synchronously recompute immediately (same-frame fix).
+ 
             try:
                 self._view_scale_changed = True
                 if self.debug:
@@ -300,8 +467,7 @@ class Predictor:
                     eff = self.precision
                 print(f"PRED_DBG_VIEW_SCALE: old={old} new={self._view_scale} eff_precision={eff}")
 
-            # If zoom changed significantly, cancel any pending async job so
-            # we don't accept results computed with the previous precision.
+  
             try:
                 if old is not None and self.async_compute and len(getattr(self, "_pending_futures", [])) > 0:
                     rel = abs(self._view_scale - old) / max(abs(old), 1e-30)
@@ -312,8 +478,6 @@ class Predictor:
             except Exception:
                 pass
 
-            # Start a short cooldown during which submissions/swaps are skipped
-            # to avoid visual jumps while the user is actively zooming.
             try:
                 self._view_change_cooldown_until = time.time() + float(self.view_change_cooldown)
                 if self.debug:
@@ -331,7 +495,7 @@ class Predictor:
     def _serialize_bodies(self, world):
         lst = []
         for b in world.body:
-            # Include all bodies as gravitational sources (use current positions)
+
             lst.append((b.position.x, b.position.y, b.mass, True))
         return lst
 
@@ -345,7 +509,7 @@ class Predictor:
             body_x[i] = float(b.position.x)
             body_y[i] = float(b.position.y)
             body_m[i] = float(b.mass)
-            # Treat all bodies as gravitational sources for predictor
+
             body_fixed[i] = 1
         return body_x, body_y, body_m, body_fixed
 
@@ -451,7 +615,7 @@ class Predictor:
     # Cancel all pending futures (supports multi-worker mode).
         pending = getattr(self, "_pending_futures", None)
         if pending is None:
-            # backward compat: single future
+
             if self._pending_future is None:
                 return
             if not self._pending_future.done():
@@ -483,8 +647,7 @@ class Predictor:
             "max_iters": int(max(10000, max_points * 100)),
             "numba": True,
         }
-        # include simulation time when available for staleness diagnostics
-        # Record both simulation time and wall-clock submit timestamp.
+
         try:
             snapshot["sim_time"] = float(world.time)
         except Exception:
@@ -493,8 +656,7 @@ class Predictor:
             snapshot["submit_ts"] = float(time.time())
         except Exception:
             snapshot["submit_ts"] = 0.0
-        # Record the view scale used when creating this snapshot so that
-        # results computed for a different zoom level can be considered stale.
+
         try:
             snapshot["view_scale"] = float(self._view_scale) if self._view_scale is not None else None
         except Exception:
@@ -523,8 +685,8 @@ class Predictor:
             snapshot["max_iters"],
         )
         points = out[:int(used)].copy()
+        computed_count = int(used)
 
-        # Convert per-sample times (relative to snapshot) to absolute sim time
         try:
             base_sim_time = float(snapshot.get("sim_time", 0.0)) if snapshot is not None else 0.0
         except Exception:
@@ -535,7 +697,7 @@ class Predictor:
                 points = points.copy()
                 points[:, 2] = points[:, 2] + base_sim_time
             else:
-                # list of triples
+
                 pts = []
                 for p in points:
                     try:
@@ -546,15 +708,150 @@ class Predictor:
         except Exception:
             pass
 
-        return {"points": points, "snapshot": snapshot}
+        return {"points": points, "snapshot": snapshot, "computed": computed_count}
+
+    def _compute_full_rolling(self, ship, world):
+        if self.num_points <= 0:
+            self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+            self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
+            self.initialized = True
+            return
+
+        if self.precision <= 0.0:
+            raise ValueError("Predictor precision must be > 0")
+
+        max_points = self._get_target_point_cap()
+        snapshot = self._make_snapshot(ship, world, max_points)
+        base_t = float(snapshot.get("sim_time", 0.0))
+
+        out, used = _compute_distance_points_numba_state(
+            snapshot["ship_px"],
+            snapshot["ship_py"],
+            snapshot["ship_vx"],
+            snapshot["ship_vy"],
+            base_t,
+            snapshot["body_x"],
+            snapshot["body_y"],
+            snapshot["body_m"],
+            snapshot["body_fixed"],
+            snapshot["G"],
+            snapshot["dt"],
+            snapshot["precision"],
+            snapshot["max_points"],
+            snapshot["max_iters"],
+        )
+
+        states = out[:int(used)].copy()
+        new_points = states[:, :3].copy() if (np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0) else np.empty((0, 3), dtype=np.float64)
+
+        try:
+            old_points = self.points if (np is not None and isinstance(self.points, np.ndarray)) else np.array(self.points, dtype=np.float64) if self.points is not None else None
+        except Exception:
+            old_points = None
+        try:
+            changed = int(self._count_recomputed_points(old_points, new_points))
+        except Exception:
+            changed = int(new_points.shape[0]) if (hasattr(new_points, 'shape')) else 0
+        try:
+            self._computed_since_last_update += changed
+        except Exception:
+            pass
+        self._roll_states = states
+        if np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0:
+            self.points = new_points.copy()
+        else:
+            self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+        self.initialized = True
+        self._last_swapped_snapshot = snapshot
+
+    def _append_rolling_tail(self, world, missing_points):
+        if missing_points <= 0:
+            return 0
+        if np is None or not isinstance(self._roll_states, np.ndarray) or self._roll_states.shape[0] == 0:
+            return 0
+
+        tail = self._roll_states[-1]
+        init_px = float(tail[0])
+        init_py = float(tail[1])
+        init_t = float(tail[2])
+        init_vx = float(tail[3])
+        init_vy = float(tail[4])
+
+        body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
+        max_new_points = int(missing_points) + 1  # include seed sample at index 0
+        max_iters = int(max(10000, max_new_points * 100))
+
+        out, used = _compute_distance_points_numba_state(
+            init_px,
+            init_py,
+            init_vx,
+            init_vy,
+            init_t,
+            body_x,
+            body_y,
+            body_m,
+            body_fixed,
+            float(world.G),
+            float(self.dt),
+            float(self._effective_precision()),
+            max_new_points,
+            max_iters,
+        )
+
+        if int(used) <= 1:
+            return 0
+
+        to_add = out[1:int(used)].copy()
+        if to_add.shape[0] > missing_points:
+            to_add = to_add[:missing_points]
+        if to_add.shape[0] <= 0:
+            return 0
+
+        self._roll_states = np.concatenate((self._roll_states, to_add), axis=0)
+        self.points = self._roll_states[:, :3].copy()
+        added = int(to_add.shape[0])
+        try:
+            self._computed_since_last_update += added
+        except Exception:
+            pass
+        return added
+
+    def _update_rolling(self, ship, world):
+        # On first run or when zoom changed (auto precision), rebuild once.
+        if (not self.initialized) or (
+            np is None or not isinstance(self._roll_states, np.ndarray) or self._roll_states.shape[0] == 0
+        ) or getattr(self, "_view_scale_changed", False):
+            self._compute_full_rolling(ship, world)
+            self._view_scale_changed = False
+        else:
+            removed = self.remove_passed_points(ship)
+            if removed > 0 and np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
+                cut = min(int(removed), max(0, self._roll_states.shape[0] - 1))
+                if cut > 0:
+                    self._roll_states = self._roll_states[cut:]
+                self.points = self._roll_states[:, :3].copy()
+
+            target_points = self._get_target_point_cap()
+            missing = target_points - self._points_count()
+            if missing > 0:
+                self._append_rolling_tail(world, missing)
+
+        self._anchor_first_point(ship)
+        if np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
+            self._roll_states[0, 0] = float(ship.position.x)
+            self._roll_states[0, 1] = float(ship.position.y)
+            try:
+                self._roll_states[0, 2] = float(world.time)
+            except Exception:
+                pass
+            self._roll_states[0, 3] = float(ship.velocity.x)
+            self._roll_states[0, 4] = float(ship.velocity.y)
 
     def _submit_async_compute(self, ship, world, max_points):
         pending = getattr(self, "_pending_futures", [])
 
-        # 🚀 SINGLE-FLIGHT: only allow ONE job at a time
         if self._single_flight:
             if len(pending) > 0:
-                # Already computing → don't queue more
                 return
 
         snapshot = self._make_snapshot(ship, world, max_points)
@@ -573,12 +870,10 @@ class Predictor:
     def _swap_ready_result(self, current_ship=None, current_world=None):
         pending = getattr(self, "_pending_futures", None)
 
-        # Ensure pending is always a list (simplifies logic)
         if pending is None:
             pending = []
 
         if not pending:
-            # backward compatibility to single-future mode
             if self._pending_future is None or not self._pending_future.done():
                 return False
             finished_future = self._pending_future
@@ -589,9 +884,8 @@ class Predictor:
             finished_future = None
             finished_job_id = None
 
-            # Optional: prevent queue buildup (THIS is where your bug came from)
             if len(pending) > 2:
-                # Drop oldest jobs (keep newest 2)
+
                 pending[:] = pending[-2:]
 
             # find first completed future
@@ -608,7 +902,7 @@ class Predictor:
         try:
             result = finished_future.result()
 
-            # Normalize result: {"points": ..., "snapshot": ...}
+
             if isinstance(result, dict):
                 points = result.get("points")
                 snapshot = result.get("snapshot")
@@ -616,38 +910,31 @@ class Predictor:
                 points = result
                 snapshot = None
 
-            # If we have both a snapshot and the current ship, check
-            # whether the snapshot's velocity or position deviates
-            # significantly from the current ship velocity/position.
-            # Additionally treat snapshots computed for a different
-            # view scale as stale.
+
             if snapshot is not None and current_ship is not None:
                 svx = float(snapshot.get("ship_vx", 0.0))
                 svy = float(snapshot.get("ship_vy", 0.0))
                 cur_vx = float(current_ship.velocity.x)
                 cur_vy = float(current_ship.velocity.y)
-                # Use vector difference (magnitude) to capture direction+speed changes
+
                 dvx = cur_vx - svx
                 dvy = cur_vy - svy
                 delta_speed = math.hypot(dvx, dvy)
                 cur_speed = math.hypot(cur_vx, cur_vy)
                 allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
 
-                # Position-based staleness: compare snapshot ship pos vs current
+
                 spx = float(snapshot.get("ship_px", 0.0))
                 spy = float(snapshot.get("ship_py", 0.0))
                 cur_px = float(current_ship.position.x)
                 cur_py = float(current_ship.position.y)
                 pos_delta = math.hypot(cur_px - spx, cur_py - spy)
 
-                # Age in wall-clock seconds since submission
                 submit_ts = float(snapshot.get("submit_ts", 0.0))
                 age = max(0.0, time.time() - submit_ts)
                 allowed_pos = max(self.snapshot_position_abs_tol, self.snapshot_velocity_abs_tol * max(0.1, age))
 
-                # View-scale staleness: if snapshot was computed for a
-                # different view scale and the difference exceeds tol,
-                # consider it stale due to zoom change.
+
                 snap_view = snapshot.get("view_scale", None)
                 is_stale_view = False
                 try:
@@ -662,14 +949,11 @@ class Predictor:
                 is_stale_pos = pos_delta > allowed_pos
 
                 if is_stale_view or is_stale_speed or is_stale_pos:
-                    # If staleness is caused by a view/zoom change, just discard
-                    # the result and do NOT force a synchronous recompute; a
-                    # fresh job will be (re)submitted after the view cooldown.
+
                     if is_stale_view:
                         return False
 
-                    # For dynamics-based staleness (velocity/position), optionally
-                    # force a synchronous recompute to get an up-to-date curve.
+
                     if self.force_sync_on_stale and current_world is not None:
                         self._compute_full(current_ship, current_world)
                         self._anchor_first_point(current_ship)
@@ -679,7 +963,30 @@ class Predictor:
                     else:
                         return False
 
-            # Accept result
+
+            try:
+                old_points = self.points if (np is not None and isinstance(self.points, np.ndarray)) else np.array(self.points, dtype=np.float64) if self.points is not None else None
+            except Exception:
+                old_points = None
+
+         
+            try:
+                changed = int(self._count_recomputed_points(old_points, points))
+            except Exception:
+           
+                changed = None
+                if isinstance(result, dict):
+                    changed = result.get('computed', None)
+                if changed is None:
+                    try:
+                        changed = int(points.shape[0]) if (np is not None and hasattr(points, 'shape')) else int(len(points))
+                    except Exception:
+                        changed = 0
+            try:
+                self._computed_since_last_update += int(changed)
+            except Exception:
+                pass
+
             self.points = points
             self.initialized = True
             self._last_swapped_job_id = finished_job_id
@@ -699,12 +1006,7 @@ class Predictor:
             return False
 
     def _get_target_point_cap(self):
-        """Return desired maximum number of points determined by `length`.
 
-        Important: this cap is computed from `self.length` and the initial
-        `base_precision` so that changing `precision` later does not change
-        the target number of points while `length` is set.
-        """
         if self.num_points <= 0:
             return 0
 
@@ -716,6 +1018,10 @@ class Predictor:
         return min(self.num_points, max_by_length)
 
     def _compute_full(self, ship, world):
+        if self.rolling_mode:
+            self._compute_full_rolling(ship, world)
+            return
+
         if self.num_points <= 0:
             self.points = np.empty((0, 2), dtype=np.float64) if np is not None else []
             self.initialized = True
@@ -727,35 +1033,107 @@ class Predictor:
         max_points = self._get_target_point_cap()
 
         snapshot = self._make_snapshot(ship, world, max_points)
+
+        try:
+            old_points = self.points if (np is not None and isinstance(self.points, np.ndarray)) else np.array(self.points, dtype=np.float64) if self.points is not None else None
+        except Exception:
+            old_points = None
+
         result = self._compute_from_snapshot(snapshot)
         if isinstance(result, dict):
-            self.points = result["points"]
+            new_points = result["points"]
+            self.points = new_points
             self._last_swapped_snapshot = result.get("snapshot")
         else:
-            self.points = result
+            new_points = result
+            self.points = new_points
+
         self.initialized = True
+ 
+        try:
+            changed = int(self._count_recomputed_points(old_points, new_points))
+        except Exception:
+  
+            changed = None
+            if isinstance(result, dict):
+                changed = result.get('computed', None)
+            if changed is None:
+                try:
+                    changed = int(self.points.shape[0]) if (np is not None and hasattr(self.points, 'shape')) else int(len(self.points))
+                except Exception:
+                    changed = 0
+        try:
+            self._computed_since_last_update += int(changed)
+        except Exception:
+            pass
 
     def initialize(self, ship, world):
         self.reset()
+        if self.rolling_mode:
+            self._compute_full_rolling(ship, world)
+            self._anchor_first_point(ship)
+            if np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
+                self._roll_states[0, 0] = float(ship.position.x)
+                self._roll_states[0, 1] = float(ship.position.y)
+                try:
+                    self._roll_states[0, 2] = float(world.time)
+                except Exception:
+                    pass
+                self._roll_states[0, 3] = float(ship.velocity.x)
+                self._roll_states[0, 4] = float(ship.velocity.y)
+            return
         self._compute_full(ship, world)
         self._anchor_first_point(ship)
 
     def update(self, ship, world):
+        try:
+            self._computed_since_last_update = 0
+        except Exception:
+            pass
+
         if self.num_points <= 0:
             self.reset()
+            if self.debug:
+                try:
+                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                except Exception:
+                    pass
+            self._computed_since_last_update = 0
             return
 
         if self.precision <= 0.0:
             raise ValueError("Predictor precision must be > 0")
 
+        if self.rolling_mode:
+            self._update_rolling(ship, world)
+            if self.debug:
+                try:
+                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                except Exception:
+                    pass
+            self._computed_since_last_update = 0
+            return
+
         if not self.async_compute:
             if not self.initialized:
                 self.initialize(ship, world)
+                if self.debug:
+                    try:
+                        print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                    except Exception:
+                        pass
+                self._computed_since_last_update = 0
                 return
 
             if self.recompute_every_update:
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship)
+                if self.debug:
+                    try:
+                        print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                    except Exception:
+                        pass
+                self._computed_since_last_update = 0
                 return
 
             removed = self.remove_passed_points(ship)
@@ -763,17 +1141,27 @@ class Predictor:
             if self._points_count() < target_points:
                 self._compute_full(ship, world)
             self._anchor_first_point(ship)
+            if self.debug:
+                try:
+                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                except Exception:
+                    pass
+            self._computed_since_last_update = 0
             return
 
-        # If the view-scale just changed, perform a synchronous recompute
-        # now so the predictor matches the new zoom on the same frame.
+
         if getattr(self, '_view_scale_changed', False):
             if ship is not None and world is not None:
-                # Cancel any pending async job and compute immediately.
                 self._cancel_pending_job()
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship)
                 self._view_scale_changed = False
+                if self.debug:
+                    try:
+                        print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                    except Exception:
+                        pass
+                self._computed_since_last_update = 0
                 return
 
         swapped = self._swap_ready_result(ship, world)
@@ -781,6 +1169,12 @@ class Predictor:
 
         if not self.initialized:
             self._submit_async_compute(ship, world, target_points)
+            if self.debug:
+                try:
+                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                except Exception:
+                    pass
+            self._computed_since_last_update = 0
             return
 
         if not self.recompute_every_update:
@@ -791,6 +1185,12 @@ class Predictor:
 
         if self.initialized:
             self._anchor_first_point(ship)
+        if self.debug:
+            try:
+                print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+            except Exception:
+                pass
+        self._computed_since_last_update = 0
 
     def get_points(self):
         return self.points
@@ -801,11 +1201,6 @@ class Predictor:
         return self.precision / self.base_precision
 
     def get_display_length(self):
-        """HUD-only display length: scale `length` by precision factor for user feedback.
-
-        This value is not used in computation; it just communicates how spacing
-        affects the visualized predictor length.
-        """
         if self.length is None:
             return None
         return self.length * self.get_precision_factor()
@@ -815,20 +1210,26 @@ class Predictor:
         if meters <= 0.0:
             raise ValueError("precision must be > 0")
         self.precision = meters
-        if self.async_compute:
+        if self.rolling_mode:
+            self.reset()
+        elif self.async_compute:
             self._cancel_pending_job()
 
     def set_length(self, meters: float | None):
         if meters is None:
             self.length = None
-            if self.async_compute:
+            if self.rolling_mode:
+                self.reset()
+            elif self.async_compute:
                 self._cancel_pending_job()
             return
         meters = float(meters)
         if meters <= 0.0:
             raise ValueError("length must be > 0")
         self.length = meters
-        if self.async_compute:
+        if self.rolling_mode:
+            self.reset()
+        elif self.async_compute:
             self._cancel_pending_job()
 
     def set_num_points(self, count: int):
@@ -836,8 +1237,7 @@ class Predictor:
         self.reset()
 
     def advance_state(self, world=None):
-        # Compatibility hook: in async mode this opportunistically swaps in
-        # finished results without forcing a new computation.
+
         if self.async_compute:
             self._swap_ready_result(None, world)
 
@@ -871,9 +1271,6 @@ class Predictor:
         sx = float(ship.position.x)
         sy = float(ship.position.y)
 
-        # Optimized numpy branch: compute distances vectorized and remove
-        # a single contiguous prefix in one slice operation to avoid
-        # repeated copying on the main thread.
         if np is not None and isinstance(self.points, np.ndarray):
             if self.points.shape[0] <= 1:
                 return 0
@@ -881,11 +1278,11 @@ class Predictor:
             dx = coords[:, 0] - sx
             dy = coords[:, 1] - sy
             dsq = dx * dx + dy * dy
-            # diffs between consecutive distances
+    
             diffs = dsq[1:] - dsq[:-1]
             idxs = np.nonzero(diffs >= 0)[0]
             if idxs.size == 0:
-                # distances strictly decreasing: remove all but last point
+
                 remove_count = max(0, self.points.shape[0] - 1)
             else:
                 remove_count = int(idxs[0])
@@ -893,8 +1290,7 @@ class Predictor:
                 self.points = self.points[remove_count:]
                 removed += remove_count
         else:
-            # List/Vec2 branch: scan for the first non-decreasing pair,
-            # then delete the prefix in one operation to reduce copies.
+
             n = len(self.points)
             if n <= 1:
                 return 0
@@ -923,7 +1319,7 @@ class Predictor:
                 try:
                     del self.points[:remove_count]
                 except Exception:
-                    # fallback to repeated pops if del fails for some types
+
                     for _ in range(remove_count):
                         try:
                             self.points.pop(0)
