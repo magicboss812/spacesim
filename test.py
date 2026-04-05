@@ -11,6 +11,13 @@ from camera import Camera
 from rendering import Renderer
 from predictor import Predictor
 from schiff import schiffcontrol
+from reference_frames import (
+    BODY_CENTRED_BODY_DIRECTION,
+    BODY_CENTRED_NON_ROTATING,
+    PlottingFrameAdapter,
+    ReferenceFrameSelector,
+    resolve_plotting_camera_target_index,
+)
 
 def main():
     import os
@@ -46,7 +53,14 @@ def main():
 
     # Kamera initialisieren
     camera = Camera(screen, WIDTH, HEIGHT, sim_dt=dt)
-    camera.follow(bodies[4])  # Erde folgen
+    earth = next((b for b in bodies if getattr(b, 'name', '').lower() in ('earth', 'erde')), None)
+    ship = next((b for b in bodies if getattr(b, 'is_ship', False)), None)
+    if ship is not None:
+        camera.follow(ship)
+    elif earth is not None:
+        camera.follow(earth)
+    elif bodies:
+        camera.follow(bodies[0])
 
     # Predictor initialisieren
     # num_points: Anzahl der Punkte (bestimmt die Reichweite)
@@ -62,8 +76,84 @@ def main():
 
     # OpenGL Renderer initialisieren
     renderer = Renderer(WIDTH, HEIGHT, enable_fxaa=True)
-    renderer.debug_predictor = True
+    renderer.debug_predictor = False
     print("=== Renderer initialisiert ===")
+
+    # Principia-like frame pipeline:
+    # selector (input) -> adapter (factory/dispatch) -> renderer (projection).
+    celestial_indices = [i for i, b in enumerate(w.body) if not getattr(b, 'is_ship', False)]
+    if not celestial_indices:
+        celestial_indices = list(range(len(w.body)))
+
+    ship_index = next((i for i, b in enumerate(w.body) if getattr(b, 'is_ship', False)), None)
+
+    if earth is not None:
+        reference_index = w.body.index(earth)
+    else:
+        reference_index = celestial_indices[0] if celestial_indices else 0
+    reference_cursor = celestial_indices.index(reference_index) if reference_index in celestial_indices else 0
+
+    frame_extension = BODY_CENTRED_NON_ROTATING
+    target_overlay_enabled = False
+
+    def choose_secondary(primary_index):
+        primary = w.body[primary_index]
+        parent = getattr(primary, 'is_moon_of', None)
+        if parent is not None:
+            for idx, candidate in enumerate(w.body):
+                if candidate is parent and not getattr(candidate, 'is_ship', False):
+                    return idx
+        for idx in celestial_indices:
+            if idx != primary_index:
+                return idx
+        return primary_index
+
+    frame_adapter = PlottingFrameAdapter(renderer, w.body)
+
+    def on_frame_change(frame_parameters, target_body_index, target_reference_index):
+        frame_adapter.update_plotting_frame(
+            frame_parameters,
+            target_body_index=target_body_index,
+            target_reference_index=target_reference_index,
+        )
+
+    frame_selector = ReferenceFrameSelector(on_frame_change)
+
+    def apply_frame_selection():
+        secondary_index = choose_secondary(reference_index)
+        if frame_extension == BODY_CENTRED_BODY_DIRECTION:
+            frame_selector.set_to_body_direction(reference_index, secondary_index)
+            mode_text = (
+                f"body-direction ({w.body[reference_index].name} -> "
+                f"{w.body[secondary_index].name})"
+            )
+        else:
+            frame_selector.set_to_body_non_rotating(reference_index)
+            mode_text = f"body-centred non-rotating ({w.body[reference_index].name})"
+
+        # Keep camera anchored to the ship so frame/target changes do not snap
+        # to the selected reference body.
+        if ship is not None:
+            camera.follow(ship)
+            camera_follow_name = ship.name
+        else:
+            active_params = frame_selector.frame_parameters()
+            follow_index = resolve_plotting_camera_target_index(active_params, w.body)
+            camera.follow(w.body[follow_index])
+            camera_follow_name = w.body[follow_index].name
+
+        if target_overlay_enabled and ship_index is not None:
+            frame_selector.set_target_frame(ship_index, reference_index)
+            overlay_text = f"ON ({w.body[ship_index].name} vs {w.body[reference_index].name})"
+        else:
+            overlay_text = "OFF"
+
+        print(
+            f"FRAME: {mode_text} | target_overlay={overlay_text} "
+            f"| camera_follow={camera_follow_name}"
+        )
+
+    apply_frame_selection()
 
 
     def update(world, dt):
@@ -89,6 +179,41 @@ def main():
                         predictor.reset()
                     else:
                         predictor.set_num_points(30)
+
+                # Taste E: Epicycle mode toggle (center on camera target or Earth)
+                elif event.key == pygame.K_e:
+                    center = camera.target
+                    if center is None:
+                        center = next((b for b in w.body if getattr(b, 'name', '').lower() in ('earth', 'erde')), None)
+                    if center is None:
+                        print("EPICYCLE: No center found (camera target or Earth).")
+                    else:
+                        if getattr(w, '_epicycle_enabled', False) and getattr(w, '_epicycle_center', None) is center:
+                            w.disable_epicycles()
+                            print("EPICYCLE: disabled")
+                        else:
+                            w.enable_epicycles(center)
+                            print(f"EPICYCLE: enabled (center={center.name})")
+
+                elif event.key == pygame.K_r and celestial_indices:
+                    reference_cursor = (reference_cursor + 1) % len(celestial_indices)
+                    reference_index = celestial_indices[reference_cursor]
+                    apply_frame_selection()
+
+                elif event.key == pygame.K_1:
+                    frame_extension = BODY_CENTRED_NON_ROTATING
+                    apply_frame_selection()
+
+                elif event.key == pygame.K_2:
+                    frame_extension = BODY_CENTRED_BODY_DIRECTION
+                    apply_frame_selection()
+
+                elif event.key == pygame.K_t:
+                    if ship_index is None:
+                        print("FRAME: no ship available for target overlay")
+                    else:
+                        target_overlay_enabled = not target_overlay_enabled
+                        apply_frame_selection()
 
                 # Predictor length/precision controls: '+' / '-' adjust length, '9' / '0' adjust spacing
                 ch = event.unicode
@@ -163,7 +288,7 @@ def main():
         # Rendern
 
         
-        renderer.render(w.body, camera, points, predictor=predictor)
+        renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time)
         frame_count += 1
 
     pygame.quit()

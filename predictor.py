@@ -3,16 +3,13 @@
 from vec import Vec2
 import math
 import time
+import poliastro
 from concurrent.futures import ThreadPoolExecutor
+import numpy as np
+from numba import njit
 
-# Optional Numba acceleration (preferred path)
-try:
-    import numpy as np
-    from numba import njit
-    NUMBA_AVAILABLE = True
-except Exception:
-    np = None
-    NUMBA_AVAILABLE = False
+# Predictor is intentionally Numba-only in this workspace.
+NUMBA_AVAILABLE = True
 
 
 if NUMBA_AVAILABLE:
@@ -51,9 +48,10 @@ if NUMBA_AVAILABLE:
         max_points,
         max_iters,
     ):
-        out = np.empty((max_points, 2), dtype=np.float64)
+        out = np.empty((max_points, 3), dtype=np.float64)
         out[0, 0] = init_px
         out[0, 1] = init_py
+        out[0, 2] = 0.0
 
         count = 1
         px = init_px
@@ -62,6 +60,7 @@ if NUMBA_AVAILABLE:
         vy = init_vy
         accumulated = 0.0
 
+        t = 0.0
         for _ in range(max_iters):
             if count >= max_points:
                 break
@@ -123,9 +122,11 @@ if NUMBA_AVAILABLE:
 
                 sample_px = local_px + rem_dx * frac
                 sample_py = local_py + rem_dy * frac
+                sample_t = t + frac * dt
 
                 out[count, 0] = sample_px
                 out[count, 1] = sample_py
+                out[count, 2] = sample_t
                 count += 1
 
                 local_px = sample_px
@@ -143,128 +144,9 @@ if NUMBA_AVAILABLE:
             py = next_py
             vx = next_vx
             vy = next_vy
+            t += dt
 
         return out, count
-
-
-def _compute_acc_python(x, y, bodies, G):
-    ax = 0.0
-    ay = 0.0
-    for bx, by, mass, fixed in bodies:
-        if not fixed:
-            continue
-        dx = bx - x
-        dy = by - y
-        dist2 = dx * dx + dy * dy
-        if dist2 < 1e-12:
-            continue
-        invd = 1.0 / math.sqrt(dist2)
-        accm = G * mass / dist2
-        ax += dx * invd * accm
-        ay += dy * invd * accm
-    return ax, ay
-
-
-def _compute_distance_points_python(
-    init_px,
-    init_py,
-    init_vx,
-    init_vy,
-    bodies,
-    G,
-    dt,
-    precision,
-    max_points,
-    max_iters,
-):
-    out = [(init_px, init_py)]
-
-    px = init_px
-    py = init_py
-    vx = init_vx
-    vy = init_vy
-    accumulated = 0.0
-
-    for _ in range(max_iters):
-        if len(out) >= max_points:
-            break
-
-        k1_ax, k1_ay = _compute_acc_python(px, py, bodies, G)
-        k1_vx, k1_vy = vx, vy
-
-        p2x = px + k1_vx * (dt / 2.0)
-        p2y = py + k1_vy * (dt / 2.0)
-        v2x = vx + k1_ax * (dt / 2.0)
-        v2y = vy + k1_ay * (dt / 2.0)
-        k2_ax, k2_ay = _compute_acc_python(p2x, p2y, bodies, G)
-        k2_vx, k2_vy = v2x, v2y
-
-        p3x = px + k2_vx * (dt / 2.0)
-        p3y = py + k2_vy * (dt / 2.0)
-        v3x = vx + k2_ax * (dt / 2.0)
-        v3y = vy + k2_ay * (dt / 2.0)
-        k3_ax, k3_ay = _compute_acc_python(p3x, p3y, bodies, G)
-        k3_vx, k3_vy = v3x, v3y
-
-        p4x = px + k3_vx * dt
-        p4y = py + k3_vy * dt
-        v4x = vx + k3_ax * dt
-        v4y = vy + k3_ay * dt
-        k4_ax, k4_ay = _compute_acc_python(p4x, p4y, bodies, G)
-        k4_vx, k4_vy = v4x, v4y
-
-        next_px = px + (k1_vx + 2.0 * k2_vx + 2.0 * k3_vx + k4_vx) * (dt / 6.0)
-        next_py = py + (k1_vy + 2.0 * k2_vy + 2.0 * k3_vy + k4_vy) * (dt / 6.0)
-        next_vx = vx + (k1_ax + 2.0 * k2_ax + 2.0 * k3_ax + k4_ax) * (dt / 6.0)
-        next_vy = vy + (k1_ay + 2.0 * k2_ay + 2.0 * k3_ay + k4_ay) * (dt / 6.0)
-
-        seg_dx = next_px - px
-        seg_dy = next_py - py
-        seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
-
-        if seg_len <= 0.0:
-            px = next_px
-            py = next_py
-            vx = next_vx
-            vy = next_vy
-            continue
-
-        local_px = px
-        local_py = py
-        rem_dx = seg_dx
-        rem_dy = seg_dy
-        rem_len = seg_len
-
-        while rem_len + accumulated >= precision and len(out) < max_points:
-            if rem_len <= 0.0:
-                break
-
-            distance_to_place = precision - accumulated
-            frac = distance_to_place / rem_len
-
-            sample_px = local_px + rem_dx * frac
-            sample_py = local_py + rem_dy * frac
-            out.append((sample_px, sample_py))
-
-            local_px = sample_px
-            local_py = sample_py
-
-            rem_dx = next_px - local_px
-            rem_dy = next_py - local_py
-            rem_len = math.sqrt(rem_dx * rem_dx + rem_dy * rem_dy)
-            accumulated = 0.0
-
-        if rem_len + accumulated < precision:
-            accumulated += rem_len
-
-        px = next_px
-        py = next_py
-        vx = next_vx
-        vy = next_vy
-
-    return out
-
-
 class Predictor:
     def __init__(
         self,
@@ -289,16 +171,14 @@ class Predictor:
         self.base_precision = float(precision)
         self.length = None if length is None else float(length)
 
-        self.points = np.empty((0, 2), dtype=np.float64) if np is not None else []
+        self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
         self.initialized = False
         # Keep recompute cadence frame-based so it is independent from sim timestep.
         self.recompute_every_update = recompute_every_update
 
-        self.workers = 1 if workers is None else int(workers)
-        self.use_numba = bool(use_numba and NUMBA_AVAILABLE)
-        if use_numba and not self.use_numba and self.debug:
-            print("PREDICTOR: Numba not available, using Python fallback")
+        self.workers = 7 if workers is None else int(workers)
+        self.use_numba = True
 
         # Optional zoom-aware precision: when zooming in, use finer spacing
         # so rendering can show more local detail without manual key presses.
@@ -355,7 +235,7 @@ class Predictor:
 
     def reset(self):
         self._cancel_pending_job()
-        self.points = np.empty((0, 2), dtype=np.float64) if np is not None else []
+        self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.initialized = False
 
     def _points_count(self):
@@ -372,7 +252,12 @@ class Predictor:
             self.points[0, 0] = sx
             self.points[0, 1] = sy
         else:
-            self.points[0] = Vec2(sx, sy)
+            # Preserve timestamp if present on the first point
+            try:
+                t0 = float(self.points[0][2])
+            except Exception:
+                t0 = 0.0
+            self.points[0] = (sx, sy, t0)
 
     def set_view_scale(self, scale: float):
         try:
@@ -441,7 +326,8 @@ class Predictor:
     def _serialize_bodies(self, world):
         lst = []
         for b in world.body:
-            lst.append((b.position.x, b.position.y, b.mass, getattr(b, "fixed", True)))
+            # Include all bodies as gravitational sources (use current positions)
+            lst.append((b.position.x, b.position.y, b.mass, True))
         return lst
 
     def _serialize_bodies_numba(self, world):
@@ -454,7 +340,8 @@ class Predictor:
             body_x[i] = float(b.position.x)
             body_y[i] = float(b.position.y)
             body_m[i] = float(b.mass)
-            body_fixed[i] = 1 if getattr(b, "fixed", True) else 0
+            # Treat all bodies as gravitational sources for predictor
+            body_fixed[i] = 1
         return body_x, body_y, body_m, body_fixed
 
     def _compute_acc(self, position, bodies, G):
@@ -575,7 +462,7 @@ class Predictor:
             "precision": float(effective_precision),
             "max_points": int(max_points),
             "max_iters": int(max(10000, max_points * 100)),
-            "numba": bool(self.use_numba and NUMBA_AVAILABLE),
+            "numba": True,
         }
         # include simulation time when available for staleness diagnostics
         # Record both simulation time and wall-clock submit timestamp.
@@ -593,51 +480,52 @@ class Predictor:
             snapshot["view_scale"] = float(self._view_scale) if self._view_scale is not None else None
         except Exception:
             snapshot["view_scale"] = None
-        if snapshot["numba"]:
-            body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
-            snapshot["body_x"] = body_x
-            snapshot["body_y"] = body_y
-            snapshot["body_m"] = body_m
-            snapshot["body_fixed"] = body_fixed
-        else:
-            snapshot["bodies"] = self._serialize_bodies(world)
+        body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
+        snapshot["body_x"] = body_x
+        snapshot["body_y"] = body_y
+        snapshot["body_m"] = body_m
+        snapshot["body_fixed"] = body_fixed
         return snapshot
 
     def _compute_from_snapshot(self, snapshot):
-        if snapshot["numba"]:
-            out, used = _compute_distance_points_numba(
-                snapshot["ship_px"],
-                snapshot["ship_py"],
-                snapshot["ship_vx"],
-                snapshot["ship_vy"],
-                snapshot["body_x"],
-                snapshot["body_y"],
-                snapshot["body_m"],
-                snapshot["body_fixed"],
-                snapshot["G"],
-                snapshot["dt"],
-                snapshot["precision"],
-                snapshot["max_points"],
-                snapshot["max_iters"],
-            )
-            points = out[:int(used)].copy()
-        else:
-            tuples = _compute_distance_points_python(
-                snapshot["ship_px"],
-                snapshot["ship_py"],
-                snapshot["ship_vx"],
-                snapshot["ship_vy"],
-                snapshot["bodies"],
-                snapshot["G"],
-                snapshot["dt"],
-                snapshot["precision"],
-                snapshot["max_points"],
-                snapshot["max_iters"],
-            )
-            if np is not None:
-                points = np.asarray(tuples, dtype=np.float64)
+        out, used = _compute_distance_points_numba(
+            snapshot["ship_px"],
+            snapshot["ship_py"],
+            snapshot["ship_vx"],
+            snapshot["ship_vy"],
+            snapshot["body_x"],
+            snapshot["body_y"],
+            snapshot["body_m"],
+            snapshot["body_fixed"],
+            snapshot["G"],
+            snapshot["dt"],
+            snapshot["precision"],
+            snapshot["max_points"],
+            snapshot["max_iters"],
+        )
+        points = out[:int(used)].copy()
+
+        # Convert per-sample times (relative to snapshot) to absolute sim time
+        try:
+            base_sim_time = float(snapshot.get("sim_time", 0.0)) if snapshot is not None else 0.0
+        except Exception:
+            base_sim_time = 0.0
+
+        try:
+            if np is not None and isinstance(points, np.ndarray) and points.shape[1] >= 3:
+                points = points.copy()
+                points[:, 2] = points[:, 2] + base_sim_time
             else:
-                points = [Vec2(x, y) for x, y in tuples]
+                # list of triples
+                pts = []
+                for p in points:
+                    try:
+                        pts.append((float(p[0]), float(p[1]), float(p[2]) + base_sim_time))
+                    except Exception:
+                        pts.append((float(p[0]), float(p[1]), base_sim_time))
+                points = pts
+        except Exception:
+            pass
 
         return {"points": points, "snapshot": snapshot}
 
@@ -984,12 +872,29 @@ class Predictor:
                     break
         else:
             while len(self.points) > 1:
-                d0 = self.points[0].distance_squared_to(ship.position)
-                d1 = self.points[1].distance_squared_to(ship.position)
-                if d1 < d0:
-                    self.points.pop(0)
-                    removed += 1
-                else:
+                try:
+                    p0 = self.points[0]
+                    p1 = self.points[1]
+                    # handle triples (x,y,t) or Vec2
+                    if hasattr(p0, 'distance_squared_to'):
+                        d0 = p0.distance_squared_to(ship.position)
+                        d1 = p1.distance_squared_to(ship.position)
+                    else:
+                        x0 = float(p0[0]); y0 = float(p0[1])
+                        x1 = float(p1[0]); y1 = float(p1[1])
+                        dx0 = x0 - sx
+                        dy0 = y0 - sy
+                        dx1 = x1 - sx
+                        dy1 = y1 - sy
+                        d0 = dx0 * dx0 + dy0 * dy0
+                        d1 = dx1 * dx1 + dy1 * dy1
+
+                    if d1 < d0:
+                        self.points.pop(0)
+                        removed += 1
+                    else:
+                        break
+                except Exception:
                     break
 
         return removed

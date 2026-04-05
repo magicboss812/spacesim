@@ -11,6 +11,13 @@ class world:
         self.G = G
         self.body = []
         self.time = 0.0
+        # Epicycle (Ptolemaic) mode state. When enabled, top-level bodies
+        # (those with no parent) will be reparented to the chosen center
+        # body so that the resulting motion produces epicycles relative
+        # to that center.
+        self._epicycle_enabled = False
+        self._epicycle_center = None
+        self._epicycle_saved = {}
 
 # Mithilfe von should_release und release_body wird geprüft, ob ein Körper zu weit von seinem Bezugskörper entfernt ist.
 # Für zu hohe Abstände ergibt es keinen Sinn mehr, wenn der Körper dennoch um seinen Bezugskörper kreist, da die Gravitation zu schwach wäre.
@@ -78,17 +85,65 @@ class world:
                 continue
             parent_pos = body.is_moon_of.position if body.is_moon_of else None
             mu = self.G * body.is_moon_of.mass if body.is_moon_of else None
-            
+
             # ERST Position aktualisieren
             body.position = body.orbit_position(dt, parent_pos, mu)
-            
+
             # DANN prüfen ob Release nötig
             if self.should_release(body):
                 self.release_body(body)
+
+        # Note: enabling epicycle mode is performed by reparenting top-level
+        # bodies to the chosen center via `enable_epicycles()`; update_planets
+        # simply follows whatever parent relationships are currently set.
+
+    def _rv_to_orbital(self, r_vec, v_vec, mu):
+        """Convert position/velocity (relative to parent) to orbital elements.
+
+        Returns (a, e, theta, arg_peri) where theta is true anomaly measured
+        from periapsis and arg_peri is the argument of periapsis (radians).
+        """
+        r = r_vec.magnitude()
+        v = v_vec.magnitude()
+        if r <= 0.0 or mu is None or mu <= 0.0:
+            return None
+
+        # specific angular momentum (scalar z-component)
+        h = r_vec.x * v_vec.y - r_vec.y * v_vec.x
+
+        # specific energy
+        eps = 0.5 * v * v - mu / r
+        if abs(eps) < 1e-20:
+            # avoid division by zero; fallback to circular
+            a = r
+        else:
+            a = -mu / (2.0 * eps)
+
+        # eccentricity vector: (v x h)/mu - r_hat
+        # v x h_vec (2D) => (h * v_y, -h * v_x)
+        vxh_x = h * v_vec.y
+        vxh_y = -h * v_vec.x
+        evec_x = vxh_x / mu - r_vec.x / r
+        evec_y = vxh_y / mu - r_vec.y / r
+        e = math.sqrt(evec_x * evec_x + evec_y * evec_y)
+
+        # argument of periapsis (direction of e-vector)
+        arg_peri = math.atan2(evec_y, evec_x) if e > 1e-12 else 0.0
+
+        # true anomaly measured from periapsis: angle(r) - arg_peri
+        theta_world = math.atan2(r_vec.y, r_vec.x)
+        theta = theta_world - arg_peri
+        # normalize to 0..2pi
+        theta = (theta + 2.0 * math.pi) % (2.0 * math.pi)
+
+        return a, e, theta, arg_peri
     def calculate_forces(self):
 
         for body in self.body:
-            if body.scripted_orbit:
+            # Skip bodies that are scripted (their positions are provided by
+            # orbital scripts) or explicitly marked `fixed` — fixed bodies
+            # should not be integrated by the dynamics solver.
+            if body.scripted_orbit or getattr(body, 'fixed', False):
                 continue
             body.acceleration.clear()
             for other in self.body:
@@ -103,7 +158,10 @@ class world:
                 body.acceleration += delta * factor
     def update_dynamics(self, dt):
         for body in self.body:
-            if body.scripted_orbit:
+            # Do not integrate scripted orbit bodies or bodies marked as
+            # fixed — those should remain at their scripted/initial
+            # positions.
+            if body.scripted_orbit or getattr(body, 'fixed', False):
                 continue
             
             # RK4 Stage 1
@@ -137,3 +195,140 @@ class world:
             body.velocity += (k1_v + 2*k2_v + 2*k3_v + k4_v) * (dt / 6) - k3_v * dt
         
         self.time += dt
+
+    def enable_epicycles(self, center):
+        """Enable epicycle mode rooted at `center`.
+
+        This saves current parent/orbit state for all bodies and then
+        reparents every top-level body (those whose `is_moon_of` is None)
+        to `center`. The saved state is stored so `disable_epicycles()`
+        can restore the original configuration.
+        """
+        if center is None:
+            return False
+
+        # If already enabled with same center, do nothing
+        if self._epicycle_enabled and self._epicycle_center is center:
+            return True
+
+        # If enabled with another center, restore first
+        if self._epicycle_enabled:
+            self.disable_epicycles()
+
+        saved = {}
+        for b in self.body:
+            saved[b] = {
+                'is_moon_of': getattr(b, 'is_moon_of', None),
+                'semi_major_axis': getattr(b, 'semi_major_axis', None),
+                'eccentricity': getattr(b, 'eccentricity', None),
+                'scripted_orbit': getattr(b, 'scripted_orbit', False),
+                'released': getattr(b, 'released', False),
+                'theta': getattr(b, 'theta', 0.0),
+                'arg_periapsis': getattr(b, 'arg_periapsis', 0.0),
+                'position': b.position.copy() if hasattr(b, 'position') else None,
+                'velocity': b.velocity.copy() if hasattr(b, 'velocity') else None,
+            }
+
+        # Apply epicycle reparenting
+        for b in self.body:
+            if b is center:
+                # keep center stationary under scripted orbit
+                b.is_moon_of = None
+                b.semi_major_axis = 0.0
+                b.eccentricity = 0.0
+                b.scripted_orbit = True
+                b.released = False
+                continue
+
+            orig_parent = saved[b]['is_moon_of']
+            # Skip ships entirely (they should remain dynamic)
+            if getattr(b, 'is_ship', False):
+                continue
+
+            # Only reparent bodies that were scripted_orbit originally (planetary
+            # bodies defined with orbital elements). Do not change purely
+            # dynamic bodies.
+            if orig_parent is None and saved[b]['scripted_orbit']:
+                # Compute relative r/v to center and derive new orbital elements
+                
+                    rel_r = b.position - center.position
+                    # If center has velocity attribute, use relative velocity, else assume 0
+                    center_v = getattr(center, 'velocity', Vec2(0.0, 0.0))
+                    rel_v = b.velocity - center_v if hasattr(b, 'velocity') else Vec2(0.0, 0.0)
+                    mu = self.G * getattr(center, 'mass', 0.0)
+                    elems = self._rv_to_orbital(rel_r, rel_v, mu)
+                    if elems is not None:
+                        a, e, theta_rel, arg_peri = elems
+                        b.is_moon_of = center
+                        b.semi_major_axis = float(max(0.0, a))
+                        b.eccentricity = float(max(0.0, min(0.999999, e)))
+                        b.theta = float(theta_rel)
+                        b.arg_periapsis = float(arg_peri)
+                        b.scripted_orbit = True
+                        b.released = False
+                    else:
+                        # fallback: set circular orbit at current distance
+                        try:
+                            r = (b.position - center.position).magnitude()
+                        except Exception:
+                            r = float(getattr(b, 'semi_major_axis', 0.0) or 0.0)
+                        b.is_moon_of = center
+                        b.semi_major_axis = float(max(0.0, r))
+                        b.eccentricity = 0.0
+                        b.theta = math.atan2((b.position - center.position).y, (b.position - center.position).x)
+                        b.arg_periapsis = 0.0
+                        b.scripted_orbit = True
+                        b.released = False
+            else:
+                # preserve moons' parent relationships and dynamic bodies; ensure
+                # scripted bodies stay scripted if they were originally.
+                if saved[b]['scripted_orbit']:
+                    b.scripted_orbit = True
+
+        self._epicycle_saved = saved
+        self._epicycle_enabled = True
+        self._epicycle_center = center
+        return True
+
+    def disable_epicycles(self):
+        """Restore bodies saved state and disable epicycle mode."""
+        if not self._epicycle_enabled:
+            return False
+
+        for b in self.body:
+            saved = self._epicycle_saved.get(b)
+            if saved is None:
+                continue
+            b.is_moon_of = saved['is_moon_of']
+            b.semi_major_axis = saved['semi_major_axis']
+            b.eccentricity = saved['eccentricity']
+            b.scripted_orbit = saved['scripted_orbit']
+            b.released = saved['released']
+            # restore angular state
+            if 'theta' in saved:
+                try:
+                    b.theta = float(saved['theta'])
+                except Exception:
+                    pass
+            if 'arg_periapsis' in saved:
+                try:
+                    b.arg_periapsis = float(saved['arg_periapsis'])
+                except Exception:
+                    pass
+
+        self._epicycle_saved = {}
+        self._epicycle_enabled = False
+        self._epicycle_center = None
+        return True
+
+    def set_epicycle_center_by_name(self, name):
+        """Convenience: enable epicycles centered on the body with `name`.
+
+        If `name` is None or not found, epicycles are disabled.
+        """
+        if name is None:
+            return self.disable_epicycles()
+        target = next((b for b in self.body if getattr(b, 'name', '').lower() == name.lower()), None)
+        if target is None:
+            return False
+        return self.enable_epicycles(target)
