@@ -10,20 +10,20 @@ class schiffcontrol:
         self.thrust_acc = 100.0
 
     def handle_rotation(self, keys, real_dt):
-        """Handle rotation using real (wall-clock) delta so turning feels smooth.
+        """rotation mit echtem (wanduhr-)delta behandeln damit das drehen sich glatt anfühlt.
 
-        real_dt: seconds elapsed in real time (frame_dt)
+        real_dt: in echt verstrichene sekunden (frame_dt)
         """
         rotation_input = float(keys[pygame.K_RIGHT]) - float(keys[pygame.K_LEFT])
         if rotation_input:
             self.schiff.theta += rotation_input * self.rotation_speed * real_dt
 
     def apply_thrust(self, keys):
-        """Apply thrust as a fixed delta-v per call (does not scale with sim_dt).
+        """schub als festen delta-v pro aufruf anwenden (skaliert nicht mit sim_dt).
 
-        This ensures the player's applied thrust is identical regardless of
-        the simulation timestep chosen. The controller should call this once
-        per real-frame when handling input.
+        dies stellt sicher, dass der vom spieler angewendete schub unabhängig
+        von der gewählten simulationstimestep identisch ist. der controller
+        sollte dies einmal pro echtem frame beim verarbeiten von eingaben aufrufen.
         """
         direction = Vec2(math.cos(self.schiff.theta), math.sin(self.schiff.theta))
         thrust_input = float(keys[pygame.K_UP]) - float(keys[pygame.K_DOWN])
@@ -32,6 +32,6 @@ class schiffcontrol:
             self.schiff.velocity += delta_v
 
     def handle_input(self, keys, sim_dt, real_dt):
-        """Backward-compatible helper: apply rotation (real_dt) and thrust (once per frame)."""
+        """Abwärtskompatibler Helfer: rotation (real_dt) und schub (einmal pro frame) anwenden."""
         self.handle_rotation(keys, real_dt)
         self.apply_thrust(keys)

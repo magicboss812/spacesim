@@ -30,6 +30,7 @@ def main():
 
     # OpenGL-Flag für pygame Display
     screen = pygame.display.set_mode((WIDTH, HEIGHT), DOUBLEBUF | OPENGL, vsync=1)
+    print(glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION))
     pygame.display.set_caption("Orbital Mechanics - OpenGL Renderer")
     clock = pygame.time.Clock()
     FPS = 60
@@ -55,20 +56,15 @@ def main():
     camera = Camera(screen, WIDTH, HEIGHT, sim_dt=dt)
     earth = next((b for b in bodies if getattr(b, 'name', '').lower() in ('earth', 'erde')), None)
     ship = next((b for b in bodies if getattr(b, 'is_ship', False)), None)
-    if ship is not None:
-        camera.follow(ship)
-    elif earth is not None:
-        camera.follow(earth)
-    elif bodies:
-        camera.follow(bodies[0])
+    camera.follow(earth)
 
     # Predictor initialisieren
     # num_points: Anzahl der Punkte (bestimmt die Reichweite)
     # distance_interval: Abstand zwischen Punkten in Metern (kleiner = genauer)
     predictor = Predictor(num_points=10000, dt=1000.0, recompute_every_update=True)  # 1M Meter pro Punkt
-    # Diagnostic: force synchronous recompute on stale async snapshots
+    # diagnostik: synchrone neuberechnung bei veralteten asynchronen snapshots erzwingen
     predictor.force_sync_on_stale = False
-    print("PREDICTOR DEBUG: force_sync_on_stale = True")
+    print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
 
     # Schiff-Steuerung initialisieren
     ship = next((b for b in w.body if b.is_ship), None)
@@ -78,9 +74,16 @@ def main():
     renderer = Renderer(WIDTH, HEIGHT, enable_fxaa=True)
     renderer.debug_predictor = False
     print("=== Renderer initialisiert ===")
+    # predictor-darstellung bei gleichem zoom detaillierter machen
+    renderer.prediction_sampling_tolerance_px = 2.5
+    renderer.prediction_sampling_min_tolerance_px = 0.002
+    renderer.prediction_sampling_max_points = 1000
 
-    # Principia-like frame pipeline:
-    # selector (input) -> adapter (factory/dispatch) -> renderer (projection).
+    # zoom-empfindlichkeit verstärken (renderer nutzt camera.scale/reference zur zoom-berechnung)
+    renderer.prediction_sampling_reference_scale = 5e-7
+
+    # principia-ähnliche frame-pipeline:
+    # selector (eingabe) -> adapter (factory/dispatch) -> renderer (projektion).
     celestial_indices = [i for i, b in enumerate(w.body) if not getattr(b, 'is_ship', False)]
     if not celestial_indices:
         celestial_indices = list(range(len(w.body)))
@@ -131,8 +134,19 @@ def main():
             frame_selector.set_to_body_non_rotating(reference_index)
             mode_text = f"body-centred non-rotating ({w.body[reference_index].name})"
 
-        # Keep camera anchored to the ship so frame/target changes do not snap
-        # to the selected reference body.
+        # predictor-physik-korrektur für translierte nicht-rotierende rahmen:
+        # referenzkörper-beschleunigung nur in diesem modus subtrahieren.
+        try:
+            if hasattr(predictor, 'set_reference_body_index'):
+                if frame_extension == BODY_CENTRED_NON_ROTATING:
+                    predictor.set_reference_body_index(reference_index)
+                else:
+                    predictor.set_reference_body_index(None)
+        except Exception:
+            pass
+
+        # kamera am schiff verankert halten damit frame/target-änderungen nicht springen
+        # zum ausgewählten referenzkörper.
         if ship is not None:
             camera.follow(ship)
             camera_follow_name = ship.name
@@ -180,7 +194,7 @@ def main():
                     else:
                         predictor.set_num_points(30)
 
-                # Taste E: Epicycle mode toggle (center on camera target or Earth)
+                # Taste E: epizykel-modus umschalten (zentriert auf kameraziel oder Erde)
                 elif event.key == pygame.K_e:
                     center = camera.target
                     if center is None:
@@ -215,10 +229,10 @@ def main():
                         target_overlay_enabled = not target_overlay_enabled
                         apply_frame_selection()
 
-                # Predictor length/precision controls: '+' / '-' adjust length, '9' / '0' adjust spacing
+                # predictor länge/präzision steuerung: '+' / '-' länge anpassen, '9' / '0' abstand anpassen
                 ch = event.unicode
                 if ch == '+' or event.key == pygame.K_KP_PLUS:
-                    # double length (or initialize if None)
+                    # länge verdoppeln (oder initialisieren falls None)
                     new_len = predictor.length * 2 if predictor.length is not None else predictor.num_points * predictor.precision * 2
                     predictor.set_length(new_len)
                     predictor.reset()
@@ -230,7 +244,7 @@ def main():
                     predictor.reset()
                     print(f"PREDICTOR: length set to {predictor.length}")
                 elif ch == '9':
-                    # increase precision (finer = smaller spacing)
+                    # präzision erhöhen (feiner = kleinere abstände)
                     new_prec = max(1.0, predictor.precision / 2)
                     predictor.set_precision(new_prec)
                     predictor.reset()
@@ -246,10 +260,10 @@ def main():
         # Schiff-Steuerung
         keys = pygame.key.get_pressed()
         if ship_control:
-            # rotation: smooth in real time
+            # rotation: in echtzeit sanft
             ship_control.handle_rotation(keys, frame_dt)
-            # thrust: apply a fixed delta-v once per real frame (independent of sim_dt)
-            # capture velocity before thrust to report only thrust-caused change
+            # schub: einmal pro echtem frame festen delta-v anwenden (unabhängig von sim_dt)
+            # geschwindigkeit vor dem schub erfassen um nur schub-verursachte änderung zu melden
             if ship is not None:
                 old_v = ship.velocity.copy()
                 ship_control.apply_thrust(keys)
@@ -260,7 +274,7 @@ def main():
             else:
                 ship_control.apply_thrust(keys)
 
-        # Simulation aktualisieren (split into substeps for dynamics only)
+        # Simulation aktualisieren (nur für dynamik in unterschritte aufteilen)
         total_sim = camera.sim_dt
         MAX_SUBSTEP = 1000.0
         if total_sim <= MAX_SUBSTEP:
@@ -271,9 +285,10 @@ def main():
             for _ in range(steps):
                 update(w, sub_dt)
 
-        camera.update(total_sim)
+        # kamera mit echtem frame-delta für interaktives panning aktualisieren
+        camera.update(frame_dt)
         
-        # Orbit-Prediction berechnen (für das Schiff oder einen Körper)
+        # orbit-prognose berechnen (für das Schiff oder einen Körper)
         points = []
 
         if predictor.num_points > 0:

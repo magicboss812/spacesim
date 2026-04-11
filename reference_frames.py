@@ -1,10 +1,10 @@
 """
-Reference frame primitives and selector/adapter wiring for spacesim.
+reference-frame-primitiven und selector/adapter-verkabelung für spacesim.
 
-This follows the same high-level split used by Principia:
-- frame parameters selected by UI logic,
-- adapter converts parameters into concrete frame objects,
-- renderer applies transforms, physics stays in absolute space.
+dies folgt derselben high-level aufteilung wie bei Principia:
+- frame-parameter durch UI-logik ausgewählt,
+- adapter wandelt parameter in konkrete frame-objekte um,
+- renderer wendet transformationen an, physik bleibt im absoluten raum.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class PlottingFrameParameters:
 
 @dataclass(frozen=True)
 class KeplerScriptedOrbit:
-    """Scripted Kepler orbit helper used for visualization-only frame logic."""
+    """Hilfs-Kepler-Orbit, nur für die Visualisierungs-Frame-Logik."""
 
     semi_major_axis_m: float
     eccentricity: float
@@ -61,9 +61,9 @@ class KeplerScriptedOrbit:
     def inertial_xy(self, true_anomaly_rad: float) -> tuple[float, float]:
         x_p, y_p = self.perifocal_xy(true_anomaly_rad)
 
-        # Astropy rotation_matrix() with axis='z' follows a left-hand-rule
-        # convention; use -arg_periapsis to match the conventional in-plane
-        # +arg_periapsis rotation used by our scripted orbit equations.
+        # astropy rotation_matrix() mit axis='z' folgt einer left-hand-rule konvention;
+        # nutze -arg_periapsis um die in-plane +arg_periapsis-rotation unserer
+        # scripted-orbit-gleichungen abzugleichen.
         return _rotate_xy_with_astropy(x_p, y_p, -float(self.argument_of_periapsis_rad))
 
 
@@ -117,7 +117,7 @@ class ReferenceFrame:
     label = "Barycentric"
 
     def set_epoch_time(self, time_s: float) -> None:
-        # Default no-op for frames that do not need epoch-aware transforms.
+        # standard: no-op für frames, die keine epoch-aware transformationen benötigen.
         return
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
@@ -136,8 +136,8 @@ class IdentityReferenceFrame(ReferenceFrame):
 
 
 class _BodyEphemerisMixin:
-    # Quantize time lookups for cached ephemeris positions to keep predictor
-    # rendering smooth while avoiding expensive per-point propagation calls.
+    # zeitabfragen für gecachte ephemeris-positionen quantisieren, um predictor-rendering
+    # glatt zu halten und teure pro-punkt-propagationsaufrufe zu vermeiden.
     frame_time_quantization_s = 600.0
 
     def _init_ephemeris(self) -> None:
@@ -195,8 +195,8 @@ class _BodyEphemerisMixin:
             px = float(body.position.x)
             py = float(body.position.y)
 
-            # Top-level scripted/fixed bodies remain at their epoch position;
-            # dynamic top-level bodies get linear drift for short horizons.
+            # top-level scripted/feste körper bleiben an ihrer epoch-position;
+            # dynamische top-level körper erfahren für kurze zeiträume lineares driftverhalten.
             if not getattr(body, "scripted_orbit", False) and not getattr(body, "fixed", False):
                 try:
                     vx = float(body.velocity.x)
@@ -348,12 +348,11 @@ class BodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
 
 
 class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
-    """
-    A non-rotating frame whose primary's world position is computed
-    virtually from a scripted child (moon). This implements a
-    visualization-only "orbit-swap" where a top-level fixed body is
-    displayed as if it were orbiting its scripted moon, without mutating
-    the physics state.
+    """Ein nicht-rotierender Rahmen, dessen Primärposition virtuell
+    aus einem scripted child (Mond) berechnet wird. Dies implementiert
+    einen rein visuellen "orbit-swap", bei dem ein oberer fixer Körper
+    so dargestellt wird, als würde er seinen scripted-Mond umkreisen,
+    ohne den Physikzustand zu verändern.
     """
     def __init__(self, primary_body, child_body):
         self._init_ephemeris()
@@ -364,8 +363,8 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
         )
 
     def _virtual_primary_pos(self, time_s: float):
-        # Cache the computed virtual primary position per time to avoid
-        # recomputing scripted-orbit math on every per-point transform.
+        # berechnete virtuelle primärposition pro zeit cachen um wiederholte
+        # scripted-orbit-berechnungen bei jeder punkt-transform zu vermeiden.
         try:
             if getattr(self, "_cache_vp_time", None) == float(time_s):
                 return Vec2(self._cache_vp_x, self._cache_vp_y)
@@ -394,8 +393,8 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
         except Exception:
             pass
 
-        # Use the same scripted ellipse and offset true anomaly by PI so the
-        # virtual primary is shown opposite the child.
+        # dieselbe scripted-ellipse verwenden und die wahre anomalie um PI versetzen damit
+        # der virtuelle primärkörper gegenüber dem kind angezeigt wird.
         rel_x, rel_y = orbit.inertial_xy(theta_child + math.pi)
 
         # Place the virtual primary relative to the child's absolute position
@@ -538,7 +537,7 @@ def _fallback_secondary_index(primary_index: int, bodies: Sequence[object]) -> i
 
 
 def _find_virtual_swap_child(primary_body, bodies: Sequence[object]):
-    """Return scripted child used for visualization-only orbit swap, or None."""
+    """Gibt das scripted-kind zurück, das für einen rein visuellen orbit-swap verwendet wird, oder None."""
     try:
         has_orbit = (
             getattr(primary_body, 'semi_major_axis', None) is not None
@@ -568,11 +567,11 @@ def resolve_plotting_camera_target_index(
     bodies: Sequence[object],
 ) -> int:
     """
-    Resolve which body the camera should follow for the selected plotting frame.
+    Bestimmt, welchem körper die kamera für den ausgewählten plotting-frame folgen soll.
 
-    For virtual swap non-rotating frames, the visual origin is the scripted
-    child (e.g. Earth), not the selected fixed parent (e.g. Sun). Following
-    this effective center avoids the "locked sun" artifact.
+    Bei virtuell getauschten nicht-rotierenden rahmen ist der visuelle ursprung das scripted
+    child (z.B. Erde), nicht der ausgewählte feste parent (z.B. Sonne). Dem effektiven
+    zentrum zu folgen vermeidet den "locked sun"-artefakt.
     """
     primary_index = int(frame_parameters.primary_index)
     extension = int(frame_parameters.extension)
