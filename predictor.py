@@ -37,6 +37,9 @@ if NUMBA_AVAILABLE:
         init_py,
         init_vx,
         init_vy,
+        ref_enabled,
+        ref_px,
+        ref_py,
         body_x,
         body_y,
         body_m,
@@ -60,32 +63,46 @@ if NUMBA_AVAILABLE:
         accumulated = 0.0
 
         t = 0.0
+
         for _ in range(max_iters):
             if count >= max_points:
                 break
 
-            k1_ax, k1_ay = _compute_acc_numba(px, py, body_x, body_y, body_m, body_fixed, G)
+            ref_ax = 0.0
+            ref_ay = 0.0
+            if ref_enabled != 0:
+                ref_ax, ref_ay = _compute_acc_numba(ref_px, ref_py, body_x, body_y, body_m, body_fixed, G)
+
+            k1_ax_raw, k1_ay_raw = _compute_acc_numba(px, py, body_x, body_y, body_m, body_fixed, G)
+            k1_ax = k1_ax_raw - ref_ax
+            k1_ay = k1_ay_raw - ref_ay
             k1_vx, k1_vy = vx, vy
 
             p2x = px + k1_vx * (dt / 2.0)
             p2y = py + k1_vy * (dt / 2.0)
             v2x = vx + k1_ax * (dt / 2.0)
             v2y = vy + k1_ay * (dt / 2.0)
-            k2_ax, k2_ay = _compute_acc_numba(p2x, p2y, body_x, body_y, body_m, body_fixed, G)
+            k2_ax_raw, k2_ay_raw = _compute_acc_numba(p2x, p2y, body_x, body_y, body_m, body_fixed, G)
+            k2_ax = k2_ax_raw - ref_ax
+            k2_ay = k2_ay_raw - ref_ay
             k2_vx, k2_vy = v2x, v2y
 
             p3x = px + k2_vx * (dt / 2.0)
             p3y = py + k2_vy * (dt / 2.0)
             v3x = vx + k2_ax * (dt / 2.0)
             v3y = vy + k2_ay * (dt / 2.0)
-            k3_ax, k3_ay = _compute_acc_numba(p3x, p3y, body_x, body_y, body_m, body_fixed, G)
+            k3_ax_raw, k3_ay_raw = _compute_acc_numba(p3x, p3y, body_x, body_y, body_m, body_fixed, G)
+            k3_ax = k3_ax_raw - ref_ax
+            k3_ay = k3_ay_raw - ref_ay
             k3_vx, k3_vy = v3x, v3y
 
             p4x = px + k3_vx * dt
             p4y = py + k3_vy * dt
             v4x = vx + k3_ax * dt
             v4y = vy + k3_ay * dt
-            k4_ax, k4_ay = _compute_acc_numba(p4x, p4y, body_x, body_y, body_m, body_fixed, G)
+            k4_ax_raw, k4_ay_raw = _compute_acc_numba(p4x, p4y, body_x, body_y, body_m, body_fixed, G)
+            k4_ax = k4_ax_raw - ref_ax
+            k4_ay = k4_ay_raw - ref_ay
             k4_vx, k4_vy = v4x, v4y
 
             next_px = px + (k1_vx + 2.0 * k2_vx + 2.0 * k3_vx + k4_vx) * (dt / 6.0)
@@ -155,6 +172,9 @@ if NUMBA_AVAILABLE:
         init_vx,
         init_vy,
         init_t,
+        ref_enabled,
+        ref_px,
+        ref_py,
         body_x,
         body_y,
         body_m,
@@ -165,7 +185,7 @@ if NUMBA_AVAILABLE:
         max_points,
         max_iters,
     ):
-        # Columns: x, y, t, vx, vy
+        # spalten: x, y, t, vx, vy
         out = np.empty((max_points, 5), dtype=np.float64)
         out[0, 0] = init_px
         out[0, 1] = init_py
@@ -181,32 +201,46 @@ if NUMBA_AVAILABLE:
         accumulated = 0.0
 
         t = init_t
+
         for _ in range(max_iters):
             if count >= max_points:
                 break
 
-            k1_ax, k1_ay = _compute_acc_numba(px, py, body_x, body_y, body_m, body_fixed, G)
+            ref_ax = 0.0
+            ref_ay = 0.0
+            if ref_enabled != 0:
+                ref_ax, ref_ay = _compute_acc_numba(ref_px, ref_py, body_x, body_y, body_m, body_fixed, G)
+
+            k1_ax_raw, k1_ay_raw = _compute_acc_numba(px, py, body_x, body_y, body_m, body_fixed, G)
+            k1_ax = k1_ax_raw - ref_ax
+            k1_ay = k1_ay_raw - ref_ay
             k1_vx, k1_vy = vx, vy
 
             p2x = px + k1_vx * (dt / 2.0)
             p2y = py + k1_vy * (dt / 2.0)
             v2x = vx + k1_ax * (dt / 2.0)
             v2y = vy + k1_ay * (dt / 2.0)
-            k2_ax, k2_ay = _compute_acc_numba(p2x, p2y, body_x, body_y, body_m, body_fixed, G)
+            k2_ax_raw, k2_ay_raw = _compute_acc_numba(p2x, p2y, body_x, body_y, body_m, body_fixed, G)
+            k2_ax = k2_ax_raw - ref_ax
+            k2_ay = k2_ay_raw - ref_ay
             k2_vx, k2_vy = v2x, v2y
 
             p3x = px + k2_vx * (dt / 2.0)
             p3y = py + k2_vy * (dt / 2.0)
             v3x = vx + k2_ax * (dt / 2.0)
             v3y = vy + k2_ay * (dt / 2.0)
-            k3_ax, k3_ay = _compute_acc_numba(p3x, p3y, body_x, body_y, body_m, body_fixed, G)
+            k3_ax_raw, k3_ay_raw = _compute_acc_numba(p3x, p3y, body_x, body_y, body_m, body_fixed, G)
+            k3_ax = k3_ax_raw - ref_ax
+            k3_ay = k3_ay_raw - ref_ay
             k3_vx, k3_vy = v3x, v3y
 
             p4x = px + k3_vx * dt
             p4y = py + k3_vy * dt
             v4x = vx + k3_ax * dt
             v4y = vy + k3_ay * dt
-            k4_ax, k4_ay = _compute_acc_numba(p4x, p4y, body_x, body_y, body_m, body_fixed, G)
+            k4_ax_raw, k4_ay_raw = _compute_acc_numba(p4x, p4y, body_x, body_y, body_m, body_fixed, G)
+            k4_ax = k4_ax_raw - ref_ax
+            k4_ay = k4_ay_raw - ref_ay
             k4_vx, k4_vy = v4x, v4y
 
             next_px = px + (k1_vx + 2.0 * k2_vx + 2.0 * k3_vx + k4_vx) * (dt / 6.0)
@@ -343,6 +377,11 @@ class Predictor:
 
         self._view_scale_changed = False
 
+        # optionale übersetzung des referenzrahmens. wenn gesetzt, berechnet predictor
+        # bewegung in einem körper-zentrierten nicht-rotierenden rahmen durch subtraktion
+        # der referenzkörper-beschleunigung.
+        self.reference_body_index = None
+
         if self.async_compute and not self.rolling_mode:
             max_workers = max(1, int(self.workers))
             self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
@@ -354,6 +393,37 @@ class Predictor:
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
+
+    def set_reference_body_index(self, index: int | None):
+        if index is None:
+            new_index = None
+        else:
+            new_index = int(index)
+
+        if new_index == self.reference_body_index:
+            return
+
+        self.reference_body_index = new_index
+            # Frame-Änderung macht aktuell gespeicherte Prädiktor-Punkte ungültig.
+        self.reset()
+
+    def _resolve_reference_body(self, world):
+        idx = self.reference_body_index
+        if idx is None:
+            return 0, 0.0, 0.0
+
+        try:
+            idx = int(idx)
+        except Exception:
+            return 0, 0.0, 0.0
+
+        try:
+            if idx < 0 or idx >= len(world.body):
+                return 0, 0.0, 0.0
+            ref = world.body[idx]
+            return 1, float(ref.position.x), float(ref.position.y)
+        except Exception:
+            return 0, 0.0, 0.0
 
     def _points_count(self):
         if np is not None and isinstance(self.points, np.ndarray):
@@ -369,7 +439,7 @@ class Predictor:
             self.points[0, 0] = sx
             self.points[0, 1] = sy
         else:
-            # Preserve timestamp if present on the first point
+            # timestamp beibehalten falls beim ersten punkt vorhanden
             try:
                 t0 = float(self.points[0][2])
             except Exception:
@@ -377,10 +447,11 @@ class Predictor:
             self.points[0] = (sx, sy, t0)
 
     def _count_recomputed_points(self, old_points, new_points, tol=1e-6):
-        """Return number of entries in `new_points` that differ from `old_points`.
+        """Gibt die Anzahl der Einträge in `new_points` zurück, die sich von `old_points` unterscheiden.
 
-        Comparison skips the first point (anchor) and treats any extra tail
-        in `new_points` beyond `old_points` as newly computed.
+        Der vergleich überspringt den ersten punkt (anker) und behandelt
+        einen zusätzlichen "tail" in `new_points` gegenüber `old_points`
+        als neu berechnet.
         """
         try:
             if old_points is None:
@@ -612,7 +683,7 @@ class Predictor:
         return pts
 
     def _cancel_pending_job(self):
-    # Cancel all pending futures (supports multi-worker mode).
+    # alle wartenden futures abbrechen (unterstützt multi-worker-modus).
         pending = getattr(self, "_pending_futures", None)
         if pending is None:
 
@@ -635,11 +706,15 @@ class Predictor:
 
     def _make_snapshot(self, ship, world, max_points):
         effective_precision = self._effective_precision()
+        ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
         snapshot = {
             "ship_px": float(ship.position.x),
             "ship_py": float(ship.position.y),
             "ship_vx": float(ship.velocity.x),
             "ship_vy": float(ship.velocity.y),
+            "ref_enabled": int(ref_enabled),
+            "ref_px": float(ref_px),
+            "ref_py": float(ref_py),
             "G": float(world.G),
             "dt": float(self.dt),
             "precision": float(effective_precision),
@@ -674,6 +749,9 @@ class Predictor:
             snapshot["ship_py"],
             snapshot["ship_vx"],
             snapshot["ship_vy"],
+            int(snapshot.get("ref_enabled", 0)),
+            float(snapshot.get("ref_px", 0.0)),
+            float(snapshot.get("ref_py", 0.0)),
             snapshot["body_x"],
             snapshot["body_y"],
             snapshot["body_m"],
@@ -730,6 +808,9 @@ class Predictor:
             snapshot["ship_vx"],
             snapshot["ship_vy"],
             base_t,
+            int(snapshot.get("ref_enabled", 0)),
+            float(snapshot.get("ref_px", 0.0)),
+            float(snapshot.get("ref_py", 0.0)),
             snapshot["body_x"],
             snapshot["body_y"],
             snapshot["body_m"],
@@ -778,6 +859,7 @@ class Predictor:
         init_vy = float(tail[4])
 
         body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
+        ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
         max_new_points = int(missing_points) + 1  # include seed sample at index 0
         max_iters = int(max(10000, max_new_points * 100))
 
@@ -787,6 +869,9 @@ class Predictor:
             init_vx,
             init_vy,
             init_t,
+            int(ref_enabled),
+            float(ref_px),
+            float(ref_py),
             body_x,
             body_y,
             body_m,
@@ -818,9 +903,7 @@ class Predictor:
 
     def _update_rolling(self, ship, world):
         # On first run or when zoom changed (auto precision), rebuild once.
-        if (not self.initialized) or (
-            np is None or not isinstance(self._roll_states, np.ndarray) or self._roll_states.shape[0] == 0
-        ) or getattr(self, "_view_scale_changed", False):
+        if (not self.initialized) or ( np is None or not isinstance(self._roll_states, np.ndarray) or self._roll_states.shape[0] == 0) or getattr(self, "_view_scale_changed", False):
             self._compute_full_rolling(ship, world)
             self._view_scale_changed = False
         else:
@@ -852,13 +935,27 @@ class Predictor:
 
         if self._single_flight:
             if len(pending) > 0:
+                # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
+                try:
+                    print(f"PRED_DBG_SUBMIT: blocked single_flight pending_len={len(pending)} _next_job_id={self._next_job_id}", flush=True)
+                except Exception:
+                    pass
+                # DEBUG-AGENT-ADD END
                 return
 
         snapshot = self._make_snapshot(ship, world, max_points)
+        # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
+        try:
+            exec_info = 'has_executor' if getattr(self, '_executor', None) is not None else 'no_executor'
+            print(f"PRED_DBG_SUBMIT: submitting job_id={self._next_job_id} max_points={max_points} {exec_info}", flush=True)
+        except Exception:
+            pass
+        # DEBUG-AGENT-ADD END
+
         fut = self._executor.submit(self._compute_from_snapshot, snapshot)
         job_id = self._next_job_id
 
-        # Replace queue instead of appending endlessly
+            # Ersetze Queue statt endlos anzuhängen
         if self._single_flight:
             self._pending_futures = [(job_id, fut)]
         else:
@@ -870,11 +967,25 @@ class Predictor:
     def _swap_ready_result(self, current_ship=None, current_world=None):
         pending = getattr(self, "_pending_futures", None)
 
+        # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
+        try:
+            pend_len = len(pending) if pending is not None else None
+            print(f"PRED_DBG_SWAP: entering swap pending_len={pend_len} _pending_job_id={getattr(self,'_pending_job_id',0)} _pending_future_set={getattr(self,'_pending_future',None) is not None}", flush=True)
+        except Exception:
+            pass
+        # DEBUG-AGENT-ADD END
+
         if pending is None:
             pending = []
 
         if not pending:
             if self._pending_future is None or not self._pending_future.done():
+                # DEBUG-AGENT-ADD BEGIN - debug only
+                try:
+                    print(f"PRED_DBG_SWAP: no pending list and no single pending future ready (pending_future={self._pending_future})", flush=True)
+                except Exception:
+                    pass
+                # DEBUG-AGENT-ADD END
                 return False
             finished_future = self._pending_future
             finished_job_id = self._pending_job_id
@@ -890,13 +1001,29 @@ class Predictor:
 
             # find first completed future
             for idx, (jid, fut) in enumerate(pending):
-                if fut.done():
+                try:
+                    done = fut.done()
+                except Exception:
+                    done = False
+                if done:
+                    # DEBUG-AGENT-ADD BEGIN - debug only
+                    try:
+                        print(f"PRED_DBG_SWAP: found finished future jid={jid} idx={idx} done={done}", flush=True)
+                    except Exception:
+                        pass
+                    # DEBUG-AGENT-ADD END
                     finished_future = fut
                     finished_job_id = jid
                     pending.pop(idx)
                     break
 
             if finished_future is None:
+                # DEBUG-AGENT-ADD BEGIN - debug only
+                try:
+                    print(f"PRED_DBG_SWAP: no finished future found in pending", flush=True)
+                except Exception:
+                    pass
+                # DEBUG-AGENT-ADD END
                 return False
 
         try:
@@ -951,7 +1078,13 @@ class Predictor:
                 if is_stale_view or is_stale_speed or is_stale_pos:
 
                     if is_stale_view:
-                        return False
+                            # DEBUG-AGENT-ADD BEGIN - debug only
+                            try:
+                                print(f"PRED_DBG_SWAP: rejecting result - stale_view (snap_view={snap_view} cur_view={self._view_scale})", flush=True)
+                            except Exception:
+                                pass
+                            # DEBUG-AGENT-ADD END
+                            return False
 
 
                     if self.force_sync_on_stale and current_world is not None:
@@ -984,6 +1117,12 @@ class Predictor:
                         changed = 0
             try:
                 self._computed_since_last_update += int(changed)
+            except Exception:
+                pass
+
+            # DEBUG-AGENT-ADD: log swap result
+            try:
+                print(f"PRED_DBG_SWAP: swapped job_id={finished_job_id} changed={changed} points_len={(points.shape[0] if (np is not None and hasattr(points, 'shape')) else len(points))}", flush=True)
             except Exception:
                 pass
 
@@ -1105,6 +1244,52 @@ class Predictor:
             raise ValueError("Predictor precision must be > 0")
 
         if self.rolling_mode:
+            # Detect sudden ship velocity changes (thrust) even in rolling
+            # mode by tracking the last observed ship velocity. If a large
+            # delta is detected, rebuild the full rolling state so stored
+            # points don't remain stale.
+            try:
+                cur_vx = float(ship.velocity.x)
+                cur_vy = float(ship.velocity.y)
+                last_vx = getattr(self, '_last_ship_vx', None)
+                last_vy = getattr(self, '_last_ship_vy', None)
+                if last_vx is not None and last_vy is not None:
+                    dvx = cur_vx - float(last_vx)
+                    dvy = cur_vy - float(last_vy)
+                    delta_speed = math.hypot(dvx, dvy)
+                    cur_speed = math.hypot(cur_vx, cur_vy)
+                    allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
+                    if delta_speed >= allowed_speed:
+                        if self.debug:
+                            try:
+                                print(f"PRED_DBG_VEL_CHANGE: dv={delta_speed:.6e} allowed={allowed_speed:.6e}", flush=True)
+                            except Exception:
+                                pass
+                        try:
+                            # Rebuild entire rolling prediction synchronously.
+                            self._compute_full_rolling(ship, world)
+                            self._anchor_first_point(ship)
+                        except Exception:
+                            pass
+                        # Update remembered velocity and report
+                        try:
+                            self._last_ship_vx = cur_vx
+                            self._last_ship_vy = cur_vy
+                        except Exception:
+                            pass
+                        if self.debug:
+                            try:
+                                print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                            except Exception:
+                                pass
+                        self._computed_since_last_update = 0
+                        return
+                # remember velocity for next update
+                self._last_ship_vx = cur_vx
+                self._last_ship_vy = cur_vy
+            except Exception:
+                pass
+
             self._update_rolling(ship, world)
             if self.debug:
                 try:
@@ -1163,6 +1348,72 @@ class Predictor:
                         pass
                 self._computed_since_last_update = 0
                 return
+
+        # Detect large ship state changes (e.g. player thrust) and force
+        # a recompute so stored predictor points don't remain stale.
+        try:
+            if ship is not None and self._last_swapped_snapshot is not None:
+                svx = float(self._last_swapped_snapshot.get("ship_vx", 0.0))
+                svy = float(self._last_swapped_snapshot.get("ship_vy", 0.0))
+                cur_vx = float(ship.velocity.x)
+                cur_vy = float(ship.velocity.y)
+
+                dvx = cur_vx - svx
+                dvy = cur_vy - svy
+                delta_speed = math.hypot(dvx, dvy)
+                cur_speed = math.hypot(cur_vx, cur_vy)
+                allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
+
+                if delta_speed >= allowed_speed:
+                    if self.debug:
+                        try:
+                            print(f"PRED_DBG_VEL_CHANGE: dv={delta_speed:.6e} allowed={allowed_speed:.6e}", flush=True)
+                        except Exception:
+                            pass
+
+                    # Cancel pending work and either recompute synchronously
+                    # (rolling mode / non-async) or submit a fresh async job.
+                    try:
+                        self._cancel_pending_job()
+                    except Exception:
+                        pass
+
+                    if self.rolling_mode:
+                        self._compute_full_rolling(ship, world)
+                        self._anchor_first_point(ship)
+                        if self.debug:
+                            try:
+                                print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                            except Exception:
+                                pass
+                        self._computed_since_last_update = 0
+                        return
+
+                    target_points = self._get_target_point_cap()
+                    if self.async_compute:
+                        try:
+                            self._submit_async_compute(ship, world, target_points)
+                        except Exception:
+                            pass
+                        if self.debug:
+                            try:
+                                print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                            except Exception:
+                                pass
+                        self._computed_since_last_update = 0
+                        return
+                    else:
+                        self._compute_full(ship, world)
+                        self._anchor_first_point(ship)
+                        if self.debug:
+                            try:
+                                print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                            except Exception:
+                                pass
+                        self._computed_since_last_update = 0
+                        return
+        except Exception:
+            pass
 
         swapped = self._swap_ready_result(ship, world)
         target_points = self._get_target_point_cap()

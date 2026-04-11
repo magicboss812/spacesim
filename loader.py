@@ -9,9 +9,9 @@ class SystemLoader:
     def __init__(self, filepath=None):
         """Initialisiert den Loader.
 
-        If `filepath` is omitted or given as a relative path, it will be
-        resolved relative to this module's directory so the loader works
-        regardless of the current working directory.
+        falls `filepath` weggelassen oder relativ angegeben wird, wird es
+        relativ zum verzeichnis dieses moduls aufgelöst, sodass der loader
+        unabhängig vom aktuellen arbeitsverzeichnis funktioniert.
         """
         base_dir = Path(__file__).parent
         if filepath is None:

@@ -8,7 +8,9 @@ from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GLU import *
 import math
+import os
 from collections import deque
+import ctypes
 
 from reference_frames import IdentityReferenceFrame
 
@@ -47,45 +49,75 @@ class Renderer:
             'prediction_points_drawn': 0,
         }
 
-        # Opt-in predictor debug: when True, prints small samples of predictor
-        # points (screen and reconstructed world coords) to the console.
+        # optionales predictor-debug: wenn True druckt kleine beispiele der predictor-
+        # punkte (bildschirm und rekonstruierte welt-koords) in die konsole.
         self.debug_predictor = False
 
-        # Principia-like visual sampling controls: keep line-strip rendering,
-        # but adapt point density to screen-space curvature/error.
+        # principia-ähnliche visuelle sampling-kontrollen: linien-strip-rendering behalten,
+        # aber punktdichte an bildschirm-krümmung/-fehler anpassen.
         self.prediction_sampling_tolerance_px = 1.5
         self.prediction_sampling_min_step_px = 0.35
         self.prediction_sampling_max_points = 1000
-        # Allow very fine screen-space tolerance when zoomed in.
-        # Lowering this enables more detail at extreme zoom levels.
+        # sehr feine bildschirm-toleranz beim reingezoomt erlauben.
+        # kleinere werte ermöglichen mehr detail bei extremen zoom-stufen.
         self.prediction_sampling_min_tolerance_px = 0.005
         self.prediction_sampling_max_tolerance_px = 0.25
         self.prediction_sampling_max_segment_px = 4.0
         self.prediction_sampling_reference_scale = 1e-6
         self.prediction_visibility_margin_px = 128.0
 
-        # Frame state (Principia-like): physics remains absolute, rendering
-        # applies the currently selected plotting frame plus optional target
-        # overlay frame.
+        # frame-status (principia-ähnlich): physik bleibt absolut, rendering
+        # wendet den aktuell ausgewählten plotting-frame plus optionales target-
+        # overlay-frame an.
         self._plotting_frame = IdentityReferenceFrame()
         self._plotting_frame_label = "Barycentric"
         self._target_frame = None
         self._target_frame_label = None
         self._frame_time_s = 0.0
-        # Debugging: enable to periodically print active frame and selected
-        # bodies' world/frame coordinates for inspection.
+        # debugging: aktivieren um periodisch aktives frame und ausgewählte
+        # körper welt/frame-koordinaten zur inspektion zu drucken.
         self.debug_frame = False
         self._frame_debug_counter = 0
         self._frame_debug_period = 30
 
-        # Reference-frame trajectory trails (history in frame-space).
-        # These replace static scripted orbit ellipses and show relative
-        # epicyclic motion for all bodies in the active frame.
+        # reference-frame trajectorien-spuren (historie im frame-raum).
+        # diese ersetzen statische scripted-orbit-ellipsen und zeigen relative
+        # epizykel-bewegung für alle körper im aktiven frame.
         self.reference_trajectories_enabled = True
         self.reference_trajectories_max_points = 2400
-        self.reference_trajectories_sample_step_s = 0.0
+        self.reference_trajectories_sample_step_s = 1.0
         self._reference_traj_last_sample_time = None
         self._reference_traj_points = {}
+        self._shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
+
+        # gpu-helpers: wiederverwendbare VBO- und texture-caches
+        self._poly_vbo = None
+        self._poly_vbo_size = 0
+        self._line_program = None
+        self._line_a_pos = -1
+        self._line_u_viewport = -1
+        self._line_u_color = -1
+        self._body_program = None
+        self._body_a_corner = -1
+        self._body_u_center_px = -1
+        self._body_u_outer_radius_px = -1
+        self._body_u_viewport = -1
+        self._body_u_base_color = -1
+        self._body_u_atmos_color = -1
+        self._body_u_core_radius_norm = -1
+        self._body_u_atmos_radius_norm = -1
+        self._body_u_atmos_alpha = -1
+        self._body_u_glow_alpha = -1
+        self._body_quad_vbo = None
+
+        self._label_texture_cache = {}
+        self._hud_texture = None
+        self._hud_texture_size = (0, 0)
+        # Initialize GPU helpers (VBOs, caches)
+        try:
+            self._init_gpu_helpers()
+        except Exception:
+            pass
     
     def _init_opengl(self):
         """Initialisiert OpenGL-Einstellungen."""
@@ -410,20 +442,20 @@ class Renderer:
         return sx, sy
 
     def _world_to_screen_xy_at_time(self, world_x, world_y, camera, time_s):
-        """Convert a world-space point at a specific simulation time to screen coordinates.
+        """Konvertiert einen Welt-Punkt zu einer bestimmten Sim-Zeit in Bildschirmkoordinaten.
 
-        This uses the active frame's time-dependent transform so prediction
-        points (which include per-sample sim times) are projected correctly
-        into a moving/rotating plotting frame.
+        Diese nutzt die zeitabhängige Transformation des aktiven Frames, sodass
+        Prädiktor-Punkte (die pro Sample Sim-Zeiten enthalten) korrekt in einen
+        sich bewegenden/rotierenden Plot-Frame projiziert werden.
         """
         frame = self._active_frame()
         try:
             frame_x, frame_y = frame.to_this_frame_xy(float(time_s), float(world_x), float(world_y))
         except Exception:
-            # Fallback to current frame transform
+            # Fallback: auf aktuelle Frame-Transformation zurückfallen
             frame_x, frame_y = self._frame_transform_xy(world_x, world_y)
 
-        # Compute camera origin in frame-space at the same time
+        # Kamera-Ursprung zur selben Zeit im Frame-Raum berechnen
         try:
             cam_fx, cam_fy = frame.to_this_frame_xy(float(time_s), float(camera.position.x), float(camera.position.y))
         except Exception:
@@ -437,6 +469,343 @@ class Renderer:
     def _reset_reference_trajectories(self):
         self._reference_traj_points = {}
         self._reference_traj_last_sample_time = None
+
+    def _init_gpu_helpers(self):
+        """Erstellt wiederverwendbare puffer und GLSL-programme für kritische render-pfade."""
+        self._ensure_poly_vbo()
+        self._init_line_pipeline()
+        self._init_body_pipeline()
+
+    def _load_shader_source(self, filename):
+        path = os.path.join(self._shader_dir, filename)
+        with open(path, 'r', encoding='utf-8') as shader_file:
+            return shader_file.read()
+
+    def _decode_gl_log(self, value):
+        if isinstance(value, bytes):
+            return value.decode('utf-8', errors='replace')
+        return str(value)
+
+    def _compile_shader_program(self, vertex_filename, fragment_filename, label):
+        vertex_shader = None
+        fragment_shader = None
+        program = None
+        try:
+            vertex_source = self._load_shader_source(vertex_filename)
+            fragment_source = self._load_shader_source(fragment_filename)
+
+            vertex_shader = glCreateShader(GL_VERTEX_SHADER)
+            glShaderSource(vertex_shader, vertex_source)
+            glCompileShader(vertex_shader)
+            if not glGetShaderiv(vertex_shader, GL_COMPILE_STATUS):
+                log = self._decode_gl_log(glGetShaderInfoLog(vertex_shader))
+                raise RuntimeError(f"vertex compile failed: {log}")
+
+            fragment_shader = glCreateShader(GL_FRAGMENT_SHADER)
+            glShaderSource(fragment_shader, fragment_source)
+            glCompileShader(fragment_shader)
+            if not glGetShaderiv(fragment_shader, GL_COMPILE_STATUS):
+                log = self._decode_gl_log(glGetShaderInfoLog(fragment_shader))
+                raise RuntimeError(f"fragment compile failed: {log}")
+
+            program = glCreateProgram()
+            glAttachShader(program, vertex_shader)
+            glAttachShader(program, fragment_shader)
+            glLinkProgram(program)
+            if not glGetProgramiv(program, GL_LINK_STATUS):
+                log = self._decode_gl_log(glGetProgramInfoLog(program))
+                raise RuntimeError(f"program link failed: {log}")
+
+            return program
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"{label}: {exc}"
+            print(f"Shader pipeline fallback ({label}): {exc}")
+            if program is not None:
+                try:
+                    glDeleteProgram(program)
+                except Exception:
+                    pass
+            return None
+        finally:
+            if vertex_shader is not None:
+                try:
+                    glDeleteShader(vertex_shader)
+                except Exception:
+                    pass
+            if fragment_shader is not None:
+                try:
+                    glDeleteShader(fragment_shader)
+                except Exception:
+                    pass
+
+    def _init_line_pipeline(self):
+        program = self._compile_shader_program('line.vert', 'line.frag', 'line')
+        if program is None:
+            self._line_program = None
+            return
+
+        try:
+            a_pos = glGetAttribLocation(program, 'a_pos')
+            u_viewport = glGetUniformLocation(program, 'u_viewport')
+            u_color = glGetUniformLocation(program, 'u_color')
+            if a_pos < 0 or u_viewport < 0 or u_color < 0:
+                raise RuntimeError('missing line shader attribute/uniform')
+
+            self._line_program = program
+            self._line_a_pos = a_pos
+            self._line_u_viewport = u_viewport
+            self._line_u_color = u_color
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"line: {exc}"
+            print(f"Shader pipeline fallback (line): {exc}")
+            try:
+                glDeleteProgram(program)
+            except Exception:
+                pass
+            self._line_program = None
+
+    def _init_body_pipeline(self):
+        program = self._compile_shader_program('body.vert', 'body.frag', 'body')
+        if program is None:
+            self._body_program = None
+            return
+
+        try:
+            a_corner = glGetAttribLocation(program, 'a_corner')
+            u_center_px = glGetUniformLocation(program, 'u_center_px')
+            u_outer_radius_px = glGetUniformLocation(program, 'u_outer_radius_px')
+            u_viewport = glGetUniformLocation(program, 'u_viewport')
+            u_base_color = glGetUniformLocation(program, 'u_base_color')
+            u_atmos_color = glGetUniformLocation(program, 'u_atmos_color')
+            u_core_radius_norm = glGetUniformLocation(program, 'u_core_radius_norm')
+            u_atmos_radius_norm = glGetUniformLocation(program, 'u_atmos_radius_norm')
+            u_atmos_alpha = glGetUniformLocation(program, 'u_atmos_alpha')
+            u_glow_alpha = glGetUniformLocation(program, 'u_glow_alpha')
+
+            if (a_corner < 0 or u_center_px < 0 or u_outer_radius_px < 0 or
+                    u_viewport < 0 or u_base_color < 0 or u_atmos_color < 0 or
+                    u_core_radius_norm < 0 or u_atmos_radius_norm < 0 or
+                    u_atmos_alpha < 0 or u_glow_alpha < 0):
+                raise RuntimeError('missing body shader attribute/uniform')
+
+            self._body_program = program
+            self._body_a_corner = a_corner
+            self._body_u_center_px = u_center_px
+            self._body_u_outer_radius_px = u_outer_radius_px
+            self._body_u_viewport = u_viewport
+            self._body_u_base_color = u_base_color
+            self._body_u_atmos_color = u_atmos_color
+            self._body_u_core_radius_norm = u_core_radius_norm
+            self._body_u_atmos_radius_norm = u_atmos_radius_norm
+            self._body_u_atmos_alpha = u_atmos_alpha
+            self._body_u_glow_alpha = u_glow_alpha
+
+            if self._body_quad_vbo is None:
+                quad_data = (ctypes.c_float * 8)(
+                    -1.0, -1.0,
+                    1.0, -1.0,
+                    -1.0, 1.0,
+                    1.0, 1.0,
+                )
+                self._body_quad_vbo = glGenBuffers(1)
+                glBindBuffer(GL_ARRAY_BUFFER, self._body_quad_vbo)
+                glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_data), quad_data, GL_STATIC_DRAW)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"body: {exc}"
+            print(f"Shader pipeline fallback (body): {exc}")
+            try:
+                glDeleteProgram(program)
+            except Exception:
+                pass
+            self._body_program = None
+
+    def _ensure_poly_vbo(self):
+        if self._poly_vbo is None:
+            try:
+                self._poly_vbo = glGenBuffers(1)
+            except Exception:
+                self._poly_vbo = None
+
+    def _draw_polyline(self, run, color=(1.0, 1.0, 1.0, 1.0), width=1.0):
+        """Zeichnet eine bildschirm-space polyline via GLSL+VBO mit legacy-fallback."""
+        n = len(run)
+        if n < 2:
+            return
+        self._ensure_poly_vbo()
+
+        # Flatten into float array
+        flat = [0.0] * (n * 2)
+        idx = 0
+        for sx, sy in run:
+            flat[idx] = float(sx); flat[idx+1] = float(sy); idx += 2
+        data = (ctypes.c_float * len(flat))(*flat)
+
+        glLineWidth(float(width))
+        try:
+            if self._line_program and self._poly_vbo:
+                glDisable(GL_TEXTURE_2D)
+                glUseProgram(self._line_program)
+                glUniform2f(self._line_u_viewport, float(self.width), float(self.height))
+                glUniform4f(self._line_u_color,
+                            float(color[0]), float(color[1]), float(color[2]), float(color[3]))
+
+                glBindBuffer(GL_ARRAY_BUFFER, self._poly_vbo)
+                data_size = ctypes.sizeof(data)
+                if data_size > int(self._poly_vbo_size):
+                    glBufferData(GL_ARRAY_BUFFER, data_size, data, GL_DYNAMIC_DRAW)
+                    self._poly_vbo_size = int(data_size)
+                else:
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, data)
+                glEnableVertexAttribArray(self._line_a_pos)
+                glVertexAttribPointer(self._line_a_pos, 2, GL_FLOAT, GL_FALSE, 0, None)
+                glDrawArrays(GL_LINE_STRIP, 0, n)
+                glDisableVertexAttribArray(self._line_a_pos)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glUseProgram(0)
+                return
+        except Exception:
+            try:
+                glUseProgram(0)
+            except Exception:
+                pass
+
+        # fallback auf immediate-mode wenn GLSL-pfad nicht verfügbar ist.
+        glColor4f(float(color[0]), float(color[1]), float(color[2]), float(color[3]))
+        glDisable(GL_TEXTURE_2D)
+        glLineWidth(float(width))
+        glBegin(GL_LINE_STRIP)
+        for sx, sy in run:
+            glVertex2f(float(sx), float(sy))
+        glEnd()
+
+    def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density, light_intensity):
+        """Zeichnet einen körper als shader-gesteuertes quad (scheibe + optional atmosphäre + glow)."""
+        if self._body_program is None or self._body_quad_vbo is None:
+            return False
+
+        radius_px = max(1.0, float(radius))
+        radius_scale = max(0.5, min(2.0, radius_px / 50.0))
+
+        outer_radius = radius_px
+        atmos_alpha = 0.0
+        atmos_radius = radius_px
+        if atmos_density > 0.0:
+            atmos_radius = radius_px * 2.0
+            outer_radius = max(outer_radius, atmos_radius)
+            atmos_alpha = min(float(atmos_density) / 100.0, 1.0) * radius_scale
+
+        glow_alpha = 0.0
+        if light_intensity > 0.0:
+            glow_radius = radius_px * 2.5
+            outer_radius = max(outer_radius, glow_radius)
+            glow_alpha = min(float(light_intensity) / 1000.0, 1.0) * 0.5 * radius_scale * 0.8
+
+        core_norm = max(0.001, min(1.0, radius_px / max(outer_radius, 1e-6)))
+        if atmos_alpha > 0.0:
+            atmos_norm = max(core_norm, min(1.0, atmos_radius / max(outer_radius, 1e-6)))
+        else:
+            atmos_norm = core_norm
+
+        try:
+            glDisable(GL_TEXTURE_2D)
+            glUseProgram(self._body_program)
+
+            glUniform2f(self._body_u_center_px, float(x), float(y))
+            glUniform1f(self._body_u_outer_radius_px, float(outer_radius))
+            glUniform2f(self._body_u_viewport, float(self.width), float(self.height))
+            glUniform3f(self._body_u_base_color,
+                        float(base_color[0]), float(base_color[1]), float(base_color[2]))
+            glUniform3f(self._body_u_atmos_color,
+                        float(atmos_color[0]), float(atmos_color[1]), float(atmos_color[2]))
+            glUniform1f(self._body_u_core_radius_norm, float(core_norm))
+            glUniform1f(self._body_u_atmos_radius_norm, float(atmos_norm))
+            glUniform1f(self._body_u_atmos_alpha, float(atmos_alpha))
+            glUniform1f(self._body_u_glow_alpha, float(glow_alpha))
+
+            glBindBuffer(GL_ARRAY_BUFFER, self._body_quad_vbo)
+            glEnableVertexAttribArray(self._body_a_corner)
+            glVertexAttribPointer(self._body_a_corner, 2, GL_FLOAT, GL_FALSE, 0, None)
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+            glDisableVertexAttribArray(self._body_a_corner)
+            glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glUseProgram(0)
+            return True
+        except Exception:
+            try:
+                glUseProgram(0)
+            except Exception:
+                pass
+            return False
+
+    def _draw_body_legacy(self, x, y, radius, r, g, b):
+        glColor4f(r, g, b, 1.0)
+        glBegin(GL_TRIANGLE_FAN)
+        glVertex2f(x, y)
+        segments = max(16, min(64, int(radius * 2)))
+        for i in range(segments + 1):
+            angle = 2.0 * math.pi * i / segments
+            px = x + math.cos(angle) * radius
+            py = y + math.sin(angle) * radius
+            glVertex2f(px, py)
+        glEnd()
+
+    def _get_label_texture(self, text, font):
+        key = (text, font.get_height())
+        entry = self._label_texture_cache.get(key)
+        if entry:
+            return entry  # (texid, w, h)
+        try:
+            surface = font.render(text, True, (255, 255, 255))
+            texture_data = pygame.image.tostring(surface, 'RGBA', True)
+            w, h = surface.get_size()
+            texid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, texid)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            self._label_texture_cache[key] = (texid, w, h)
+            return (texid, w, h)
+        except Exception:
+            return None
+
+    def _blit_cached_text(self, text, x, y, font):
+        entry = self._get_label_texture(text, font)
+        if not entry:
+            # fallback: immediate per-call blit
+            surface = font.render(text, True, (255,255,255))
+            texture_data = pygame.image.tostring(surface, 'RGBA', True)
+            w, h = surface.get_size()
+            tid = glGenTextures(1)
+            glBindTexture(GL_TEXTURE_2D, tid)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            glEnable(GL_TEXTURE_2D)
+            glColor4f(1.0, 1.0, 1.0, 1.0)
+            glBegin(GL_QUADS)
+            glTexCoord2f(0, 0); glVertex2f(x, y)
+            glTexCoord2f(1, 0); glVertex2f(x + w, y)
+            glTexCoord2f(1, 1); glVertex2f(x + w, y + h)
+            glTexCoord2f(0, 1); glVertex2f(x, y + h)
+            glEnd()
+            glDisable(GL_TEXTURE_2D)
+            try:
+                glDeleteTextures(1, [tid])
+            except Exception:
+                pass
+            return
+        texid, w, h = entry
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, texid)
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(x, y)
+        glTexCoord2f(1, 0); glVertex2f(x + w, y)
+        glTexCoord2f(1, 1); glVertex2f(x + w, y + h)
+        glTexCoord2f(0, 1); glVertex2f(x, y + h)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
 
     def _record_reference_trajectories(self, bodies):
         if not self.reference_trajectories_enabled:
@@ -488,7 +857,6 @@ class Renderer:
         scale = float(camera.scale)
 
         glDisable(GL_TEXTURE_2D)
-        glLineWidth(1.0)
 
         for body in bodies:
             if getattr(body, 'is_ship', False):
@@ -502,7 +870,6 @@ class Renderer:
             cr = min(1.0, max(0.0, base[0] / 255.0))
             cg = min(1.0, max(0.0, base[1] / 255.0))
             cb = min(1.0, max(0.0, base[2] / 255.0))
-            glColor4f(cr, cg, cb, 0.42)
 
             screen_points = []
             for fx, fy in trail:
@@ -514,10 +881,7 @@ class Renderer:
             for run in runs:
                 if len(run) < 2:
                     continue
-                glBegin(GL_LINE_STRIP)
-                for sx, sy in run:
-                    glVertex2f(float(sx), float(sy))
-                glEnd()
+                self._draw_polyline(run, color=(cr, cg, cb, 0.42), width=1.0)
     
     def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None):
 
@@ -548,10 +912,10 @@ class Renderer:
         self.debug_info['prediction_points_in'] = 0
         self.debug_info['prediction_points_drawn'] = 0
         
-        # If FXAA is enabled, render non-ship bodies into the FBO and
-        # apply FXAA. Ships are rendered afterwards directly to the main
-        # framebuffer so the predictor (also rendered to the main buffer)
-        # and the ship marker share the exact same pixel-space coordinates.
+        # falls FXAA aktiviert ist, rendern nicht-schiff-körper in das FBO und
+        # FXAA anwenden. Schiffe werden danach direkt in den haupt-framebuffer
+        # gerendert damit predictor (ebenfalls im hauptpuffer gerendert) und
+        # das schiff-marker exakt dieselben pixel-koordinaten teilen.
         ship_body = next((b for b in bodies if getattr(b, 'is_ship', False)), None)
 
         if self.enable_fxaa and self.fbo:
@@ -575,7 +939,7 @@ class Renderer:
             glViewport(0, 0, self.width, self.height)
             self._apply_fxaa()
         
-        # Restore projection matrix for trajectory rendering
+        # Projektion-Matrix für Trajektorienwiedergabe wiederherstellen
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
         gluOrtho2D(0, self.width, 0, self.height)
@@ -583,18 +947,18 @@ class Renderer:
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
         
-        # Re-enable blending for trajectory
+        # Blending für Trajektorien wieder aktivieren
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # Compute ship anchor once (we computed ship_body earlier)
+        # Schiffsanker einmal berechnen (ship_body wurde oben ermittelt)
         ship_anchor_world = (float(ship_body.position.x), float(ship_body.position.y)) if ship_body is not None else None
 
         if self._points_count(prediction_points) > 0:
             self.draw_prediction(prediction_points, camera, anchor_world=ship_anchor_world)
 
-        # Draw the ship marker on the main framebuffer so it visually
-        # matches the predictor start point exactly.
+        # Schiff-Marker im Haupt-Framebuffer zeichnen, damit er visuell
+        # genau mit dem Prädiktor-Startpunkt übereinstimmt.
         if ship_body is not None:
             self._draw_body(ship_body, camera)
 
@@ -610,7 +974,10 @@ class Renderer:
             camera_frame_xy=camera_frame_xy,
         )
         screen_pos = (x, y)
-        radius = max(3, int(body.radius * camera.scale))  # Mindestens 3 Pixel
+        # Gleitkomma-Radius in Pixeln für Label-Anker beibehalten, um
+        # 1-Pixel-Flackern zu vermeiden, wenn sich der Radius beim Zoomen leicht ändert.
+        radius_px = max(3.0, float(body.radius) * float(camera.scale))
+        radius = max(3, int(round(radius_px)))  # integer radius for geometry
         
         self.debug_info['bodies_rendered'] += 1
         r, g, b = body.color[0] / 255.0, body.color[1] / 255.0, body.color[2] / 255.0
@@ -623,36 +990,76 @@ class Renderer:
             except Exception:
                 pass
             self._draw_ship_arrow(body, x, y, r, g, b, theta_override=theta_frame)
-            self._draw_body_label(body.name, screen_pos, 12)
+            # Schiffs-Label mit camera.world_to_screen zeichnen, um
+            # konsistente Welt->Bildschirm-Abbildung zu gewährleisten und
+            # FBO/Projektions-Inkonsistenzen zu vermeiden, die Label-Flackern
+            # beim Umschalten der Verfolgung verursachen können.
+            try:
+                lx, ly = camera.world_to_screen(body.position)
+                entry = self._get_label_texture(body.name, self.font_small)
+                if entry:
+                    _, w, h = entry
+                    label_x = float(lx) - (float(w) / 2.0)
+                    label_y = float(ly) + 12.0 + 6.0
+                    self._blit_cached_text(body.name, label_x, label_y, self.font_small)
+                else:
+                    self._blit_cached_text(body.name, float(lx) + 12.0, float(ly) - 8.0, self.font_small)
+            except Exception:
+                try:
+                    self._draw_body_label(body.name, screen_pos, 12)
+                except Exception:
+                    pass
             return
 
-        if body.light_intensity > 0:
-            self._draw_glow(x, y, radius, r, g, b, body.light_intensity)
-        
         if hasattr(body, 'atmosphere_color'):
             r1, g1, b1 = body.atmosphere_color[0] / 255.0, body.atmosphere_color[1] / 255.0, body.atmosphere_color[2] / 255.0
         else:
             r1, g1, b1 = r, g, b
-        if body.has_atmosphere and body.atmos_density > 0:
-            self._draw_atmosphere(x, y, radius, r1, g1, b1, body.atmos_density)
-        
-        glColor4f(r, g, b, 1.0)
-        glBegin(GL_TRIANGLE_FAN)
-        glVertex2f(x, y)  # Zentrum
-        
-        segments = max(16, min(64, radius * 2))
-        for i in range(segments + 1):
-            angle = 2.0 * math.pi * i / segments
-            px = x + math.cos(angle) * radius
-            py = y + math.sin(angle) * radius
-            glVertex2f(px, py)
-        glEnd()
+
+        has_atmos = bool(getattr(body, 'has_atmosphere', False))
+        atmos_density = float(getattr(body, 'atmos_density', 0.0)) if has_atmos else 0.0
+        light_intensity = float(getattr(body, 'light_intensity', 0.0))
+
+        # Primärer Pfad: GLSL-Shader zeichnet Scheibe + Glow + Atmosphäre in einem Quad.
+        drawn_with_shader = self._draw_body_glsl(
+            x,
+            y,
+            radius_px,
+            (r, g, b),
+            (r1, g1, b1),
+            atmos_density,
+            light_intensity,
+        )
+
+        # Fallback path: preserve previous immediate-mode behavior.
+        if not drawn_with_shader:
+            if light_intensity > 0:
+                self._draw_glow(x, y, radius_px, r, g, b, light_intensity)
+            if has_atmos and atmos_density > 0:
+                self._draw_atmosphere(x, y, radius_px, r1, g1, b1, atmos_density)
+            self._draw_body_legacy(x, y, radius, r, g, b)
         
         if radius > 5:
-            self._draw_body_label(body.name, screen_pos, radius)
+            # Label-Position mittels camera.world_to_screen berechnen, um
+            # inkonsistente Koordinatensysteme zwischen FBO und Hauptpuffer zu vermeiden.
+            try:
+                lx, ly = camera.world_to_screen(body.position)
+                entry = self._get_label_texture(body.name, self.font_small)
+                if entry:
+                    _, w, h = entry
+                    label_x = float(lx) - (float(w) / 2.0)
+                    label_y = float(ly) + float(radius_px) + 6.0
+                    self._blit_cached_text(body.name, label_x, label_y, self.font_small)
+                else:
+                    self._blit_cached_text(body.name, float(lx) + float(radius_px) + 2.0, float(ly) - 8.0, self.font_small)
+            except Exception:
+                try:
+                    self._draw_body_label(body.name, screen_pos, radius_px)
+                except Exception:
+                    pass
 
     def _draw_ship_arrow(self, body, x, y, r, g, b, theta_override=None):
-        # Draw in fixed screen pixels so ship size stays constant while zooming.
+        # in festen bildschirm-pixeln zeichnen damit schiffgröße beim zoomen konstant bleibt.
         arrow_length = 18.0
         arrow_half_width = 7.0
         tail_offset = 6.0
@@ -665,11 +1072,11 @@ class Renderer:
         nx = -hy
         ny = hx
 
-        # Adjust origin so the triangle's centroid is located at (x, y).
-        # The centroid of the triangle formed by nose and tail corners lies
-        # offset along the heading by (arrow_length - 2*tail_offset)/3 in
-        # screen pixels. Move the local origin back by that amount so the
-        # ship's world position corresponds to the visual center of the arrow.
+        # ursprung anpassen damit der dreiecks-schwerpunkt an (x, y) liegt.
+        # der schwerpunkt des dreiecks aus nase und schwanz-ecken liegt
+        # entlang der richtung versetzt um (arrow_length - 2*tail_offset)/3
+        # in bildschirm-pixeln. verschiebe den lokalen ursprung zurück um diesen
+        # betrag damit die welt-position des schiffs dem visuellen mittelpunkt des pfeils entspricht.
         centroid_offset = (arrow_length - 2.0 * tail_offset) / 3.0
         origin_x = x - hx * centroid_offset
         origin_y = y - hy * centroid_offset
@@ -690,8 +1097,8 @@ class Renderer:
         glVertex2f(left_x, left_y)
         glVertex2f(right_x, right_y)
         glEnd()
-        # Debug: draw small markers and emit one-line info comparing
-        # the triangle centroid with the provided screen position.
+        # debug: kleine marker zeichnen und einzeilige info ausgeben die
+        # den dreiecks-schwerpunkt mit der übergebenen screen-position vergleicht.
         try:
             if self.debug_predictor:
                 centroid_x = (nose_x + left_x + right_x) / 3.0
@@ -769,14 +1176,12 @@ class Renderer:
             glVertex2f(outer_x, outer_y)
         glEnd()
     def _draw_orbit(self, body, camera, segments=None, color=None, width=1.0):
-        """
-        Draws a full orbital ellipse for bodies using scripted orbits.
-        Uses `semi_major_axis` (a) and `eccentricity` (e). If `is_moon_of`
-        is set to a body object, the orbit is drawn around that parent's
-        position; otherwise the focus is at world origin.
-        The number of segments is chosen adaptively based on the orbit
-        circumference in screen pixels to keep the line smooth but
-        performant.
+        """Zeichnet eine vollständige Orbit-Ellipse für Körper mit scripted-Orbits.
+        Verwendet `semi_major_axis` (a) und `eccentricity` (e). Wenn `is_moon_of`
+        auf ein Eltern-Objekt gesetzt ist, wird die Bahn um die Position des Elternteils
+        gezeichnet; andernfalls ist der Fokus im Weltursprung.
+        Die Anzahl der Segmente wird adaptiv anhand des Umfangs in Bildschirmpixeln
+        gewählt, um die Linie glatt aber performant zu halten.
         """
         a = getattr(body, 'semi_major_axis', None)
         e = getattr(body, 'eccentricity', None)
@@ -821,7 +1226,7 @@ class Renderer:
             sy = half_h - (frame_y - cam_frame_y) * scale
             screen_points.append((sx, sy))
 
-        # Only draw visible runs to avoid wasted GPU work
+        # Nur sichtbare Abschnitte zeichnen, um unnötige GPU-Arbeit zu vermeiden
         runs = self._visible_window_runs(screen_points, margin_px=self.prediction_visibility_margin_px)
         if not runs:
             return
@@ -833,15 +1238,10 @@ class Renderer:
             cr, cg, cb = color
 
         glDisable(GL_TEXTURE_2D)
-        glColor4f(cr, cg, cb, 0.6)
-        glLineWidth(width)
         for run in runs:
             if len(run) < 2:
                 continue
-            glBegin(GL_LINE_STRIP)
-            for sx, sy in run:
-                glVertex2f(float(sx), float(sy))
-            glEnd()
+            self._draw_polyline(run, color=(cr, cg, cb, 0.6), width=width)
 
     def _points_count(self, points):
         if points is None:
@@ -1059,19 +1459,16 @@ class Renderer:
         # Textur deaktivieren falls HUD sie aktiviert hat
         glDisable(GL_TEXTURE_2D)
         
-        # Ensure blend is enabled
+        # blend aktivieren
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-        glColor4f(1.0, 1.0, 1.0, 0.6)
-        glLineWidth(2.0)
 
         ship_x, ship_y = self._point_xy(path_points[0])
         half_w = self.width * 0.5
         half_h = self.height * 0.5
         camera_frame_xy = self._frame_camera_xy(camera)
 
-        # Debug output: show ship world position and predictor's first point
+        # debug-ausgabe: schiff-welt-position und ersten predictor-punkt anzeigen
         try:
             pred0_x, pred0_y = self._point_xy(path_points[0])
             ship_world_x, ship_world_y = (float(anchor_world[0]), float(anchor_world[1])) if anchor_world is not None else (pred0_x, pred0_y)
@@ -1080,8 +1477,8 @@ class Renderer:
         except Exception:
             pass
 
-        # If we can identify the ship body, use that exact position for anchoring.
-        # This forces the first rendered predictor point to be at the live ship.
+        # wenn das schiff identifiziert werden kann, dessen exakte position zum verankern verwenden.
+        # dies zwingt den ersten gerenderten predictor-punkt dazu am live-schiff zu liegen.
         if anchor_world is not None:
             ship_x = float(anchor_world[0])
             ship_y = float(anchor_world[1])
@@ -1182,10 +1579,7 @@ class Renderer:
         for run in sampled_runs:
             if len(run) < 2:
                 continue
-            glBegin(GL_LINE_STRIP)
-            for sx, sy in run:
-                glVertex2f(float(sx), float(sy))
-            glEnd()
+            self._draw_polyline(run, color=(1.0, 1.0, 1.0, 0.6), width=2.0)
 
     def _squared_point_line_distance(self, px, py, ax, ay, bx, by):
         abx = bx - ax
@@ -1403,42 +1797,73 @@ class Renderer:
                 -margin < y < self.height + margin)
     
     def _draw_body_label(self, name, screen_pos, radius):
+        # Label mit gecachten GL-Texturen zeichnen, um pro-Frame GL-Allocationen zu vermeiden.
+        # Label horizontal zentrieren und über dem Körper platzieren, um
+        # Fehlausrichtungen beim Zoomen oder bei Radiusänderungen zu vermeiden.
+        try:
+            entry = self._get_label_texture(name, self.font_small)
+            if entry:
+                _, w, h = entry
+                label_x = float(screen_pos[0]) - (float(w) / 2.0)
+                # Label über dem Körper platzieren; Bildschirm-Y wächst nach oben.
+                label_y = float(screen_pos[1]) + float(radius) + 6.0
+                self._blit_cached_text(name, label_x, label_y, self.font_small)
+                return
+        except Exception:
+            pass
 
-        # Label mit pygame rendern
-        name_surface = self.font_small.render(name, True, (255, 255, 255))
+        # Fallback: previous heuristic
         label_x = screen_pos[0] + radius + 2
         label_y = screen_pos[1] - 8
-        
-        # Surface zu OpenGL-Textur konvertieren
-        self._blit_pygame_surface(name_surface, label_x, label_y)
+        self._blit_cached_text(name, label_x, label_y, self.font_small)
     
     def _blit_pygame_surface(self, surface, x, y):
         """Rendert eine pygame Surface an der angegebenen Position."""
-        # Textur-Daten extrahieren
+        # Persistent HUD texture: reuse gl texture and update via glTexSubImage2D
         texture_data = pygame.image.tostring(surface, 'RGBA', True)
         width, height = surface.get_size()
-        
-        # OpenGL Textur erstellen
-        texture_id = glGenTextures(1)
-        glBindTexture(GL_TEXTURE_2D, texture_id)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 
-                     0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-        
+
+        # Create or resize HUD texture
+        if self._hud_texture is None or self._hud_texture_size != (width, height):
+            if self._hud_texture is not None:
+                try:
+                    glDeleteTextures(1, [self._hud_texture])
+                except Exception:
+                    pass
+            try:
+                self._hud_texture = glGenTextures(1)
+                self._hud_texture_size = (width, height)
+                glBindTexture(GL_TEXTURE_2D, self._hud_texture)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            except Exception:
+                # Fallback: create one-shot texture
+                tex = glGenTextures(1)
+                glBindTexture(GL_TEXTURE_2D, tex)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+                self._hud_texture = tex
+                self._hud_texture_size = (width, height)
+        else:
+            glBindTexture(GL_TEXTURE_2D, self._hud_texture)
+            try:
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            except Exception:
+                # Some drivers don't support TexSubImage with certain formats; fallback to TexImage
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+
         # Textur rendern
         glEnable(GL_TEXTURE_2D)
         glColor4f(1.0, 1.0, 1.0, 1.0)
-        
         glBegin(GL_QUADS)
         glTexCoord2f(0, 0); glVertex2f(x, y)
         glTexCoord2f(1, 0); glVertex2f(x + width, y)
         glTexCoord2f(1, 1); glVertex2f(x + width, y + height)
         glTexCoord2f(0, 1); glVertex2f(x, y + height)
         glEnd()
-        
         glDisable(GL_TEXTURE_2D)
-        glDeleteTextures([texture_id])
     
     def _render_hud(self, camera, predictor=None):
         # HUD-Texte vorbereiten
@@ -1489,8 +1914,8 @@ class Renderer:
         texts.append("[WASD] Move | [F] Unfollow | [Scroll] Zoom | [R] Cycle ref | [1]/[2] Frame mode | [T] Target overlay")
         
         # Pygame Surface für HUD erstellen
-        line_height = 22
-        hud_width = 980
+        line_height = 1
+        hud_width = 9
         hud_height = max(40, len(texts) * line_height + 8)
         hud_surface = pygame.Surface((hud_width, hud_height), pygame.SRCALPHA)
         
@@ -1524,3 +1949,33 @@ class Renderer:
             
             # Framebuffer neu erstellen
             self._init_fxaa()
+        # Clear HUD and label texture caches (will be recreated lazily)
+        try:
+            for entry in list(self._label_texture_cache.values()):
+                texid = entry[0]
+                if texid:
+                    try:
+                        glDeleteTextures(1, [texid])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._label_texture_cache = {}
+        if getattr(self, '_hud_texture', None):
+            try:
+                glDeleteTextures(1, [self._hud_texture])
+            except Exception:
+                pass
+            self._hud_texture = None
+            self._hud_texture_size = (0, 0)
+        # Delete poly VBO so it can be recreated for the new context/size
+        try:
+            if getattr(self, '_poly_vbo', None):
+                try:
+                    glDeleteBuffers(1, [self._poly_vbo])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._poly_vbo = None
+        self._poly_vbo_size = 0

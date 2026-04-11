@@ -42,22 +42,22 @@ class body:
             a = float(self.semi_major_axis)
             e = float(self.eccentricity)
 
-            # Aktueller Radius aus Kepler-Formel
+            # aktueller radius aus kepler-formel
             r = a * (1.0 - e * e) / (1.0 + e * math.cos(self.theta))
 
-            # Momentane Geschwindigkeit (approx) und Winkelgeschwindigkeit
-            # Use vis-viva for speed magnitude; angular speed approx = v / r
+            # momentane geschwindigkeit (approx) und winkelgeschwindigkeit
+            # vis-viva für geschwindigkeitsbetrag verwenden; winkelgeschwindigkeit approx = v / r
             v = math.sqrt(max(0.0, mu * (2.0 / r - 1.0 / a)))
             omega = v / max(1e-12, r)
 
-            # Advance true anomaly
+            # wahre anomalie voranschreiten
             self.theta += omega * dt
 
-            # Position in orbital plane (periapsis at angle 0)
+            # position in orbitalebene (periapsis bei winkel 0)
             x_orb = r * math.cos(self.theta)
             y_orb = r * math.sin(self.theta)
 
-            # Rotate by argument of periapsis to world coordinates
+            # mit periapsis-argument in weltkoordinaten rotieren
             c = math.cos(self.arg_periapsis)
             s = math.sin(self.arg_periapsis)
             x = x_orb * c - y_orb * s

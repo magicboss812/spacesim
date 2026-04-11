@@ -69,8 +69,14 @@ class Camera:
         else:
             # Freie Kamerasteuerung mit Tasten
             keys = pygame.key.get_pressed()
-            move = self.move_speed / self.scale
-            
+            # gewünschte bildschirm-geschwindigkeit (`move_speed`, interpretiert
+            # als pixel pro sekunde) in welt-meter umrechnen unter verwendung der
+            # aktuellen `scale` (px/m). Mit `dt` (sekunden) multiplizieren damit
+            # bewegung framerate-unabhängig ist. sichere untergrenze für `scale`
+            # verwenden um riesige sprung oder division durch null zu vermeiden.
+            scale_safe = max(self.scale, 1e-30)
+            move = (self.move_speed / scale_safe) * float(dt)
+
             if keys[pygame.K_LEFT] or keys[pygame.K_a]:
                 self.position.x -= move
             if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
@@ -96,7 +102,7 @@ class Camera:
             if event.key == pygame.K_f:
                 if self.target is not None:
                     self.unfollow()
-            # Simulation timestep control (PageUp/PageDown)
+            # simulation timestep steuerung (PageUp/PageDown)
             if event.key == pygame.K_PAGEUP:
                 self.sim_dt *= self.sim_dt_factor
                 self.sim_dt = min(self.sim_dt, self.max_sim_dt)

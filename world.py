@@ -93,15 +93,15 @@ class world:
             if self.should_release(body):
                 self.release_body(body)
 
-        # Note: enabling epicycle mode is performed by reparenting top-level
-        # bodies to the chosen center via `enable_epicycles()`; update_planets
-        # simply follows whatever parent relationships are currently set.
+        # Hinweis: Der Epizykel-Modus wird durch Umparenting der Top-Level-
+        # Körper zum gewählten Zentrum via `enable_epicycles()` aktiviert; 
+        # update_planets folgt einfach den aktuell gesetzten Elternbeziehungen.
 
     def _rv_to_orbital(self, r_vec, v_vec, mu):
-        """Convert position/velocity (relative to parent) to orbital elements.
+        """konvertiert position/geschwindigkeit (relativ zum parent) in orbitale elementen.
 
-        Returns (a, e, theta, arg_peri) where theta is true anomaly measured
-        from periapsis and arg_peri is the argument of periapsis (radians).
+        gibt (a, e, theta, arg_peri) zurück wobei theta die wahre anomalie ist gemessen
+        vom periapsis und arg_peri das periapsis-argument (radian) ist.
         """
         r = r_vec.magnitude()
         v = v_vec.magnitude()
@@ -114,7 +114,7 @@ class world:
         # specific energy
         eps = 0.5 * v * v - mu / r
         if abs(eps) < 1e-20:
-            # avoid division by zero; fallback to circular
+            # Division durch Null vermeiden; Fallback: kreisförmige Bahn
             a = r
         else:
             a = -mu / (2.0 * eps)
@@ -140,9 +140,9 @@ class world:
     def calculate_forces(self):
 
         for body in self.body:
-            # Skip bodies that are scripted (their positions are provided by
-            # orbital scripts) or explicitly marked `fixed` — fixed bodies
-            # should not be integrated by the dynamics solver.
+            # überspringe körper die scripted sind (deren positionen durch
+            # orbit-skripte vorgegeben werden) oder explizit als `fixed` markiert sind —
+            # fixe körper sollten nicht vom dynamik-solver integriert werden.
             if body.scripted_orbit or getattr(body, 'fixed', False):
                 continue
             body.acceleration.clear()
@@ -158,9 +158,8 @@ class world:
                 body.acceleration += delta * factor
     def update_dynamics(self, dt):
         for body in self.body:
-            # Do not integrate scripted orbit bodies or bodies marked as
-            # fixed — those should remain at their scripted/initial
-            # positions.
+            # scripted-orbit körper oder als fixed markierte körper nicht integrieren —
+            # diese sollten an ihren scripted/initial positionen bleiben.
             if body.scripted_orbit or getattr(body, 'fixed', False):
                 continue
             
@@ -197,12 +196,12 @@ class world:
         self.time += dt
 
     def enable_epicycles(self, center):
-        """Enable epicycle mode rooted at `center`.
+        """epizykel-modus aktivieren mit wurzel in `center`.
 
-        This saves current parent/orbit state for all bodies and then
-        reparents every top-level body (those whose `is_moon_of` is None)
-        to `center`. The saved state is stored so `disable_epicycles()`
-        can restore the original configuration.
+        speichert den aktuellen eltern/orbit-zustand für alle körper und setzt dann
+        jedes top-level körper (deren `is_moon_of` None ist) als child von `center`.
+        der gespeicherte zustand wird so abgelegt, dass `disable_epicycles()`
+        die ursprüngliche konfiguration wiederherstellen kann.
         """
         if center is None:
             return False
@@ -249,7 +248,7 @@ class world:
             # bodies defined with orbital elements). Do not change purely
             # dynamic bodies.
             if orig_parent is None and saved[b]['scripted_orbit']:
-                # Compute relative r/v to center and derive new orbital elements
+                # Berechne relatives r/v zum Zentrum und leite neue orbitale Elemente ab
                 
                     rel_r = b.position - center.position
                     # If center has velocity attribute, use relative velocity, else assume 0
@@ -267,7 +266,7 @@ class world:
                         b.scripted_orbit = True
                         b.released = False
                     else:
-                        # fallback: set circular orbit at current distance
+                        # Fallback: setze kreisförmige Bahn mit dem aktuellen Abstand
                         try:
                             r = (b.position - center.position).magnitude()
                         except Exception:
@@ -291,7 +290,7 @@ class world:
         return True
 
     def disable_epicycles(self):
-        """Restore bodies saved state and disable epicycle mode."""
+        """gespeicherten zustand der körper wiederherstellen und epizykel-modus deaktivieren."""
         if not self._epicycle_enabled:
             return False
 
@@ -322,9 +321,9 @@ class world:
         return True
 
     def set_epicycle_center_by_name(self, name):
-        """Convenience: enable epicycles centered on the body with `name`.
+        """komfortfunktion: epizykel für den körper mit `name` aktivieren.
 
-        If `name` is None or not found, epicycles are disabled.
+        wenn `name` None ist oder nicht gefunden wird, werden epizykel deaktiviert.
         """
         if name is None:
             return self.disable_epicycles()

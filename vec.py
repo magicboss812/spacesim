@@ -12,25 +12,25 @@ class Vec2:
         self.y = float(y)
         
     def __sub__(self, other):
-        """Vector subtraction."""
+        """vektor-subtraktion."""
         if isinstance(other, Vec2):
             return Vec2(self.x - other.x, self.y - other.y)
         return NotImplemented
     
     def __add__(self, other):
-        """Vector addition."""
+        """vektor-addition."""
         if isinstance(other, Vec2):
             return Vec2(self.x + other.x, self.y + other.y)
         return NotImplemented
     
     def __mul__(self, scalar):
-        """Scalar multiplication (self * scalar)."""
+        """skalare multiplikation (self * scalar)."""
         if not isinstance(scalar, (int, float)):
             return NotImplemented
         s = float(scalar)
         return Vec2(self.x * s, self.y * s)
     def __iadd__(self, other):
-        """In-place vector addition."""
+        """in-place vektor-addition."""
         if isinstance(other, Vec2):
             self.x += other.x
             self.y += other.y
@@ -38,7 +38,7 @@ class Vec2:
         return NotImplemented
     
     def __isub(self, other):
-        """In-place vector subtraction."""
+        """in-place vektor-subtraktion."""
         if isinstance(other, Vec2):
             self.x -= other.x
             self.y -= other.y
@@ -46,7 +46,7 @@ class Vec2:
         return NotImplemented
     
     def __imul__(self, scalar):
-        """In-place scalar multiplication."""
+        """in-place skalare multiplikation."""
         if not isinstance(scalar, (int, float)):
             return NotImplemented
         s = float(scalar)
@@ -57,34 +57,34 @@ class Vec2:
     def __rmul__(self, scalar):
         if not isinstance(scalar, (int, float)):
             return NotImplemented
-        """Scalar multiplication (scalar * self)."""
+        """skalare multiplikation (scalar * self)."""
         s = float(scalar)
         return Vec2(self.x * s, self.y * s)
     
     def __truediv__(self, scalar):
-        """Scalar division."""
+        """skalare division."""
         s = float(scalar)
         if s == 0.0:
             raise ValueError("Division by zero")
         return Vec2(self.x / s, self.y / s)
     
     def __neg__(self):
-        """Negation."""
+        """negation."""
         return Vec2(-self.x, -self.y)
     
     def __repr__(self):
         return f"Vec2({self.x}, {self.y})"
     
     def magnitude_squared(self):
-        """Squared magnitude for performance-critical code."""
+        """quadratische länge für performance-kritischen code."""
         return self.x * self.x + self.y * self.y
     
     def magnitude(self):
-        """Magnitude (length) of the vector."""
+        """betrag (länge) des vektors."""
         return math.sqrt(self.magnitude_squared())
     
     def normalize(self):
-        """Return normalized (unit) vector."""
+        """gibt normalisierten (einheits-)vektor zurück."""
         m2 = self.magnitude_squared()
         if m2 < 1e-30:
             return Vec2(0.0, 0.0)
@@ -92,26 +92,26 @@ class Vec2:
         return Vec2(self.x / mag, self.y / mag)
     
     def dot(self, other):
-        """Dot product."""
+        """skalarprodukt."""
         if isinstance(other, Vec2):
             return self.x * other.x + self.y * other.y
         return NotImplemented
     
     def copy(self):
-        """Create a copy of this vector."""
+        """erstellt eine kopie dieses vektors."""
         return Vec2(self.x, self.y)
     
     def to_tuple(self):
-        """Convert to (x, y) tuple."""
+        """in (x, y)-tuple umwandeln."""
         return (self.x, self.y)
     
     @staticmethod
     def from_tuple(t):
-        """Create Vec2 from tuple or list."""
+        """erstellt Vec2 aus tuple oder liste."""
         return Vec2(float(t[0]), float(t[1]))
     
     def distance_squared_to(self, other):
-        """Squared distance to another vector."""
+        """quadratische distanz zu einem anderen vektor."""
         if isinstance(other, Vec2):
             dx = self.x - other.x
             dy = self.y - other.y
@@ -119,16 +119,16 @@ class Vec2:
         return NotImplemented
     
     def clear(self):
-        """Reset vector to zero."""
+        """vektor auf null zurücksetzen."""
         self.x = 0.0
         self.y = 0.0
         return self
     def set(self, x, y):
-        """Set vector components."""
+        """vektor-komponenten setzen."""
         self.x = float(x)
         self.y = float(y)
         return self
 
 def vec(x, y):
-    """Convenience function to create Vec2."""
+    """bequemlichkeitsfunktion zum erstellen von Vec2."""
     return Vec2(x, y)
