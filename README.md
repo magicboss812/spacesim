@@ -96,6 +96,11 @@ Stand 11.04.2026, weitere Änderungen werden wahrscheinlich erstmal lokal oder a
 
 ![Veranschaulichung des Problems](https://i.imgur.com/BGl4xWm.png)
 
+## Poliastro & Astropy
+![Poliastro Logo](https://images.opencollective.com/poliastro/79214c2/background.png)
+* mithilfe dieser Python Bibliotheken wurden einige Elemente als Inspiration genommen oder aus der Bibliothek in dem Code aufgerufen
+* sie ersetzten definitiv nicht Kernelemente, die im Spiel später sein werden, sodern dienen voll und ganz als Hilfe für solche Art von Programmen (im Bereich der Astrophysik)
+
 # Was kann behoben werden und wie?
 
 * Das Rendering muss explizit parallelisiert und für die GPU ausgelegt werden. GPUs arbeiten mit vielen Kernen und sind für parallele Berechnungen wie Pixel-Rendering optimiert. Die Engine muss entsprechend angepasst werden, insbesondere durch Verlagerung von Vertexberechnung und Rendering in GLSL (OpenGL Shading Language).
