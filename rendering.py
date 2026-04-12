@@ -1914,8 +1914,8 @@ class Renderer:
         texts.append("[WASD] Move | [F] Unfollow | [Scroll] Zoom | [R] Cycle ref | [1]/[2] Frame mode | [T] Target overlay")
         
         # Pygame Surface für HUD erstellen
-        line_height = 1
-        hud_width = 9
+        line_height = 16
+        hud_width = 560
         hud_height = max(40, len(texts) * line_height + 8)
         hud_surface = pygame.Surface((hud_width, hud_height), pygame.SRCALPHA)
         
