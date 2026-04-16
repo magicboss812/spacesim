@@ -322,6 +322,7 @@ class Predictor:
         length=None,
         use_numba=True,
         async_compute=True,
+        rolling_mode=None,
     ):
         
         self.num_points = int(num_points)
@@ -332,11 +333,13 @@ class Predictor:
 
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
+        # suppress frequent computed debug lines by default; set False to enable
+        self._suppress_dbg_computed = True
         self.initialized = False
         self.recompute_every_update = recompute_every_update
 
         self.workers = 12 if workers is None else int(workers)
-        self.use_numba = True
+        self.use_numba = bool(use_numba)
 
         self.auto_precision_from_zoom = True
         self.target_screen_step_px = 2.0
@@ -344,8 +347,14 @@ class Predictor:
         self._view_scale = None
 
         self.async_compute = bool(async_compute)
-
-        self.rolling_mode = True
+        if rolling_mode is None:
+            # default: async path when async is enabled, rolling path otherwise
+            self.rolling_mode = not self.async_compute
+        else:
+            self.rolling_mode = bool(rolling_mode)
+        if self.rolling_mode and self.async_compute:
+            # rolling mode computes in the update loop and does not use async jobs
+            self.async_compute = False
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self._executor = None
         self._pending_future = None
@@ -359,6 +368,10 @@ class Predictor:
 
         self._computed_since_last_update = 0
         
+        # debug counters / thresholds
+        self._frame_dbg_counter = 0
+        self._frame_dbg_freq = 10  # print PRED_DBG_FRAME every N frames (or when view changed)
+        self._update_rolling_warn_threshold = 0.01  # only log UPDATE_ROLLING if > threshold (s)
 
         self._last_swapped_snapshot = None
 
@@ -566,8 +579,7 @@ class Predictor:
     def _serialize_bodies(self, world):
         lst = []
         for b in world.body:
-
-            lst.append((b.position.x, b.position.y, b.mass, True))
+            lst.append((b.position.x, b.position.y, b.mass, getattr(b, "fixed", True)))
         return lst
 
     def _serialize_bodies_numba(self, world):
@@ -580,8 +592,7 @@ class Predictor:
             body_x[i] = float(b.position.x)
             body_y[i] = float(b.position.y)
             body_m[i] = float(b.mass)
-
-            body_fixed[i] = 1
+            body_fixed[i] = 1 if getattr(b, "fixed", True) else 0
         return body_x, body_y, body_m, body_fixed
 
     def _compute_acc(self, position, bodies, G):
@@ -684,17 +695,9 @@ class Predictor:
 
     def _cancel_pending_job(self):
     # alle wartenden futures abbrechen (unterstützt multi-worker-modus).
-        pending = getattr(self, "_pending_futures", None)
-        if pending is None:
+        pending = getattr(self, "_pending_futures", [])
 
-            if self._pending_future is None:
-                return
-            if not self._pending_future.done():
-                self._pending_future.cancel()
-            self._pending_future = None
-            self._pending_job_id = 0
-            return
-
+        # cancel any futures in the list
         for job_id, fut in list(pending):
             try:
                 if not fut.done():
@@ -703,6 +706,17 @@ class Predictor:
                 pass
         pending.clear()
         self._pending_job_id = 0
+
+        # also cancel legacy single future if present
+        pf = getattr(self, '_pending_future', None)
+        if pf is not None:
+            try:
+                if not pf.done():
+                    pf.cancel()
+            except Exception:
+                pass
+            self._pending_future = None
+            self._pending_job_id = 0
 
     def _make_snapshot(self, ship, world, max_points):
         effective_precision = self._effective_precision()
@@ -789,61 +803,74 @@ class Predictor:
         return {"points": points, "snapshot": snapshot, "computed": computed_count}
 
     def _compute_full_rolling(self, ship, world):
-        if self.num_points <= 0:
-            self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
-            self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
+        start_ts = time.time()
+        try:
+            if self.num_points <= 0:
+                self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+                self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
+                self.initialized = True
+                return
+
+            if self.precision <= 0.0:
+                raise ValueError("Predictor precision must be > 0")
+
+            max_points = self._get_target_point_cap()
+            snapshot = self._make_snapshot(ship, world, max_points)
+            base_t = float(snapshot.get("sim_time", 0.0))
+
+            out, used = _compute_distance_points_numba_state(
+                snapshot["ship_px"],
+                snapshot["ship_py"],
+                snapshot["ship_vx"],
+                snapshot["ship_vy"],
+                base_t,
+                int(snapshot.get("ref_enabled", 0)),
+                float(snapshot.get("ref_px", 0.0)),
+                float(snapshot.get("ref_py", 0.0)),
+                snapshot["body_x"],
+                snapshot["body_y"],
+                snapshot["body_m"],
+                snapshot["body_fixed"],
+                snapshot["G"],
+                snapshot["dt"],
+                snapshot["precision"],
+                snapshot["max_points"],
+                snapshot["max_iters"],
+            )
+
+            states = out[:int(used)].copy()
+            new_points = states[:, :3].copy() if (np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0) else np.empty((0, 3), dtype=np.float64)
+
+            try:
+                old_points = self.points if (np is not None and isinstance(self.points, np.ndarray)) else np.array(self.points, dtype=np.float64) if self.points is not None else None
+            except Exception:
+                old_points = None
+            try:
+                changed = int(self._count_recomputed_points(old_points, new_points))
+            except Exception:
+                changed = int(new_points.shape[0]) if (hasattr(new_points, 'shape')) else 0
+            try:
+                self._computed_since_last_update += changed
+            except Exception:
+                pass
+            self._roll_states = states
+            if np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0:
+                self.points = new_points.copy()
+            else:
+                self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
             self.initialized = True
-            return
-
-        if self.precision <= 0.0:
-            raise ValueError("Predictor precision must be > 0")
-
-        max_points = self._get_target_point_cap()
-        snapshot = self._make_snapshot(ship, world, max_points)
-        base_t = float(snapshot.get("sim_time", 0.0))
-
-        out, used = _compute_distance_points_numba_state(
-            snapshot["ship_px"],
-            snapshot["ship_py"],
-            snapshot["ship_vx"],
-            snapshot["ship_vy"],
-            base_t,
-            int(snapshot.get("ref_enabled", 0)),
-            float(snapshot.get("ref_px", 0.0)),
-            float(snapshot.get("ref_py", 0.0)),
-            snapshot["body_x"],
-            snapshot["body_y"],
-            snapshot["body_m"],
-            snapshot["body_fixed"],
-            snapshot["G"],
-            snapshot["dt"],
-            snapshot["precision"],
-            snapshot["max_points"],
-            snapshot["max_iters"],
-        )
-
-        states = out[:int(used)].copy()
-        new_points = states[:, :3].copy() if (np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0) else np.empty((0, 3), dtype=np.float64)
-
-        try:
-            old_points = self.points if (np is not None and isinstance(self.points, np.ndarray)) else np.array(self.points, dtype=np.float64) if self.points is not None else None
-        except Exception:
-            old_points = None
-        try:
-            changed = int(self._count_recomputed_points(old_points, new_points))
-        except Exception:
-            changed = int(new_points.shape[0]) if (hasattr(new_points, 'shape')) else 0
-        try:
-            self._computed_since_last_update += changed
-        except Exception:
-            pass
-        self._roll_states = states
-        if np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0:
-            self.points = new_points.copy()
-        else:
-            self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
-        self.initialized = True
-        self._last_swapped_snapshot = snapshot
+            self._last_swapped_snapshot = snapshot
+        finally:
+            try:
+                if self.debug:
+                    dur = time.time() - start_ts
+                    try:
+                        rsn = self._roll_states.shape[0] if (isinstance(getattr(self, '_roll_states', None), np.ndarray)) else 'n/a'
+                    except Exception:
+                        rsn = 'n/a'
+                    print(f"PRED_DBG_COMPUTE_FULL_ROLLING: took {dur:.3f}s roll_states={rsn}", flush=True)
+            except Exception:
+                pass
 
     def _append_rolling_tail(self, world, missing_points):
         if missing_points <= 0:
@@ -908,11 +935,6 @@ class Predictor:
             self._view_scale_changed = False
         else:
             removed = self.remove_passed_points(ship)
-            if removed > 0 and np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
-                cut = min(int(removed), max(0, self._roll_states.shape[0] - 1))
-                if cut > 0:
-                    self._roll_states = self._roll_states[cut:]
-                self.points = self._roll_states[:, :3].copy()
 
             target_points = self._get_target_point_cap()
             missing = target_points - self._points_count()
@@ -952,10 +974,25 @@ class Predictor:
             pass
         # DEBUG-AGENT-ADD END
 
+        # ensure executor exists (lazy creation)
+        if getattr(self, '_executor', None) is None:
+            try:
+                max_workers = max(1, int(self.workers))
+            except Exception:
+                max_workers = 1
+            self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
+
         fut = self._executor.submit(self._compute_from_snapshot, snapshot)
         job_id = self._next_job_id
 
-            # Ersetze Queue statt endlos anzuhängen
+        # mirror single-future state for legacy code paths
+        try:
+            self._pending_future = fut
+            self._pending_job_id = job_id
+        except Exception:
+            pass
+
+        # Ersetze Queue statt endlos anzuhängen
         if self._single_flight:
             self._pending_futures = [(job_id, fut)]
         else:
@@ -965,18 +1002,15 @@ class Predictor:
         self._jobs_submitted += 1
 
     def _swap_ready_result(self, current_ship=None, current_world=None):
-        pending = getattr(self, "_pending_futures", None)
+        pending = getattr(self, "_pending_futures", [])
 
         # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
         try:
-            pend_len = len(pending) if pending is not None else None
+            pend_len = len(pending)
             print(f"PRED_DBG_SWAP: entering swap pending_len={pend_len} _pending_job_id={getattr(self,'_pending_job_id',0)} _pending_future_set={getattr(self,'_pending_future',None) is not None}", flush=True)
         except Exception:
             pass
         # DEBUG-AGENT-ADD END
-
-        if pending is None:
-            pending = []
 
         if not pending:
             if self._pending_future is None or not self._pending_future.done():
@@ -1162,7 +1196,7 @@ class Predictor:
             return
 
         if self.num_points <= 0:
-            self.points = np.empty((0, 2), dtype=np.float64) if np is not None else []
+            self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
             self.initialized = True
             return
 
@@ -1232,7 +1266,7 @@ class Predictor:
 
         if self.num_points <= 0:
             self.reset()
-            if self.debug:
+            if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                 try:
                     print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                 except Exception:
@@ -1248,7 +1282,7 @@ class Predictor:
             # mode by tracking the last observed ship velocity. If a large
             # delta is detected, rebuild the full rolling state so stored
             # points don't remain stale.
-            try:
+            if ship is not None:
                 cur_vx = float(ship.velocity.x)
                 cur_vy = float(ship.velocity.y)
                 last_vx = getattr(self, '_last_ship_vx', None)
@@ -1265,19 +1299,13 @@ class Predictor:
                                 print(f"PRED_DBG_VEL_CHANGE: dv={delta_speed:.6e} allowed={allowed_speed:.6e}", flush=True)
                             except Exception:
                                 pass
-                        try:
-                            # Rebuild entire rolling prediction synchronously.
-                            self._compute_full_rolling(ship, world)
-                            self._anchor_first_point(ship)
-                        except Exception:
-                            pass
+                        # Rebuild entire rolling prediction synchronously.
+                        self._compute_full_rolling(ship, world)
+                        self._anchor_first_point(ship)
                         # Update remembered velocity and report
-                        try:
-                            self._last_ship_vx = cur_vx
-                            self._last_ship_vy = cur_vy
-                        except Exception:
-                            pass
-                        if self.debug:
+                        self._last_ship_vx = cur_vx
+                        self._last_ship_vy = cur_vy
+                        if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                             try:
                                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                             except Exception:
@@ -1287,13 +1315,30 @@ class Predictor:
                 # remember velocity for next update
                 self._last_ship_vx = cur_vx
                 self._last_ship_vy = cur_vy
+
+            # instrumentation: compact frame summary (throttled) and timed update_rolling
+            try:
+                self._frame_dbg_counter += 1
+                rs = getattr(self, "_roll_states", None)
+                try:
+                    rsn = rs.shape[0] if (rs is not None and hasattr(rs, 'shape')) else (len(rs) if rs is not None else 'n/a')
+                except Exception:
+                    rsn = 'n/a'
+                view_changed = getattr(self,'_view_scale_changed',False)
+                if view_changed or (self._frame_dbg_counter % max(1, self._frame_dbg_freq) == 0):
+                    try:
+                        print(f"PRED_DBG_FRAME: rolling_mode={self.rolling_mode} num_points={self.num_points} initialized={self.initialized} roll_states={rsn} view_changed={view_changed}", flush=True)
+                    except Exception:
+                        pass
             except Exception:
                 pass
-
+            t0 = time.time()
             self._update_rolling(ship, world)
-            if self.debug:
+            t1 = time.time()
+            dur = t1 - t0
+            if self.debug and dur >= getattr(self, '_update_rolling_warn_threshold', 0.0):
                 try:
-                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                    print(f"PRED_DBG_UPDATE_ROLLING: took {dur:.6f}s", flush=True)
                 except Exception:
                     pass
             self._computed_since_last_update = 0
@@ -1302,7 +1347,7 @@ class Predictor:
         if not self.async_compute:
             if not self.initialized:
                 self.initialize(ship, world)
-                if self.debug:
+                if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
                         print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                     except Exception:
@@ -1313,7 +1358,7 @@ class Predictor:
             if self.recompute_every_update:
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship)
-                if self.debug:
+                if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
                         print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                     except Exception:
@@ -1326,7 +1371,7 @@ class Predictor:
             if self._points_count() < target_points:
                 self._compute_full(ship, world)
             self._anchor_first_point(ship)
-            if self.debug:
+            if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                 try:
                     print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                 except Exception:
@@ -1341,7 +1386,7 @@ class Predictor:
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship)
                 self._view_scale_changed = False
-                if self.debug:
+                if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
                         print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                     except Exception:
@@ -1381,7 +1426,7 @@ class Predictor:
                     if self.rolling_mode:
                         self._compute_full_rolling(ship, world)
                         self._anchor_first_point(ship)
-                        if self.debug:
+                        if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                             try:
                                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                             except Exception:
@@ -1395,7 +1440,7 @@ class Predictor:
                             self._submit_async_compute(ship, world, target_points)
                         except Exception:
                             pass
-                        if self.debug:
+                        if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                             try:
                                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                             except Exception:
@@ -1405,7 +1450,7 @@ class Predictor:
                     else:
                         self._compute_full(ship, world)
                         self._anchor_first_point(ship)
-                        if self.debug:
+                        if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                             try:
                                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                             except Exception:
@@ -1420,7 +1465,7 @@ class Predictor:
 
         if not self.initialized:
             self._submit_async_compute(ship, world, target_points)
-            if self.debug:
+            if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                 try:
                     print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
                 except Exception:
@@ -1436,7 +1481,7 @@ class Predictor:
 
         if self.initialized:
             self._anchor_first_point(ship)
-        if self.debug:
+        if self.debug and not getattr(self, "_suppress_dbg_computed", False):
             try:
                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
             except Exception:
@@ -1515,67 +1560,127 @@ class Predictor:
             pass
 
     def remove_passed_points(self, ship):
+        # Robust removal based on projection onto path segments.
         if self._points_count() < 2:
             return 0
 
-        removed = 0
         sx = float(ship.position.x)
         sy = float(ship.position.y)
 
-        if np is not None and isinstance(self.points, np.ndarray):
-            if self.points.shape[0] <= 1:
+        # If in rolling mode and roll_states is available, operate on it
+        # so that _roll_states and points remain consistent.
+        try:
+            if getattr(self, 'rolling_mode', False) and np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 1:
+                n = int(self._roll_states.shape[0])
+                coords = self._roll_states[:, :2]
+                remove_count = 0
+                for i in range(n - 1):
+                    x0 = float(coords[i, 0]); y0 = float(coords[i, 1])
+                    x1 = float(coords[i + 1, 0]); y1 = float(coords[i + 1, 1])
+                    vx = x1 - x0; vy = y1 - y0
+                    wx = sx - x0; wy = sy - y0
+                    denom = vx * vx + vy * vy
+                    if denom <= 1e-12:
+                        remove_count += 1
+                        continue
+                    t = (wx * vx + wy * vy) / denom
+                    if t >= 1.0:
+                        remove_count += 1
+                        continue
+                    break
+
+                remove_count = min(remove_count, max(0, n - 1))
+                if remove_count > 0:
+                    try:
+                        self._roll_states = self._roll_states[remove_count:]
+                        if isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
+                            self.points = self._roll_states[:, :3].copy()
+                        else:
+                            self.points = np.empty((0, 3), dtype=np.float64)
+                    except Exception:
+                        try:
+                            self._roll_states = np.array(self._roll_states[remove_count:], dtype=np.float64)
+                            self.points = np.array(self.points[remove_count:], dtype=np.float64)
+                        except Exception:
+                            pass
+                    return int(remove_count)
                 return 0
+        except Exception:
+            pass
+
+        # Numpy-optimized path: iterate segments until ship projection is < 1.0
+        if np is not None and isinstance(self.points, np.ndarray):
+            n = int(self.points.shape[0])
+            if n <= 1:
+                return 0
+
             coords = self.points[:, :2]
-            dx = coords[:, 0] - sx
-            dy = coords[:, 1] - sy
-            dsq = dx * dx + dy * dy
-    
-            diffs = dsq[1:] - dsq[:-1]
-            idxs = np.nonzero(diffs >= 0)[0]
-            if idxs.size == 0:
+            remove_count = 0
+            for i in range(n - 1):
+                x0 = float(coords[i, 0]); y0 = float(coords[i, 1])
+                x1 = float(coords[i + 1, 0]); y1 = float(coords[i + 1, 1])
+                vx = x1 - x0; vy = y1 - y0
+                wx = sx - x0; wy = sy - y0
+                denom = vx * vx + vy * vy
+                if denom <= 1e-12:
+                    remove_count += 1
+                    continue
+                t = (wx * vx + wy * vy) / denom
+                if t >= 1.0:
+                    remove_count += 1
+                    continue
+                break
 
-                remove_count = max(0, self.points.shape[0] - 1)
-            else:
-                remove_count = int(idxs[0])
+            remove_count = min(remove_count, max(0, n - 1))
             if remove_count > 0:
-                self.points = self.points[remove_count:]
-                removed += remove_count
-        else:
+                try:
+                    self.points = self.points[remove_count:]
+                except Exception:
+                    self.points = np.array(self.points[remove_count:], dtype=np.float64)
+            return int(remove_count)
 
+        # List / generic fallback: use same projection logic
+        try:
             n = len(self.points)
             if n <= 1:
                 return 0
-            remove_count = 0
-            try:
-                for i in range(n - 1):
-                    p0 = self.points[i]
-                    p1 = self.points[i + 1]
-                    if hasattr(p0, 'distance_squared_to'):
-                        d0 = p0.distance_squared_to(ship.position)
-                        d1 = p1.distance_squared_to(ship.position)
-                    else:
-                        x0 = float(p0[0]); y0 = float(p0[1])
-                        x1 = float(p1[0]); y1 = float(p1[1])
-                        dx0 = x0 - sx; dy0 = y0 - sy
-                        dx1 = x1 - sx; dy1 = y1 - sy
-                        d0 = dx0 * dx0 + dy0 * dy0
-                        d1 = dx1 * dx1 + dy1 * dy1
-                    if d1 < d0:
-                        remove_count += 1
-                    else:
-                        break
-            except Exception:
-                remove_count = 0
-            if remove_count > 0:
+        except Exception:
+            return 0
+
+        remove_count = 0
+        try:
+            for i in range(n - 1):
+                p0 = self.points[i]
+                p1 = self.points[i + 1]
                 try:
-                    del self.points[:remove_count]
+                    x0 = float(p0[0]); y0 = float(p0[1])
+                    x1 = float(p1[0]); y1 = float(p1[1])
                 except Exception:
+                    x0 = float(getattr(p0, 'x', p0[0])); y0 = float(getattr(p0, 'y', p0[1]))
+                    x1 = float(getattr(p1, 'x', p1[0])); y1 = float(getattr(p1, 'y', p1[1]))
 
-                    for _ in range(remove_count):
-                        try:
-                            self.points.pop(0)
-                        except Exception:
-                            break
-                removed += remove_count
+                vx = x1 - x0; vy = y1 - y0
+                wx = sx - x0; wy = sy - y0
+                denom = vx * vx + vy * vy
+                if denom <= 1e-12:
+                    remove_count += 1
+                    continue
+                t = (wx * vx + wy * vy) / denom
+                if t >= 1.0:
+                    remove_count += 1
+                    continue
+                break
+        except Exception:
+            remove_count = 0
 
-        return removed
+        remove_count = min(remove_count, max(0, n - 1))
+        if remove_count > 0:
+            try:
+                del self.points[:remove_count]
+            except Exception:
+                for _ in range(remove_count):
+                    try:
+                        self.points.pop(0)
+                    except Exception:
+                        break
+        return int(remove_count)
