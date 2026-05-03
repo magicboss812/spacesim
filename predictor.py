@@ -12,7 +12,7 @@ NUMBA_AVAILABLE = True
 
 
 if NUMBA_AVAILABLE:
-    @njit(cache=True, nogil=True, fastmath=True, parallel=True)
+    @njit(cache=True, nogil=True, fastmath=True)
     def _compute_acc_numba(x, y, body_x, body_y, body_m, body_fixed, G):
         ax = 0.0
         ay = 0.0
@@ -29,6 +29,349 @@ if NUMBA_AVAILABLE:
             ax += dx * invd * accm
             ay += dy * invd * accm
         return ax, ay
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _compute_acc_nearest_numba(x, y, body_x, body_y, body_m, body_fixed, G):
+        ax = 0.0
+        ay = 0.0
+        nearest_r = 1e30
+        for i in range(body_x.shape[0]):
+            if body_fixed[i] == 0:
+                continue
+            dx = body_x[i] - x
+            dy = body_y[i] - y
+            dist2 = dx * dx + dy * dy
+            if dist2 < 1e-12:
+                continue
+            dist = math.sqrt(dist2)
+            if dist < nearest_r:
+                nearest_r = dist
+            invd = 1.0 / dist
+            accm = G * body_m[i] / dist2
+            ax += dx * invd * accm
+            ay += dy * invd * accm
+        acc_mag = math.sqrt(ax * ax + ay * ay)
+        return ax, ay, nearest_r, acc_mag
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rk4_step_numba(
+        px,
+        py,
+        vx,
+        vy,
+        dt,
+        ref_enabled,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        G,
+    ):
+        ref_ax = 0.0
+        ref_ay = 0.0
+        if ref_enabled != 0:
+            ref_ax, ref_ay = _compute_acc_numba(ref_px, ref_py, body_x, body_y, body_m, body_fixed, G)
+
+        k1_ax_raw, k1_ay_raw = _compute_acc_numba(px, py, body_x, body_y, body_m, body_fixed, G)
+        k1_ax = k1_ax_raw - ref_ax
+        k1_ay = k1_ay_raw - ref_ay
+        k1_vx, k1_vy = vx, vy
+
+        p2x = px + k1_vx * (dt / 2.0)
+        p2y = py + k1_vy * (dt / 2.0)
+        v2x = vx + k1_ax * (dt / 2.0)
+        v2y = vy + k1_ay * (dt / 2.0)
+        k2_ax_raw, k2_ay_raw = _compute_acc_numba(p2x, p2y, body_x, body_y, body_m, body_fixed, G)
+        k2_ax = k2_ax_raw - ref_ax
+        k2_ay = k2_ay_raw - ref_ay
+        k2_vx, k2_vy = v2x, v2y
+
+        p3x = px + k2_vx * (dt / 2.0)
+        p3y = py + k2_vy * (dt / 2.0)
+        v3x = vx + k2_ax * (dt / 2.0)
+        v3y = vy + k2_ay * (dt / 2.0)
+        k3_ax_raw, k3_ay_raw = _compute_acc_numba(p3x, p3y, body_x, body_y, body_m, body_fixed, G)
+        k3_ax = k3_ax_raw - ref_ax
+        k3_ay = k3_ay_raw - ref_ay
+        k3_vx, k3_vy = v3x, v3y
+
+        p4x = px + k3_vx * dt
+        p4y = py + k3_vy * dt
+        v4x = vx + k3_ax * dt
+        v4y = vy + k3_ay * dt
+        k4_ax_raw, k4_ay_raw = _compute_acc_numba(p4x, p4y, body_x, body_y, body_m, body_fixed, G)
+        k4_ax = k4_ax_raw - ref_ax
+        k4_ay = k4_ay_raw - ref_ay
+        k4_vx, k4_vy = v4x, v4y
+
+        next_px = px + (k1_vx + 2.0 * k2_vx + 2.0 * k3_vx + k4_vx) * (dt / 6.0)
+        next_py = py + (k1_vy + 2.0 * k2_vy + 2.0 * k3_vy + k4_vy) * (dt / 6.0)
+        next_vx = vx + (k1_ax + 2.0 * k2_ax + 2.0 * k3_ax + k4_ax) * (dt / 6.0)
+        next_vy = vy + (k1_ay + 2.0 * k2_ay + 2.0 * k3_ay + k4_ay) * (dt / 6.0)
+
+        return next_px, next_py, next_vx, next_vy
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _leapfrog_step_numba(
+        px,
+        py,
+        vx,
+        vy,
+        ax,
+        ay,
+        dt,
+        ref_enabled,
+        ref_ax,
+        ref_ay,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        G,
+    ):
+        hvx = vx + 0.5 * ax * dt
+        hvy = vy + 0.5 * ay * dt
+
+        next_px = px + hvx * dt
+        next_py = py + hvy * dt
+
+        next_ax_raw, next_ay_raw, nearest_r, acc_mag = _compute_acc_nearest_numba(
+            next_px, next_py, body_x, body_y, body_m, body_fixed, G
+        )
+        next_ax = next_ax_raw - ref_ax
+        next_ay = next_ay_raw - ref_ay
+
+        next_vx = hvx + 0.5 * next_ax * dt
+        next_vy = hvy + 0.5 * next_ay * dt
+
+        return next_px, next_py, next_vx, next_vy, next_ax, next_ay, nearest_r, acc_mag
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _compute_distance_points_aspi_numba(
+        init_px,
+        init_py,
+        init_vx,
+        init_vy,
+        ref_enabled,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        G,
+        base_dt,
+        precision,
+        max_points,
+        max_iters,
+        min_dt,
+        max_dt,
+        safety_g,
+        safety_m,
+        close_acc_threshold,
+        use_rk4_fallback,
+    ):
+        out = np.empty((max_points, 3), dtype=np.float64)
+        out[0, 0] = init_px
+        out[0, 1] = init_py
+        out[0, 2] = 0.0
+
+        count = 1
+        px = init_px
+        py = init_py
+        vx = init_vx
+        vy = init_vy
+        accumulated = 0.0
+        t = 0.0
+
+        ref_ax = 0.0
+        ref_ay = 0.0
+        if ref_enabled != 0:
+            ref_ax, ref_ay = _compute_acc_numba(ref_px, ref_py, body_x, body_y, body_m, body_fixed, G)
+
+        raw_ax, raw_ay, nearest_r, acc_mag = _compute_acc_nearest_numba(
+            px, py, body_x, body_y, body_m, body_fixed, G
+        )
+        ax = raw_ax - ref_ax
+        ay = raw_ay - ref_ay
+
+        # ASPI is for visual prediction, not a replacement for ship physics.
+        # The trajectory is still sequential; speed comes from smarter steps,
+        # not from point-level parallelism.
+        for _ in range(max_iters):
+            if count >= max_points:
+                break
+            if (
+                not math.isfinite(px)
+                or not math.isfinite(py)
+                or not math.isfinite(vx)
+                or not math.isfinite(vy)
+                or not math.isfinite(ax)
+                or not math.isfinite(ay)
+            ):
+                break
+
+            if ref_enabled != 0:
+                ref_ax, ref_ay = _compute_acc_numba(ref_px, ref_py, body_x, body_y, body_m, body_fixed, G)
+            else:
+                ref_ax = 0.0
+                ref_ay = 0.0
+
+            speed = math.sqrt(vx * vx + vy * vy)
+            dt_g = safety_g * math.sqrt(nearest_r / max(acc_mag, 1e-30))
+            dt_m = safety_m * precision / max(speed, 1e-30)
+
+            step_dt = max_dt
+            if dt_g < step_dt:
+                step_dt = dt_g
+            if dt_m < step_dt:
+                step_dt = dt_m
+
+            if not math.isfinite(step_dt) or step_dt <= 0.0:
+                step_dt = base_dt
+            if not math.isfinite(step_dt) or step_dt <= 0.0:
+                step_dt = min_dt
+
+            if step_dt < min_dt:
+                step_dt = min_dt
+            if step_dt > max_dt:
+                step_dt = max_dt
+
+            if use_rk4_fallback and acc_mag > close_acc_threshold:
+                # RK4 is kept as a local-accuracy fallback in strong gravity.
+                next_px, next_py, next_vx, next_vy = _rk4_step_numba(
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    step_dt,
+                    ref_enabled,
+                    ref_px,
+                    ref_py,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_fixed,
+                    G,
+                )
+                next_raw_ax, next_raw_ay, next_nearest_r, next_acc_mag = _compute_acc_nearest_numba(
+                    next_px, next_py, body_x, body_y, body_m, body_fixed, G
+                )
+                next_ax = next_raw_ax - ref_ax
+                next_ay = next_raw_ay - ref_ay
+            else:
+                # Velocity Verlet/KDK leapfrog is symplectic and behaves well
+                # for long visual orbit predictions with bounded step sizes.
+                (
+                    next_px,
+                    next_py,
+                    next_vx,
+                    next_vy,
+                    next_ax,
+                    next_ay,
+                    next_nearest_r,
+                    next_acc_mag,
+                ) = _leapfrog_step_numba(
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    ax,
+                    ay,
+                    step_dt,
+                    ref_enabled,
+                    ref_ax,
+                    ref_ay,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_fixed,
+                    G,
+                )
+
+            if (
+                not math.isfinite(next_px)
+                or not math.isfinite(next_py)
+                or not math.isfinite(next_vx)
+                or not math.isfinite(next_vy)
+                or not math.isfinite(next_ax)
+                or not math.isfinite(next_ay)
+            ):
+                break
+
+            seg_dx = next_px - px
+            seg_dy = next_py - py
+            seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+
+            if seg_len <= 0.0 or not math.isfinite(seg_len):
+                px = next_px
+                py = next_py
+                vx = next_vx
+                vy = next_vy
+                ax = next_ax
+                ay = next_ay
+                nearest_r = next_nearest_r
+                acc_mag = next_acc_mag
+                t += step_dt
+                continue
+
+            local_px = px
+            local_py = py
+            rem_dx = seg_dx
+            rem_dy = seg_dy
+            rem_len = seg_len
+
+            while rem_len + accumulated >= precision and count < max_points:
+                if rem_len <= 0.0:
+                    break
+
+                distance_to_place = precision - accumulated
+                frac = distance_to_place / rem_len
+
+                sample_px = local_px + rem_dx * frac
+                sample_py = local_py + rem_dy * frac
+                sample_t = t + frac * step_dt
+
+                if (
+                    not math.isfinite(sample_px)
+                    or not math.isfinite(sample_py)
+                    or not math.isfinite(sample_t)
+                ):
+                    break
+
+                out[count, 0] = sample_px
+                out[count, 1] = sample_py
+                out[count, 2] = sample_t
+                count += 1
+
+                local_px = sample_px
+                local_py = sample_py
+
+                rem_dx = next_px - local_px
+                rem_dy = next_py - local_py
+                rem_len = math.sqrt(rem_dx * rem_dx + rem_dy * rem_dy)
+                accumulated = 0.0
+
+            if rem_len + accumulated < precision:
+                accumulated += rem_len
+
+            px = next_px
+            py = next_py
+            vx = next_vx
+            vy = next_vy
+            ax = next_ax
+            ay = next_ay
+            nearest_r = next_nearest_r
+            acc_mag = next_acc_mag
+            t += step_dt
+
+        return out, count
 
 
     @njit(cache=True, nogil=True, fastmath=True)
@@ -323,6 +666,13 @@ class Predictor:
         use_numba=True,
         async_compute=True,
         rolling_mode=None,
+        integrator_mode="rk4",
+        aspi_min_dt=1.0,
+        aspi_max_dt=120.0,
+        aspi_safety_g=0.05,
+        aspi_safety_m=0.5,
+        aspi_close_acc_threshold=0.02,
+        aspi_use_rk4_fallback=True,
     ):
         
         self.num_points = int(num_points)
@@ -330,6 +680,13 @@ class Predictor:
         self.precision = float(precision)
         self.base_precision = float(precision)
         self.length = None if length is None else float(length)
+        self.integrator_mode = self._normalize_integrator_mode(integrator_mode)
+        self.aspi_min_dt = float(aspi_min_dt)
+        self.aspi_max_dt = float(aspi_max_dt)
+        self.aspi_safety_g = float(aspi_safety_g)
+        self.aspi_safety_m = float(aspi_safety_m)
+        self.aspi_close_acc_threshold = float(aspi_close_acc_threshold)
+        self.aspi_use_rk4_fallback = bool(aspi_use_rk4_fallback)
 
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
@@ -374,6 +731,7 @@ class Predictor:
         self._update_rolling_warn_threshold = 0.01  # only log UPDATE_ROLLING if > threshold (s)
 
         self._last_swapped_snapshot = None
+        self._integrator_debug_seen = set()
 
         self.snapshot_velocity_rel_tol = 0.01
         self.snapshot_velocity_abs_tol = 100.0
@@ -400,6 +758,76 @@ class Predictor:
             self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
 
             self._pending_futures = []
+
+    @staticmethod
+    def _normalize_integrator_mode(mode):
+        try:
+            mode = str(mode).strip().lower()
+        except Exception:
+            mode = "rk4"
+        if mode not in ("rk4", "aspi", "aspi_rk4_fallback"):
+            return "rk4"
+        return mode
+
+    def _debug_integrator_mode(self, action, snapshot):
+        if not self.debug:
+            return
+        try:
+            mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", self.integrator_mode))
+            fallback = bool(snapshot.get("aspi_use_rk4_fallback", self.aspi_use_rk4_fallback))
+            key = (str(action), mode, fallback)
+            seen = getattr(self, "_integrator_debug_seen", set())
+            if key in seen:
+                return
+            seen.add(key)
+            self._integrator_debug_seen = seen
+            print(f"PRED_DBG_INTEGRATOR: {action} mode={mode} aspi_rk4_fallback={fallback}", flush=True)
+        except Exception:
+            pass
+
+    def set_integrator_quality(self, quality: str):
+        old = (
+            self.integrator_mode,
+            self.aspi_min_dt,
+            self.aspi_max_dt,
+            self.aspi_safety_g,
+            self.aspi_safety_m,
+            self.aspi_close_acc_threshold,
+            self.aspi_use_rk4_fallback,
+        )
+
+        q = str(quality).strip().lower()
+        if q == "fast":
+            self.integrator_mode = "aspi"
+            self.aspi_min_dt = 5.0
+            self.aspi_max_dt = 300.0
+            self.aspi_safety_g = 0.08
+            self.aspi_safety_m = 0.8
+            self.aspi_use_rk4_fallback = False
+        elif q == "balanced":
+            self.integrator_mode = "aspi_rk4_fallback"
+            self.aspi_min_dt = 1.0
+            self.aspi_max_dt = 120.0
+            self.aspi_safety_g = 0.05
+            self.aspi_safety_m = 0.5
+            self.aspi_close_acc_threshold = 0.02
+            self.aspi_use_rk4_fallback = True
+        elif q == "accurate":
+            self.integrator_mode = "rk4"
+        else:
+            raise ValueError("quality must be one of: fast, balanced, accurate")
+
+        new = (
+            self.integrator_mode,
+            self.aspi_min_dt,
+            self.aspi_max_dt,
+            self.aspi_safety_g,
+            self.aspi_safety_m,
+            self.aspi_close_acc_threshold,
+            self.aspi_use_rk4_fallback,
+        )
+        if new != old:
+            self.reset()
 
     def reset(self):
         self._cancel_pending_job()
@@ -735,6 +1163,13 @@ class Predictor:
             "max_points": int(max_points),
             "max_iters": int(max(10000, max_points * 100)),
             "numba": True,
+            "integrator_mode": str(self.integrator_mode),
+            "aspi_min_dt": float(self.aspi_min_dt),
+            "aspi_max_dt": float(self.aspi_max_dt),
+            "aspi_safety_g": float(self.aspi_safety_g),
+            "aspi_safety_m": float(self.aspi_safety_m),
+            "aspi_close_acc_threshold": float(self.aspi_close_acc_threshold),
+            "aspi_use_rk4_fallback": bool(self.aspi_use_rk4_fallback),
         }
 
         try:
@@ -758,24 +1193,75 @@ class Predictor:
         return snapshot
 
     def _compute_from_snapshot(self, snapshot):
-        out, used = _compute_distance_points_numba(
-            snapshot["ship_px"],
-            snapshot["ship_py"],
-            snapshot["ship_vx"],
-            snapshot["ship_vy"],
-            int(snapshot.get("ref_enabled", 0)),
-            float(snapshot.get("ref_px", 0.0)),
-            float(snapshot.get("ref_py", 0.0)),
-            snapshot["body_x"],
-            snapshot["body_y"],
-            snapshot["body_m"],
-            snapshot["body_fixed"],
-            snapshot["G"],
-            snapshot["dt"],
-            snapshot["precision"],
-            snapshot["max_points"],
-            snapshot["max_iters"],
-        )
+        mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", "rk4"))
+        self._debug_integrator_mode("compute", snapshot)
+
+        if mode == "aspi" or mode == "aspi_rk4_fallback":
+            min_dt = float(snapshot.get("aspi_min_dt", 1.0))
+            max_dt = float(snapshot.get("aspi_max_dt", 120.0))
+            base_dt = float(snapshot.get("dt", 60.0))
+            safety_g = float(snapshot.get("aspi_safety_g", 0.05))
+            safety_m = float(snapshot.get("aspi_safety_m", 0.5))
+            close_acc_threshold = float(snapshot.get("aspi_close_acc_threshold", 0.02))
+
+            if (not math.isfinite(min_dt)) or min_dt <= 0.0:
+                min_dt = 1.0
+            if (not math.isfinite(max_dt)) or max_dt <= 0.0:
+                max_dt = 120.0
+            if max_dt < min_dt:
+                max_dt = min_dt
+            if (not math.isfinite(base_dt)) or base_dt <= 0.0:
+                base_dt = min_dt
+            if (not math.isfinite(safety_g)) or safety_g <= 0.0:
+                safety_g = 0.05
+            if (not math.isfinite(safety_m)) or safety_m <= 0.0:
+                safety_m = 0.5
+            if (not math.isfinite(close_acc_threshold)) or close_acc_threshold < 0.0:
+                close_acc_threshold = 0.02
+
+            out, used = _compute_distance_points_aspi_numba(
+                snapshot["ship_px"],
+                snapshot["ship_py"],
+                snapshot["ship_vx"],
+                snapshot["ship_vy"],
+                int(snapshot.get("ref_enabled", 0)),
+                float(snapshot.get("ref_px", 0.0)),
+                float(snapshot.get("ref_py", 0.0)),
+                snapshot["body_x"],
+                snapshot["body_y"],
+                snapshot["body_m"],
+                snapshot["body_fixed"],
+                snapshot["G"],
+                base_dt,
+                snapshot["precision"],
+                snapshot["max_points"],
+                snapshot["max_iters"],
+                min_dt,
+                max_dt,
+                safety_g,
+                safety_m,
+                close_acc_threshold,
+                bool(snapshot.get("aspi_use_rk4_fallback", True)),
+            )
+        else:
+            out, used = _compute_distance_points_numba(
+                snapshot["ship_px"],
+                snapshot["ship_py"],
+                snapshot["ship_vx"],
+                snapshot["ship_vy"],
+                int(snapshot.get("ref_enabled", 0)),
+                float(snapshot.get("ref_px", 0.0)),
+                float(snapshot.get("ref_py", 0.0)),
+                snapshot["body_x"],
+                snapshot["body_y"],
+                snapshot["body_m"],
+                snapshot["body_fixed"],
+                snapshot["G"],
+                snapshot["dt"],
+                snapshot["precision"],
+                snapshot["max_points"],
+                snapshot["max_iters"],
+            )
         points = out[:int(used)].copy()
         computed_count = int(used)
 
@@ -818,6 +1304,8 @@ class Predictor:
             snapshot = self._make_snapshot(ship, world, max_points)
             base_t = float(snapshot.get("sim_time", 0.0))
 
+            # Rolling mode keeps the existing RK4 state path for now; ASPI can
+            # be added here later without changing the snapshot/full path.
             out, used = _compute_distance_points_numba_state(
                 snapshot["ship_px"],
                 snapshot["ship_py"],
@@ -890,6 +1378,7 @@ class Predictor:
         max_new_points = int(missing_points) + 1  # include seed sample at index 0
         max_iters = int(max(10000, max_new_points * 100))
 
+        # Rolling tail extension intentionally stays on the RK4 state helper.
         out, used = _compute_distance_points_numba_state(
             init_px,
             init_py,
@@ -957,22 +1446,10 @@ class Predictor:
 
         if self._single_flight:
             if len(pending) > 0:
-                # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
-                try:
-                    print(f"PRED_DBG_SUBMIT: blocked single_flight pending_len={len(pending)} _next_job_id={self._next_job_id}", flush=True)
-                except Exception:
-                    pass
-                # DEBUG-AGENT-ADD END
                 return
 
         snapshot = self._make_snapshot(ship, world, max_points)
-        # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
-        try:
-            exec_info = 'has_executor' if getattr(self, '_executor', None) is not None else 'no_executor'
-            print(f"PRED_DBG_SUBMIT: submitting job_id={self._next_job_id} max_points={max_points} {exec_info}", flush=True)
-        except Exception:
-            pass
-        # DEBUG-AGENT-ADD END
+        self._debug_integrator_mode("submit", snapshot)
 
         # ensure executor exists (lazy creation)
         if getattr(self, '_executor', None) is None:
@@ -1004,22 +1481,8 @@ class Predictor:
     def _swap_ready_result(self, current_ship=None, current_world=None):
         pending = getattr(self, "_pending_futures", [])
 
-        # DEBUG-AGENT-ADD BEGIN - debug only, remove after verification
-        try:
-            pend_len = len(pending)
-            print(f"PRED_DBG_SWAP: entering swap pending_len={pend_len} _pending_job_id={getattr(self,'_pending_job_id',0)} _pending_future_set={getattr(self,'_pending_future',None) is not None}", flush=True)
-        except Exception:
-            pass
-        # DEBUG-AGENT-ADD END
-
         if not pending:
             if self._pending_future is None or not self._pending_future.done():
-                # DEBUG-AGENT-ADD BEGIN - debug only
-                try:
-                    print(f"PRED_DBG_SWAP: no pending list and no single pending future ready (pending_future={self._pending_future})", flush=True)
-                except Exception:
-                    pass
-                # DEBUG-AGENT-ADD END
                 return False
             finished_future = self._pending_future
             finished_job_id = self._pending_job_id
@@ -1040,24 +1503,12 @@ class Predictor:
                 except Exception:
                     done = False
                 if done:
-                    # DEBUG-AGENT-ADD BEGIN - debug only
-                    try:
-                        print(f"PRED_DBG_SWAP: found finished future jid={jid} idx={idx} done={done}", flush=True)
-                    except Exception:
-                        pass
-                    # DEBUG-AGENT-ADD END
                     finished_future = fut
                     finished_job_id = jid
                     pending.pop(idx)
                     break
 
             if finished_future is None:
-                # DEBUG-AGENT-ADD BEGIN - debug only
-                try:
-                    print(f"PRED_DBG_SWAP: no finished future found in pending", flush=True)
-                except Exception:
-                    pass
-                # DEBUG-AGENT-ADD END
                 return False
 
         try:
@@ -1082,6 +1533,7 @@ class Predictor:
                 dvy = cur_vy - svy
                 delta_speed = math.hypot(dvx, dvy)
                 cur_speed = math.hypot(cur_vx, cur_vy)
+                snap_speed = math.hypot(svx, svy)
                 allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
 
 
@@ -1091,9 +1543,23 @@ class Predictor:
                 cur_py = float(current_ship.position.y)
                 pos_delta = math.hypot(cur_px - spx, cur_py - spy)
 
+                sim_age = None
+                if current_world is not None:
+                    try:
+                        snap_sim_time = float(snapshot.get("sim_time", 0.0))
+                        cur_sim_time = float(current_world.time)
+                        sim_age = max(0.0, cur_sim_time - snap_sim_time)
+                    except Exception:
+                        sim_age = None
+
                 submit_ts = float(snapshot.get("submit_ts", 0.0))
-                age = max(0.0, time.time() - submit_ts)
-                allowed_pos = max(self.snapshot_position_abs_tol, self.snapshot_velocity_abs_tol * max(0.1, age))
+                wall_age = max(0.0, time.time() - submit_ts)
+                if sim_age is None:
+                    motion_age = max(0.1, wall_age)
+                else:
+                    motion_age = sim_age
+                motion_speed = max(cur_speed, snap_speed, self.snapshot_velocity_abs_tol)
+                allowed_pos = max(self.snapshot_position_abs_tol, motion_speed * motion_age)
 
 
                 snap_view = snapshot.get("view_scale", None)
@@ -1106,18 +1572,13 @@ class Predictor:
                 except Exception:
                     is_stale_view = False
 
-                is_stale_speed = delta_speed > allowed_speed
+                # velocity stale-check only makes sense when no simulation-time delta is available
+                is_stale_speed = (sim_age is None) and (delta_speed > allowed_speed)
                 is_stale_pos = pos_delta > allowed_pos
 
                 if is_stale_view or is_stale_speed or is_stale_pos:
 
                     if is_stale_view:
-                            # DEBUG-AGENT-ADD BEGIN - debug only
-                            try:
-                                print(f"PRED_DBG_SWAP: rejecting result - stale_view (snap_view={snap_view} cur_view={self._view_scale})", flush=True)
-                            except Exception:
-                                pass
-                            # DEBUG-AGENT-ADD END
                             return False
 
 
@@ -1151,12 +1612,6 @@ class Predictor:
                         changed = 0
             try:
                 self._computed_since_last_update += int(changed)
-            except Exception:
-                pass
-
-            # DEBUG-AGENT-ADD: log swap result
-            try:
-                print(f"PRED_DBG_SWAP: swapped job_id={finished_job_id} changed={changed} points_len={(points.shape[0] if (np is not None and hasattr(points, 'shape')) else len(points))}", flush=True)
             except Exception:
                 pass
 
@@ -1397,7 +1852,7 @@ class Predictor:
         # Detect large ship state changes (e.g. player thrust) and force
         # a recompute so stored predictor points don't remain stale.
         try:
-            if ship is not None and self._last_swapped_snapshot is not None:
+            if (not self.recompute_every_update) and ship is not None and self._last_swapped_snapshot is not None:
                 svx = float(self._last_swapped_snapshot.get("ship_vx", 0.0))
                 svy = float(self._last_swapped_snapshot.get("ship_vy", 0.0))
                 cur_vx = float(ship.velocity.x)

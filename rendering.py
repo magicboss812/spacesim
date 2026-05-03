@@ -11,6 +11,9 @@ import math
 import os
 from collections import deque
 import ctypes
+import time
+
+import numpy as np
 
 from reference_frames import IdentityReferenceFrame
 
@@ -48,6 +51,10 @@ class Renderer:
             'prediction_points_in': 0,
             'prediction_points_drawn': 0,
         }
+        self.render_benchmark_debug = False
+        self.render_benchmark_every_n_frames = 60
+        self._render_benchmark_frame = 0
+        self._last_prediction_render_stats = {}
 
         # optionales predictor-debug: wenn True druckt kleine beispiele der predictor-
         # punkte (bildschirm und rekonstruierte welt-koords) in die konsole.
@@ -65,6 +72,14 @@ class Renderer:
         self.prediction_sampling_max_segment_px = 4.0
         self.prediction_sampling_reference_scale = 1e-6
         self.prediction_visibility_margin_px = 128.0
+        self.prediction_bypass_fxaa = True
+        self.prediction_render_max_raw_scan = 3000
+        self.prediction_render_max_draw_points = 1000
+        self.prediction_render_max_world_length = None
+        self.prediction_render_max_screen_length_px = None
+        self._prediction_line_cache_key_value = None
+        self._prediction_line_cache_points = None
+        self._prediction_line_cache_stats = {}
 
         # frame-status (principia-ähnlich): physik bleibt absolut, rendering
         # wendet den aktuell ausgewählten plotting-frame plus optionales target-
@@ -84,8 +99,8 @@ class Renderer:
         # diese ersetzen statische scripted-orbit-ellipsen und zeigen relative
         # epizykel-bewegung für alle körper im aktiven frame.
         self.reference_trajectories_enabled = True
-        self.reference_trajectories_max_points = 2400
-        self.reference_trajectories_sample_step_s = 1.0
+        self.reference_trajectories_max_points = 400
+        self.reference_trajectories_sample_step_s = 10.0
         self._reference_traj_last_sample_time = None
         self._reference_traj_points = {}
         self._shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
@@ -634,16 +649,20 @@ class Renderer:
             return
         self._ensure_poly_vbo()
 
-        # Flatten into float array
-        flat = [0.0] * (n * 2)
-        idx = 0
-        for sx, sy in run:
-            flat[idx] = float(sx); flat[idx+1] = float(sy); idx += 2
-        data = (ctypes.c_float * len(flat))(*flat)
+        arr = None
+        try:
+            arr = np.asarray(run, dtype=np.float32)
+            if arr.ndim != 2 or arr.shape[1] != 2:
+                arr = arr.reshape((-1, 2))
+            if not arr.flags['C_CONTIGUOUS']:
+                arr = np.ascontiguousarray(arr, dtype=np.float32)
+            n = int(arr.shape[0])
+        except Exception:
+            arr = None
 
         glLineWidth(float(width))
         try:
-            if self._line_program and self._poly_vbo:
+            if self._line_program and self._poly_vbo and arr is not None:
                 glDisable(GL_TEXTURE_2D)
                 glUseProgram(self._line_program)
                 glUniform2f(self._line_u_viewport, float(self.width), float(self.height))
@@ -651,12 +670,12 @@ class Renderer:
                             float(color[0]), float(color[1]), float(color[2]), float(color[3]))
 
                 glBindBuffer(GL_ARRAY_BUFFER, self._poly_vbo)
-                data_size = ctypes.sizeof(data)
+                data_size = int(arr.nbytes)
                 if data_size > int(self._poly_vbo_size):
-                    glBufferData(GL_ARRAY_BUFFER, data_size, data, GL_DYNAMIC_DRAW)
+                    glBufferData(GL_ARRAY_BUFFER, data_size, arr, GL_DYNAMIC_DRAW)
                     self._poly_vbo_size = int(data_size)
                 else:
-                    glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, data)
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, arr)
                 glEnableVertexAttribArray(self._line_a_pos)
                 glVertexAttribPointer(self._line_a_pos, 2, GL_FLOAT, GL_FALSE, 0, None)
                 glDrawArrays(GL_LINE_STRIP, 0, n)
@@ -882,13 +901,54 @@ class Renderer:
                 if len(run) < 2:
                     continue
                 self._draw_polyline(run, color=(cr, cg, cb, 0.42), width=1.0)
-    
+
+    def _emit_render_benchmark(self, timings):
+        if not self.render_benchmark_debug:
+            return
+        try:
+            self._render_benchmark_frame += 1
+            every = max(1, int(self.render_benchmark_every_n_frames))
+            if self._render_benchmark_frame % every != 0:
+                return
+            pred = dict(getattr(self, "_last_prediction_render_stats", {}) or {})
+            print(
+                "RENDER_BENCH: "
+                f"frame_ms={timings.get('frame_ms', 0.0):.3f} "
+                f"bodies_ms={timings.get('bodies_ms', 0.0):.3f} "
+                f"predictor_prepare_ms={pred.get('prepare_ms', 0.0):.3f} "
+                f"predictor_draw_ms={pred.get('draw_ms', 0.0):.3f} "
+                f"predictor_raw_in={pred.get('raw_in', 0)} "
+                f"scanned={pred.get('scanned', 0)} "
+                f"visible={pred.get('visible', 0)} "
+                f"drawn={pred.get('drawn', 0)} "
+                f"skipped_by_stride={pred.get('skipped_by_stride', 0)} "
+                f"clipped_or_rejected={pred.get('clipped_or_rejected', 0)} "
+                f"cache_hit={pred.get('cache_hit', False)} "
+                f"reference_trails_ms={timings.get('reference_trails_ms', 0.0):.3f} "
+                f"hud_ms={timings.get('hud_ms', 0.0):.3f} "
+                f"fxaa_ms={timings.get('fxaa_ms', 0.0):.3f} "
+                f"swap_or_present_ms={timings.get('swap_or_present_ms', 0.0):.3f}",
+                flush=True,
+            )
+        except Exception:
+            pass
+
     def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None):
+        frame_t0 = time.perf_counter()
+        timings = {
+            'bodies_ms': 0.0,
+            'reference_trails_ms': 0.0,
+            'hud_ms': 0.0,
+            'fxaa_ms': 0.0,
+            'swap_or_present_ms': 0.0,
+        }
 
         if sim_time is not None:
             self.set_frame_time(sim_time)
 
+        reference_t0 = time.perf_counter()
         self._record_reference_trajectories(bodies)
+        timings['reference_trails_ms'] += (time.perf_counter() - reference_t0) * 1000.0
 
         # Optional periodic debug output to inspect frame transforms.
         if getattr(self, 'debug_frame', False):
@@ -911,6 +971,17 @@ class Renderer:
         self.debug_info['bodies_rendered'] = 0
         self.debug_info['prediction_points_in'] = 0
         self.debug_info['prediction_points_drawn'] = 0
+        self._last_prediction_render_stats = {
+            'raw_in': self._points_count(prediction_points),
+            'scanned': 0,
+            'visible': 0,
+            'drawn': 0,
+            'skipped_by_stride': 0,
+            'clipped_or_rejected': 0,
+            'prepare_ms': 0.0,
+            'draw_ms': 0.0,
+            'cache_hit': False,
+        }
         
         # falls FXAA aktiviert ist, rendern nicht-schiff-körper in das FBO und
         # FXAA anwenden. Schiffe werden danach direkt in den haupt-framebuffer
@@ -924,20 +995,42 @@ class Renderer:
 
         glClear(GL_COLOR_BUFFER_BIT)
 
+        reference_t0 = time.perf_counter()
         self._draw_reference_trajectories(bodies, camera)
+        timings['reference_trails_ms'] += (time.perf_counter() - reference_t0) * 1000.0
 
         # Render all non-ship bodies first (they may be FXAA-processed).
+        bodies_t0 = time.perf_counter()
         for body in bodies:
             if getattr(body, 'is_ship', False):
                 continue
 
             self._draw_body(body, camera)
+        timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
+
+        # Schiffsanker einmal berechnen (ship_body wurde oben ermittelt)
+        ship_anchor_world = (float(ship_body.position.x), float(ship_body.position.y)) if ship_body is not None else None
+        prediction_has_points = self._points_count(prediction_points) > 0
+        prediction_drawn = False
+
+        if prediction_has_points and self.enable_fxaa and self.fbo and not self.prediction_bypass_fxaa:
+            glMatrixMode(GL_PROJECTION)
+            glLoadIdentity()
+            gluOrtho2D(0, self.width, 0, self.height)
+            glMatrixMode(GL_MODELVIEW)
+            glLoadIdentity()
+            glEnable(GL_BLEND)
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+            self.draw_prediction(prediction_points, camera, anchor_world=ship_anchor_world)
+            prediction_drawn = True
 
         if self.enable_fxaa and self.fbo:
             # Zurück zum Standard-Framebuffer and apply FXAA post-process
             glBindFramebuffer(GL_FRAMEBUFFER, 0)
             glViewport(0, 0, self.width, self.height)
+            fxaa_t0 = time.perf_counter()
             self._apply_fxaa()
+            timings['fxaa_ms'] += (time.perf_counter() - fxaa_t0) * 1000.0
         
         # Projektion-Matrix für Trajektorienwiedergabe wiederherstellen
         glMatrixMode(GL_PROJECTION)
@@ -951,19 +1044,24 @@ class Renderer:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
-        # Schiffsanker einmal berechnen (ship_body wurde oben ermittelt)
-        ship_anchor_world = (float(ship_body.position.x), float(ship_body.position.y)) if ship_body is not None else None
-
-        if self._points_count(prediction_points) > 0:
+        if prediction_has_points and not prediction_drawn:
             self.draw_prediction(prediction_points, camera, anchor_world=ship_anchor_world)
 
         # Schiff-Marker im Haupt-Framebuffer zeichnen, damit er visuell
         # genau mit dem Prädiktor-Startpunkt übereinstimmt.
         if ship_body is not None:
+            bodies_t0 = time.perf_counter()
             self._draw_body(ship_body, camera)
+            timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
+        hud_t0 = time.perf_counter()
         self._render_hud(camera, predictor)
+        timings['hud_ms'] += (time.perf_counter() - hud_t0) * 1000.0
+        swap_t0 = time.perf_counter()
         pygame.display.flip()
+        timings['swap_or_present_ms'] = (time.perf_counter() - swap_t0) * 1000.0
+        timings['frame_ms'] = (time.perf_counter() - frame_t0) * 1000.0
+        self._emit_render_benchmark(timings)
     
     def _draw_body(self, body, camera):
         camera_frame_xy = self._frame_camera_xy(camera)
@@ -1448,12 +1546,182 @@ class Renderer:
 
         return dense
 
+    def _prediction_point_key(self, points, index):
+        try:
+            point = points[index]
+            if hasattr(point, 'x') and hasattr(point, 'y'):
+                return (float(point.x), float(point.y), None)
+            t = None
+            try:
+                if hasattr(point, '__len__') and len(point) >= 3:
+                    t = float(point[2])
+            except Exception:
+                t = None
+            return (float(point[0]), float(point[1]), t)
+        except Exception:
+            return None
+
+    def _prediction_line_cache_key(self, path_points, input_count, camera, anchor_world):
+        shape = getattr(path_points, 'shape', None)
+        if shape is not None:
+            try:
+                shape_key = tuple(int(v) for v in shape)
+            except Exception:
+                shape_key = (int(input_count),)
+        else:
+            shape_key = (int(input_count),)
+
+        anchor_key = None
+        if anchor_world is not None:
+            try:
+                anchor_key = (float(anchor_world[0]), float(anchor_world[1]))
+            except Exception:
+                anchor_key = None
+
+        active_frame = self._active_frame()
+        return (
+            id(path_points),
+            shape_key,
+            int(input_count),
+            self._prediction_point_key(path_points, 0),
+            self._prediction_point_key(path_points, input_count - 1),
+            float(camera.position.x),
+            float(camera.position.y),
+            float(camera.scale),
+            int(self.width),
+            int(self.height),
+            id(active_frame),
+            getattr(active_frame, 'label', None),
+            id(self._target_frame),
+            self._target_frame_label,
+            self._plotting_frame_label,
+            float(self._frame_time_s),
+            anchor_key,
+            float(self.prediction_sampling_tolerance_px),
+            float(self.prediction_sampling_min_step_px),
+            float(self.prediction_sampling_max_points),
+            float(self.prediction_sampling_max_segment_px),
+            float(self.prediction_sampling_reference_scale),
+            float(self.prediction_visibility_margin_px),
+            int(self.prediction_render_max_raw_scan),
+            int(self.prediction_render_max_draw_points),
+            None if self.prediction_render_max_world_length is None else float(self.prediction_render_max_world_length),
+            None if self.prediction_render_max_screen_length_px is None else float(self.prediction_render_max_screen_length_px),
+        )
+
+    def _prediction_scan_indices(self, raw_count, stats):
+        max_scan = int(max(1, self.prediction_render_max_raw_scan))
+        if raw_count <= max_scan:
+            stats['raw_stride'] = 1
+            stats['skipped_by_stride'] = 0
+            return list(range(raw_count))
+
+        stride = max(1, int(math.ceil(raw_count / max_scan)))
+        indices = list(range(0, raw_count, stride))
+        if not indices or indices[0] != 0:
+            indices.insert(0, 0)
+        if indices[-1] != raw_count - 1 and len(indices) < max_scan:
+            indices.append(raw_count - 1)
+
+        stats['raw_stride'] = stride
+        stats['skipped_by_stride'] = max(0, raw_count - len(indices))
+        return indices
+
+    def _cap_runs_by_screen_length(self, runs, max_screen_length_px, stats):
+        if max_screen_length_px is None:
+            return runs
+        try:
+            remaining = float(max_screen_length_px)
+        except Exception:
+            return runs
+        if remaining <= 0.0:
+            stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + sum(len(run) for run in runs)
+            return []
+
+        capped = []
+        rejected = 0
+        for run in runs:
+            if len(run) < 2:
+                rejected += len(run)
+                continue
+            current = [run[0]]
+            for sx, sy in run[1:]:
+                lx, ly = current[-1]
+                dx = float(sx) - float(lx)
+                dy = float(sy) - float(ly)
+                seg_len = math.sqrt(dx * dx + dy * dy)
+                if seg_len <= remaining:
+                    current.append((sx, sy))
+                    remaining -= seg_len
+                    continue
+                if seg_len > 1e-12 and remaining > 0.0:
+                    frac = remaining / seg_len
+                    current.append((lx + dx * frac, ly + dy * frac))
+                rejected += max(0, len(run) - len(current))
+                remaining = 0.0
+                break
+            if len(current) >= 2:
+                capped.append(current)
+            if remaining <= 0.0:
+                break
+
+        stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + rejected
+        return capped
+
+    def _cap_runs_by_point_budget(self, runs, max_points, stats):
+        max_points = max(2, int(max_points))
+        total = sum(len(run) for run in runs)
+        if total <= max_points:
+            return runs
+
+        capped = []
+        remaining = max_points
+        rejected = 0
+        for run in runs:
+            if remaining < 2:
+                rejected += len(run)
+                break
+            if len(run) <= remaining:
+                capped.append(run)
+                remaining -= len(run)
+                continue
+            target = max(2, remaining)
+            step = (len(run) - 1) / (target - 1)
+            reduced = []
+            last_idx = -1
+            for i in range(target):
+                idx = int(round(i * step))
+                idx = max(0, min(len(run) - 1, idx))
+                if idx != last_idx:
+                    reduced.append(run[idx])
+                    last_idx = idx
+            if len(reduced) >= 2:
+                capped.append(reduced)
+            rejected += max(0, len(run) - len(reduced))
+            remaining = 0
+            break
+
+        stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + rejected
+        return capped
+
     def draw_prediction(self, path_points, camera, anchor_world=None):
 
         input_count = self._points_count(path_points)
+        stats = {
+            'raw_in': int(input_count),
+            'scanned': 0,
+            'visible': 0,
+            'drawn': 0,
+            'skipped_by_stride': 0,
+            'clipped_or_rejected': 0,
+            'prepare_ms': 0.0,
+            'draw_ms': 0.0,
+            'cache_hit': False,
+        }
         if input_count == 0:
             self.debug_info['prediction_points_in'] = 0
             self.debug_info['prediction_points_drawn'] = 0
+            self._last_prediction_render_stats = stats
             return
 
         # Textur deaktivieren falls HUD sie aktiviert hat
@@ -1463,6 +1731,7 @@ class Renderer:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
+        prepare_t0 = time.perf_counter()
         ship_x, ship_y = self._point_xy(path_points[0])
         half_w = self.width * 0.5
         half_h = self.height * 0.5
@@ -1493,6 +1762,7 @@ class Renderer:
         effective_tolerance = self._effective_sampling_tolerance(camera)
         effective_min_step = max(0.05, min(self.prediction_sampling_min_step_px, effective_tolerance * 0.6))
         effective_max_segment = self._effective_max_segment_step(camera)
+        max_draw_points = max(2, min(int(self.prediction_sampling_max_points), int(self.prediction_render_max_draw_points)))
 
         anchor_first_run = True
         if input_count >= 2:
@@ -1526,16 +1796,26 @@ class Renderer:
                 self.height + margin,
             )
 
-        sampled_runs = self._adaptive_prediction_screen_points(
-            path_points,
-            camera,
-            tolerance_px=effective_tolerance,
-            min_step_px=effective_min_step,
-            max_segment_px=effective_max_segment,
-            max_points=self.prediction_sampling_max_points,
-            margin_px=self.prediction_visibility_margin_px,
-            anchor_world=anchor_world,
-        )
+        cache_key = self._prediction_line_cache_key(path_points, input_count, camera, anchor_world)
+        if cache_key == self._prediction_line_cache_key_value and self._prediction_line_cache_points is not None:
+            sampled_runs = self._prediction_line_cache_points
+            stats.update(dict(self._prediction_line_cache_stats))
+            stats['raw_in'] = int(input_count)
+            stats['prepare_ms'] = (time.perf_counter() - prepare_t0) * 1000.0
+            stats['cache_hit'] = True
+        else:
+            sampled_runs = self._adaptive_prediction_screen_points(
+                path_points,
+                camera,
+                tolerance_px=effective_tolerance,
+                min_step_px=effective_min_step,
+                max_segment_px=effective_max_segment,
+                max_points=max_draw_points,
+                margin_px=self.prediction_visibility_margin_px,
+                anchor_world=anchor_world,
+                stats=stats,
+            )
+            stats['prepare_ms'] = (time.perf_counter() - prepare_t0) * 1000.0
 
         self.debug_info['prediction_points_in'] = input_count
         self.debug_info['prediction_points_drawn'] = sum(len(run) for run in sampled_runs)
@@ -1560,6 +1840,8 @@ class Renderer:
             pass
 
         if len(sampled_runs) == 0:
+            stats['drawn'] = 0
+            self._last_prediction_render_stats = stats
             return
 
         # If the ship is visible, force exact predictor start at ship with no offset.
@@ -1576,10 +1858,19 @@ class Renderer:
             else:
                 first_run.insert(0, (float(ship_screen[0]), float(ship_screen[1])))
 
+        sampled_runs = self._cap_runs_by_point_budget(sampled_runs, max_draw_points, stats)
+        self._prediction_line_cache_key_key_value = cache_key
+        self._prediction_line_cache_points = sampled_runs
+        self._prediction_line_cache_stats = dict(stats)
+        draw_t0 = time.perf_counter()
         for run in sampled_runs:
             if len(run) < 2:
                 continue
             self._draw_polyline(run, color=(1.0, 1.0, 1.0, 0.6), width=2.0)
+        stats['draw_ms'] = (time.perf_counter() - draw_t0) * 1000.0
+        stats['drawn'] = sum(len(run) for run in sampled_runs)
+        self.debug_info['prediction_points_drawn'] = int(stats['drawn'])
+        self._last_prediction_render_stats = stats
 
     def _squared_point_line_distance(self, px, py, ax, ay, bx, by):
         abx = bx - ax
@@ -1643,7 +1934,10 @@ class Renderer:
                                            max_segment_px,
                                            max_points,
                                            margin_px,
-                                           anchor_world=None):
+                                           anchor_world=None,
+                                           stats=None):
+        if stats is None:
+            stats = {}
         half_w = self.width * 0.5
         half_h = self.height * 0.5
         camera_frame_xy = self._frame_camera_xy(camera)
@@ -1667,7 +1961,27 @@ class Renderer:
                 delta_world_x = 0.0
                 delta_world_y = 0.0
 
-        for i, point in enumerate(path_points):
+        raw_count = len(path_points)
+        indices = self._prediction_scan_indices(raw_count, stats)
+        max_world_length = self.prediction_render_max_world_length
+        try:
+            max_world_length = None if max_world_length is None else max(0.0, float(max_world_length))
+        except Exception:
+            max_world_length = None
+
+        xmin = -margin_px
+        xmax = self.width + margin_px
+        ymin = -margin_px
+        ymax = self.height + margin_px
+        prev_world = None
+        prev_time = None
+        world_accum = 0.0
+        prev_screen_all = None
+        prev_near_all = False
+        pending_offscreen = None
+
+        for i in indices:
+            point = path_points[i]
             if i == 0 and anchor_world is not None:
                 px = float(anchor_world[0])
                 py = float(anchor_world[1])
@@ -1685,13 +1999,78 @@ class Renderer:
             except Exception:
                 sample_time = None
 
+            stop_after_point = False
+            if max_world_length is not None and prev_world is not None:
+                seg_dx_world = px - prev_world[0]
+                seg_dy_world = py - prev_world[1]
+                seg_len_world = math.sqrt(seg_dx_world * seg_dx_world + seg_dy_world * seg_dy_world)
+                if world_accum + seg_len_world > max_world_length:
+                    remaining_world = max_world_length - world_accum
+                    if seg_len_world > 1e-12 and remaining_world > 0.0:
+                        frac = remaining_world / seg_len_world
+                        px = prev_world[0] + seg_dx_world * frac
+                        py = prev_world[1] + seg_dy_world * frac
+                        if sample_time is not None and prev_time is not None:
+                            sample_time = prev_time + (sample_time - prev_time) * frac
+                    else:
+                        px, py = prev_world
+                        sample_time = prev_time
+                    stop_after_point = True
+                else:
+                    world_accum += seg_len_world
+
             if sample_time is not None:
                 sx, sy = self._world_to_screen_xy_at_time(px, py, camera, sample_time)
             else:
                 frame_x, frame_y = self._frame_transform_xy(px, py)
                 sx = half_w + (frame_x - camera_frame_xy[0]) * scale
                 sy = half_h - (frame_y - camera_frame_xy[1]) * scale
-            screen_points.append((sx, sy))
+            stats['scanned'] = stats.get('scanned', 0) + 1
+
+            near_visible = self._is_on_screen(sx, sy, margin_px)
+            if near_visible:
+                stats['visible'] = stats.get('visible', 0) + 1
+
+            current_screen = (sx, sy)
+            if not screen_points:
+                screen_points.append(current_screen)
+            elif near_visible:
+                if pending_offscreen is not None and screen_points[-1] != pending_offscreen:
+                    screen_points.append(pending_offscreen)
+                screen_points.append(current_screen)
+                pending_offscreen = None
+            else:
+                crosses_view = False
+                if prev_screen_all is not None:
+                    crosses_view = self._segment_intersects_rect(
+                        prev_screen_all[0],
+                        prev_screen_all[1],
+                        sx,
+                        sy,
+                        xmin,
+                        xmax,
+                        ymin,
+                        ymax,
+                    )
+                if crosses_view:
+                    if prev_screen_all is not None and screen_points[-1] != prev_screen_all:
+                        screen_points.append(prev_screen_all)
+                    screen_points.append(current_screen)
+                    pending_offscreen = None
+                elif prev_near_all:
+                    screen_points.append(current_screen)
+                    pending_offscreen = None
+                else:
+                    pending_offscreen = current_screen
+                    stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + 1
+
+            prev_world = (px, py)
+            prev_time = sample_time
+            prev_screen_all = current_screen
+            prev_near_all = near_visible
+            if stop_after_point:
+                stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + max(0, raw_count - i - 1)
+                break
 
         runs = self._visible_window_runs(screen_points, margin_px)
         if not runs:
@@ -1788,6 +2167,13 @@ class Renderer:
                 sampled_runs.append(sampled)
                 remaining_budget -= len(sampled)
 
+        sampled_runs = self._cap_runs_by_screen_length(
+            sampled_runs,
+            self.prediction_render_max_screen_length_px,
+            stats,
+        )
+        sampled_runs = self._cap_runs_by_point_budget(sampled_runs, max_points, stats)
+        stats['drawn'] = sum(len(run) for run in sampled_runs)
         return sampled_runs
 
     def _is_visible(self, screen_pos, radius):

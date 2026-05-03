@@ -64,6 +64,7 @@ def main():
     predictor = Predictor(num_points=10000, dt=1000.0, recompute_every_update=True)  # 1M Meter pro Punkt
     # diagnostik: synchrone neuberechnung bei veralteten asynchronen snapshots erzwingen
     predictor.force_sync_on_stale = False
+    predictor.set_integrator_quality("accurate")
     print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
 
     # Schiff-Steuerung initialisieren
