@@ -80,6 +80,8 @@ class Renderer:
         self._prediction_line_cache_key_value = None
         self._prediction_line_cache_points = None
         self._prediction_line_cache_stats = {}
+        self._prediction_frame_transform_debug_key = None
+        self._current_body_index_by_id = {}
 
         # frame-status (principia-ähnlich): physik bleibt absolut, rendering
         # wendet den aktuell ausgewählten plotting-frame plus optionales target-
@@ -99,8 +101,8 @@ class Renderer:
         # diese ersetzen statische scripted-orbit-ellipsen und zeigen relative
         # epizykel-bewegung für alle körper im aktiven frame.
         self.reference_trajectories_enabled = True
-        self.reference_trajectories_max_points = 400
-        self.reference_trajectories_sample_step_s = 10.0
+        self.reference_trajectories_max_points = 2400
+        self.reference_trajectories_sample_step_s = 1.0
         self._reference_traj_last_sample_time = None
         self._reference_traj_points = {}
         self._shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
@@ -456,7 +458,7 @@ class Renderer:
         sy = self.height * 0.5 - (frame_y - camera_frame_xy[1]) * scale
         return sx, sy
 
-    def _world_to_screen_xy_at_time(self, world_x, world_y, camera, time_s):
+    def _world_to_screen_xy_at_time(self, world_x, world_y, camera, time_s, camera_frame_xy=None):
         """Konvertiert einen Welt-Punkt zu einer bestimmten Sim-Zeit in Bildschirmkoordinaten.
 
         Diese nutzt die zeitabhängige Transformation des aktiven Frames, sodass
@@ -470,16 +472,62 @@ class Renderer:
             # Fallback: auf aktuelle Frame-Transformation zurückfallen
             frame_x, frame_y = self._frame_transform_xy(world_x, world_y)
 
-        # Kamera-Ursprung zur selben Zeit im Frame-Raum berechnen
-        try:
-            cam_fx, cam_fy = frame.to_this_frame_xy(float(time_s), float(camera.position.x), float(camera.position.y))
-        except Exception:
-            cam_fx, cam_fy = self._frame_transform_xy(float(camera.position.x), float(camera.position.y))
+        # Keep the camera origin in the current render frame. Prediction samples
+        # are time-tagged future world points; transforming the camera at the
+        # sample time would cancel a moving reference-frame origin back out.
+        if camera_frame_xy is None:
+            camera_frame_xy = self._frame_camera_xy(camera)
 
         scale = float(camera.scale)
-        sx = self.width * 0.5 + (frame_x - cam_fx) * scale
-        sy = self.height * 0.5 - (frame_y - cam_fy) * scale
+        sx = self.width * 0.5 + (frame_x - camera_frame_xy[0]) * scale
+        sy = self.height * 0.5 - (frame_y - camera_frame_xy[1]) * scale
         return sx, sy
+
+    def _prediction_frame_transform_mode(self):
+        frame = self._active_frame()
+        name = frame.__class__.__name__
+        label = str(getattr(frame, 'label', '') or '')
+        label_l = label.lower()
+        if isinstance(frame, IdentityReferenceFrame) or name == 'IdentityReferenceFrame':
+            return 'world'
+        if 'NonRotating' in name or 'non-rotating' in label_l:
+            return 'body_centered_non_rotating'
+        if 'BodyDirection' in name or 'direction' in label_l:
+            return 'body_centered_body_direction'
+        return 'custom_frame'
+
+    def _debug_prediction_frame_transform(self, path_points, predictor=None):
+        if not getattr(self, 'debug_predictor', False):
+            return
+        try:
+            count = self._points_count(path_points)
+            if count <= 0:
+                return
+            mode = self._prediction_frame_transform_mode()
+            active_frame = self._active_frame()
+            ref_index = getattr(predictor, 'reference_body_index', None) if predictor is not None else None
+            if ref_index is None:
+                primary = getattr(active_frame, 'primary_body', None)
+                if primary is None:
+                    primary = getattr(active_frame, 'target_body', None)
+                body_index_by_id = getattr(self, '_current_body_index_by_id', {}) or {}
+                ref_index = body_index_by_id.get(id(primary)) if primary is not None else None
+            key = (mode, int(count), id(active_frame), ref_index)
+            if key == getattr(self, '_prediction_frame_transform_debug_key', None):
+                return
+            self._prediction_frame_transform_debug_key = key
+            if mode == 'world':
+                print(f"PRED_DBG_FRAME_TRANSFORM: mode=world points={int(count)}", flush=True)
+            else:
+                print(
+                    "PRED_DBG_FRAME_TRANSFORM: "
+                    f"mode={mode} "
+                    f"ref_index={ref_index if ref_index is not None else 'n/a'} "
+                    f"points={int(count)}",
+                    flush=True,
+                )
+        except Exception:
+            pass
 
     def _reset_reference_trajectories(self):
         self._reference_traj_points = {}
@@ -945,6 +993,10 @@ class Renderer:
 
         if sim_time is not None:
             self.set_frame_time(sim_time)
+        try:
+            self._current_body_index_by_id = {id(body): idx for idx, body in enumerate(bodies)}
+        except Exception:
+            self._current_body_index_by_id = {}
 
         reference_t0 = time.perf_counter()
         self._record_reference_trajectories(bodies)
@@ -1008,8 +1060,6 @@ class Renderer:
             self._draw_body(body, camera)
         timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
-        # Schiffsanker einmal berechnen (ship_body wurde oben ermittelt)
-        ship_anchor_world = (float(ship_body.position.x), float(ship_body.position.y)) if ship_body is not None else None
         prediction_has_points = self._points_count(prediction_points) > 0
         prediction_drawn = False
 
@@ -1021,7 +1071,7 @@ class Renderer:
             glLoadIdentity()
             glEnable(GL_BLEND)
             glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-            self.draw_prediction(prediction_points, camera, anchor_world=ship_anchor_world)
+            self.draw_prediction(prediction_points, camera, predictor=predictor)
             prediction_drawn = True
 
         if self.enable_fxaa and self.fbo:
@@ -1045,7 +1095,7 @@ class Renderer:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         
         if prediction_has_points and not prediction_drawn:
-            self.draw_prediction(prediction_points, camera, anchor_world=ship_anchor_world)
+            self.draw_prediction(prediction_points, camera, predictor=predictor)
 
         # Schiff-Marker im Haupt-Framebuffer zeichnen, damit er visuell
         # genau mit dem Prädiktor-Startpunkt übereinstimmt.
@@ -1561,7 +1611,7 @@ class Renderer:
         except Exception:
             return None
 
-    def _prediction_line_cache_key(self, path_points, input_count, camera, anchor_world):
+    def _make_prediction_line_cache_key(self, path_points, input_count, camera, anchor_world):
         shape = getattr(path_points, 'shape', None)
         if shape is not None:
             try:
@@ -1704,7 +1754,7 @@ class Renderer:
         stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + rejected
         return capped
 
-    def draw_prediction(self, path_points, camera, anchor_world=None):
+    def draw_prediction(self, path_points, camera, anchor_world=None, predictor=None):
 
         input_count = self._points_count(path_points)
         stats = {
@@ -1732,10 +1782,10 @@ class Renderer:
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
         prepare_t0 = time.perf_counter()
-        ship_x, ship_y = self._point_xy(path_points[0])
         half_w = self.width * 0.5
         half_h = self.height * 0.5
         camera_frame_xy = self._frame_camera_xy(camera)
+        self._debug_prediction_frame_transform(path_points, predictor=predictor)
 
         # debug-ausgabe: schiff-welt-position und ersten predictor-punkt anzeigen
         try:
@@ -1746,57 +1796,12 @@ class Renderer:
         except Exception:
             pass
 
-        # wenn das schiff identifiziert werden kann, dessen exakte position zum verankern verwenden.
-        # dies zwingt den ersten gerenderten predictor-punkt dazu am live-schiff zu liegen.
-        if anchor_world is not None:
-            ship_x = float(anchor_world[0])
-            ship_y = float(anchor_world[1])
-
-        ship_screen = self._world_to_screen_xy(
-            ship_x,
-            ship_y,
-            camera,
-            camera_frame_xy=camera_frame_xy,
-        )
-
         effective_tolerance = self._effective_sampling_tolerance(camera)
         effective_min_step = max(0.05, min(self.prediction_sampling_min_step_px, effective_tolerance * 0.6))
         effective_max_segment = self._effective_max_segment_step(camera)
         max_draw_points = max(2, min(int(self.prediction_sampling_max_points), int(self.prediction_render_max_draw_points)))
 
-        anchor_first_run = True
-        if input_count >= 2:
-            n0x, n0y = self._point_xy(path_points[1])
-            # If predictor points include timestamps, project using per-sample time
-            sample_time = None
-            try:
-                if hasattr(path_points[1], '__len__') and len(path_points[1]) >= 3:
-                    sample_time = float(path_points[1][2])
-            except Exception:
-                sample_time = None
-
-            if sample_time is not None:
-                next_screen = self._world_to_screen_xy_at_time(n0x, n0y, camera, sample_time)
-            else:
-                next_screen = self._world_to_screen_xy(
-                    n0x,
-                    n0y,
-                    camera,
-                    camera_frame_xy=camera_frame_xy,
-                )
-            margin = self.prediction_visibility_margin_px
-            anchor_first_run = self._segment_intersects_rect(
-                ship_screen[0],
-                ship_screen[1],
-                next_screen[0],
-                next_screen[1],
-                -margin,
-                self.width + margin,
-                -margin,
-                self.height + margin,
-            )
-
-        cache_key = self._prediction_line_cache_key(path_points, input_count, camera, anchor_world)
+        cache_key = self._make_prediction_line_cache_key(path_points, input_count, camera, anchor_world)
         if cache_key == self._prediction_line_cache_key_value and self._prediction_line_cache_points is not None:
             sampled_runs = self._prediction_line_cache_points
             stats.update(dict(self._prediction_line_cache_stats))
@@ -1814,6 +1819,7 @@ class Renderer:
                 margin_px=self.prediction_visibility_margin_px,
                 anchor_world=anchor_world,
                 stats=stats,
+                camera_frame_xy=camera_frame_xy,
             )
             stats['prepare_ms'] = (time.perf_counter() - prepare_t0) * 1000.0
 
@@ -1844,22 +1850,8 @@ class Renderer:
             self._last_prediction_render_stats = stats
             return
 
-        # If the ship is visible, force exact predictor start at ship with no offset.
-        # If it is not visible, keep the guarded behavior to avoid false connectors.
-        first_run = sampled_runs[0]
-        ship_is_visible = self._is_on_screen(ship_screen[0], ship_screen[1], 0.0)
-        if ship_is_visible and len(first_run) >= 1:
-            first_run[0] = (float(ship_screen[0]), float(ship_screen[1]))
-        elif anchor_first_run and len(first_run) >= 1:
-            dx = first_run[0][0] - ship_screen[0]
-            dy = first_run[0][1] - ship_screen[1]
-            if dx * dx + dy * dy <= 1e-10:
-                first_run[0] = (float(ship_screen[0]), float(ship_screen[1]))
-            else:
-                first_run.insert(0, (float(ship_screen[0]), float(ship_screen[1])))
-
         sampled_runs = self._cap_runs_by_point_budget(sampled_runs, max_draw_points, stats)
-        self._prediction_line_cache_key_key_value = cache_key
+        self._prediction_line_cache_key_value = cache_key
         self._prediction_line_cache_points = sampled_runs
         self._prediction_line_cache_stats = dict(stats)
         draw_t0 = time.perf_counter()
@@ -1935,31 +1927,17 @@ class Renderer:
                                            max_points,
                                            margin_px,
                                            anchor_world=None,
-                                           stats=None):
+                                           stats=None,
+                                           camera_frame_xy=None):
         if stats is None:
             stats = {}
         half_w = self.width * 0.5
         half_h = self.height * 0.5
-        camera_frame_xy = self._frame_camera_xy(camera)
+        if camera_frame_xy is None:
+            camera_frame_xy = self._frame_camera_xy(camera)
         scale = float(camera.scale)
 
-        # If an anchor_world is provided, compute the world-space delta
-        # between the requested anchor and the predictor's original first
-        # point, and translate all projected points by that delta. This
-        # avoids a visual 'gap' when the predictor points were computed
-        # from an earlier snapshot (async) while we anchor the first
-        # point to the ship's current position.
         screen_points = []
-        delta_world_x = 0.0
-        delta_world_y = 0.0
-        if anchor_world is not None and len(path_points) > 0:
-            try:
-                orig_px, orig_py = self._point_xy(path_points[0])
-                delta_world_x = float(anchor_world[0]) - float(orig_px)
-                delta_world_y = float(anchor_world[1]) - float(orig_py)
-            except Exception:
-                delta_world_x = 0.0
-                delta_world_y = 0.0
 
         raw_count = len(path_points)
         indices = self._prediction_scan_indices(raw_count, stats)
@@ -1982,14 +1960,7 @@ class Renderer:
 
         for i in indices:
             point = path_points[i]
-            if i == 0 and anchor_world is not None:
-                px = float(anchor_world[0])
-                py = float(anchor_world[1])
-            else:
-                px, py = self._point_xy(point)
-                if anchor_world is not None:
-                    px = float(px) + delta_world_x
-                    py = float(py) + delta_world_y
+            px, py = self._point_xy(point)
 
             # If point includes timestamp (x,y,t), use time-aware projection.
             sample_time = None
@@ -2020,7 +1991,13 @@ class Renderer:
                     world_accum += seg_len_world
 
             if sample_time is not None:
-                sx, sy = self._world_to_screen_xy_at_time(px, py, camera, sample_time)
+                sx, sy = self._world_to_screen_xy_at_time(
+                    px,
+                    py,
+                    camera,
+                    sample_time,
+                    camera_frame_xy=camera_frame_xy,
+                )
             else:
                 frame_x, frame_y = self._frame_transform_xy(px, py)
                 sx = half_w + (frame_x - camera_frame_xy[0]) * scale

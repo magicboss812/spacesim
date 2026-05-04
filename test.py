@@ -23,6 +23,11 @@ def main():
     import os
     # VSync über Umgebungsvariable aktivieren
     os.environ['SDL_VIDEO_VSYNC'] = '1'
+    try:
+        max_frames = int(os.environ.get("SPACESIM_MAX_FRAMES", "0") or "0")
+    except Exception:
+        max_frames = 0
+    max_frames = max(0, max_frames)
 
     # Starte Pygame mit OpenGL
     pygame.init()
@@ -49,7 +54,7 @@ def main():
     w.body = bodies
 
     # Parameter für die Simulation
-    dt = 9000  # zeitschritt in Sekunden (1 Schritt = 15 Minuten)
+    dt = 900  # zeitschritt in Sekunden (1 Schritt = 15 Minuten)
     running = True  # Hauptschleife der Simulation
 
     # Kamera initialisieren
@@ -61,10 +66,21 @@ def main():
     # Predictor initialisieren
     # num_points: Anzahl der Punkte (bestimmt die Reichweite)
     # distance_interval: Abstand zwischen Punkten in Metern (kleiner = genauer)
-    predictor = Predictor(num_points=10000, dt=1000.0, recompute_every_update=True)  # 1M Meter pro Punkt
+    predictor_async = os.environ.get("SPACESIM_PREDICTOR_ASYNC", "1").strip().lower() not in ("0", "false", "no", "off")
+    predictor = Predictor(
+        num_points=10000,
+        dt=1000.0,
+        recompute_every_update=True,
+        async_compute=predictor_async,
+        rolling_mode=False,
+    )  # 1M Meter pro Punkt
     # diagnostik: synchrone neuberechnung bei veralteten asynchronen snapshots erzwingen
     predictor.force_sync_on_stale = False
-    predictor.set_integrator_quality("accurate")
+    predictor.strict_snapshot_matching = True
+    predictor.use_time_dependent_bodies = True
+    predictor.use_reference_acceleration_correction = False
+    predictor.set_integrator_quality("balanced")  # Use "rk4" to compare against the old fixed-step predictor.
+    print(f"PREDICTOR DEBUG: async_compute = {predictor.async_compute}")
     print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
 
     # Schiff-Steuerung initialisieren
@@ -306,6 +322,8 @@ def main():
         
         renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time)
         frame_count += 1
+        if max_frames > 0 and frame_count >= max_frames:
+            running = False
 
     pygame.quit()
 

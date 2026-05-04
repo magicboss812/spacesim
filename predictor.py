@@ -3,7 +3,6 @@
 from vec import Vec2
 import math
 import time
-import poliastro
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from numba import njit
@@ -114,6 +113,1118 @@ if NUMBA_AVAILABLE:
         next_vy = vy + (k1_ay + 2.0 * k2_ay + 2.0 * k3_ay + k4_ay) * (dt / 6.0)
 
         return next_px, next_py, next_vx, next_vy
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rkn_acc_numba(x, y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G):
+        ax, ay = _compute_acc_numba(x, y, body_x, body_y, body_m, body_fixed, G)
+        return ax - ref_ax, ay - ref_ay
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rkn4_step_numba(
+        px,
+        py,
+        vx,
+        vy,
+        dt,
+        ref_enabled,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        G,
+    ):
+        ref_ax = 0.0
+        ref_ay = 0.0
+        if ref_enabled != 0:
+            ref_ax, ref_ay = _compute_acc_numba(ref_px, ref_py, body_x, body_y, body_m, body_fixed, G)
+
+        dt2 = dt * dt
+        half_dt = 0.5 * dt
+
+        k1_ax, k1_ay = _rkn_acc_numba(px, py, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
+
+        p2x = px + half_dt * vx + 0.125 * dt2 * k1_ax
+        p2y = py + half_dt * vy + 0.125 * dt2 * k1_ay
+        k2_ax, k2_ay = _rkn_acc_numba(p2x, p2y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
+
+        p3x = px + half_dt * vx + 0.125 * dt2 * k2_ax
+        p3y = py + half_dt * vy + 0.125 * dt2 * k2_ay
+        k3_ax, k3_ay = _rkn_acc_numba(p3x, p3y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
+
+        p4x = px + dt * vx + 0.5 * dt2 * k3_ax
+        p4y = py + dt * vy + 0.5 * dt2 * k3_ay
+        k4_ax, k4_ay = _rkn_acc_numba(p4x, p4y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
+
+        next_px = px + dt * vx + (dt2 / 6.0) * (k1_ax + k2_ax + k3_ax)
+        next_py = py + dt * vy + (dt2 / 6.0) * (k1_ay + k2_ay + k3_ay)
+        next_vx = vx + (dt / 6.0) * (k1_ax + 2.0 * k2_ax + 2.0 * k3_ax + k4_ax)
+        next_vy = vy + (dt / 6.0) * (k1_ay + 2.0 * k2_ay + 2.0 * k3_ay + k4_ay)
+
+        return next_px, next_py, next_vx, next_vy
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rkn_adaptive_step_numba(
+        px,
+        py,
+        vx,
+        vy,
+        dt,
+        min_dt,
+        max_dt,
+        rtol,
+        atol_pos,
+        atol_vel,
+        safety,
+        min_factor,
+        max_factor,
+        max_rejects,
+        ref_enabled,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        G,
+    ):
+        if (not math.isfinite(min_dt)) or min_dt <= 0.0:
+            min_dt = 1e-9
+        if (not math.isfinite(max_dt)) or max_dt <= 0.0:
+            max_dt = min_dt
+        if max_dt < min_dt:
+            max_dt = min_dt
+        if (not math.isfinite(rtol)) or rtol < 0.0:
+            rtol = 0.0
+        if (not math.isfinite(atol_pos)) or atol_pos <= 0.0:
+            atol_pos = 1e-12
+        if (not math.isfinite(atol_vel)) or atol_vel <= 0.0:
+            atol_vel = 1e-12
+        if (not math.isfinite(safety)) or safety <= 0.0:
+            safety = 0.9
+        if (not math.isfinite(min_factor)) or min_factor <= 0.0:
+            min_factor = 0.2
+        if (not math.isfinite(max_factor)) or max_factor < min_factor:
+            max_factor = min_factor
+        if max_rejects < 0:
+            max_rejects = 0
+
+        step_dt = dt
+        if (not math.isfinite(step_dt)) or step_dt <= 0.0:
+            step_dt = max_dt
+        if step_dt < min_dt:
+            step_dt = min_dt
+        if step_dt > max_dt:
+            step_dt = max_dt
+
+        rejected_count = 0
+
+        while True:
+            half_dt = 0.5 * step_dt
+
+            full_px, full_py, full_vx, full_vy = _rkn4_step_numba(
+                px,
+                py,
+                vx,
+                vy,
+                step_dt,
+                ref_enabled,
+                ref_px,
+                ref_py,
+                body_x,
+                body_y,
+                body_m,
+                body_fixed,
+                G,
+            )
+            half1_px, half1_py, half1_vx, half1_vy = _rkn4_step_numba(
+                px,
+                py,
+                vx,
+                vy,
+                half_dt,
+                ref_enabled,
+                ref_px,
+                ref_py,
+                body_x,
+                body_y,
+                body_m,
+                body_fixed,
+                G,
+            )
+            half2_px, half2_py, half2_vx, half2_vy = _rkn4_step_numba(
+                half1_px,
+                half1_py,
+                half1_vx,
+                half1_vy,
+                half_dt,
+                ref_enabled,
+                ref_px,
+                ref_py,
+                body_x,
+                body_y,
+                body_m,
+                body_fixed,
+                G,
+            )
+
+            finite_state = (
+                math.isfinite(full_px)
+                and math.isfinite(full_py)
+                and math.isfinite(full_vx)
+                and math.isfinite(full_vy)
+                and math.isfinite(half2_px)
+                and math.isfinite(half2_py)
+                and math.isfinite(half2_vx)
+                and math.isfinite(half2_vy)
+            )
+
+            if finite_state:
+                pos_dx = half2_px - full_px
+                pos_dy = half2_py - full_py
+                vel_dx = half2_vx - full_vx
+                vel_dy = half2_vy - full_vy
+
+                pos_err = math.sqrt(pos_dx * pos_dx + pos_dy * pos_dy) / 15.0
+                vel_err = math.sqrt(vel_dx * vel_dx + vel_dy * vel_dy) / 15.0
+
+                cur_r = math.sqrt(px * px + py * py)
+                next_r = math.sqrt(half2_px * half2_px + half2_py * half2_py)
+                cur_speed = math.sqrt(vx * vx + vy * vy)
+                next_speed = math.sqrt(half2_vx * half2_vx + half2_vy * half2_vy)
+                motion_scale = cur_speed * step_dt
+
+                pos_ref = cur_r
+                if next_r > pos_ref:
+                    pos_ref = next_r
+                if motion_scale > pos_ref:
+                    pos_ref = motion_scale
+                if pos_ref < 1.0:
+                    pos_ref = 1.0
+
+                vel_ref = cur_speed
+                if next_speed > vel_ref:
+                    vel_ref = next_speed
+                if vel_ref < 1.0:
+                    vel_ref = 1.0
+
+                pos_scale = atol_pos + rtol * pos_ref
+                vel_scale = atol_vel + rtol * vel_ref
+                if pos_scale <= 0.0 or not math.isfinite(pos_scale):
+                    pos_scale = 1e-30
+                if vel_scale <= 0.0 or not math.isfinite(vel_scale):
+                    vel_scale = 1e-30
+
+                pos_norm = pos_err / pos_scale
+                vel_norm = vel_err / vel_scale
+                err_norm = pos_norm
+                if vel_norm > err_norm:
+                    err_norm = vel_norm
+            else:
+                err_norm = 1e300
+
+            if math.isfinite(err_norm) and err_norm <= 1.0:
+                if err_norm <= 1e-300:
+                    factor = max_factor
+                else:
+                    factor = safety * err_norm ** (-0.2)
+                    if factor < min_factor:
+                        factor = min_factor
+                    if factor > max_factor:
+                        factor = max_factor
+
+                proposed_next_dt = step_dt * factor
+                if proposed_next_dt < min_dt:
+                    proposed_next_dt = min_dt
+                if proposed_next_dt > max_dt:
+                    proposed_next_dt = max_dt
+
+                return (
+                    half2_px,
+                    half2_py,
+                    half2_vx,
+                    half2_vy,
+                    step_dt,
+                    proposed_next_dt,
+                    err_norm,
+                    1,
+                    rejected_count,
+                    0,
+                )
+
+            if not math.isfinite(err_norm):
+                err_norm = 1e300
+
+            if step_dt <= min_dt * (1.0 + 1e-12):
+                return (
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    0.0,
+                    min_dt,
+                    err_norm,
+                    0,
+                    rejected_count,
+                    6,
+                )
+
+            if rejected_count >= max_rejects:
+                return (
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    0.0,
+                    step_dt,
+                    err_norm,
+                    0,
+                    rejected_count,
+                    2,
+                )
+
+            if err_norm <= 1e-300:
+                factor = min_factor
+            else:
+                factor = safety * err_norm ** (-0.2)
+            if factor < min_factor:
+                factor = min_factor
+            if factor > max_factor:
+                factor = max_factor
+
+            next_dt = step_dt * factor
+            if next_dt >= step_dt:
+                next_dt = step_dt * min_factor
+            if next_dt < min_dt:
+                next_dt = min_dt
+            if next_dt > max_dt:
+                next_dt = max_dt
+
+            rejected_count += 1
+            step_dt = next_dt
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _body_scripted_relative_xy_numba(index, local_t, body_m, body_a, body_e, body_theta, body_arg, body_parent, G):
+        parent = body_parent[index]
+        if parent < 0 or parent >= body_m.shape[0]:
+            return 0.0, 0.0, 0
+
+        a = body_a[index]
+        e = body_e[index]
+        parent_mass = body_m[parent]
+        if a <= 0.0 or e < 0.0 or e >= 1.0 or parent_mass <= 0.0:
+            return 0.0, 0.0, 0
+
+        mu = G * parent_mass
+        if mu <= 0.0:
+            return 0.0, 0.0, 0
+
+        nu0 = body_theta[index]
+        arg = body_arg[index]
+
+        cos_nu0 = math.cos(nu0)
+        sin_nu0 = math.sin(nu0)
+        denom = 1.0 + e * cos_nu0
+        if abs(denom) <= 1e-14:
+            return 0.0, 0.0, 0
+
+        sqrt_one_minus_e2 = math.sqrt(max(0.0, 1.0 - e * e))
+        sin_e0 = sqrt_one_minus_e2 * sin_nu0 / denom
+        cos_e0 = (e + cos_nu0) / denom
+        ecc_anomaly0 = math.atan2(sin_e0, cos_e0)
+        mean_anomaly0 = ecc_anomaly0 - e * math.sin(ecc_anomaly0)
+
+        mean_motion = math.sqrt(mu / (a * a * a))
+        mean_anomaly = mean_anomaly0 + mean_motion * local_t
+        two_pi = 2.0 * math.pi
+        mean_anomaly = (mean_anomaly + math.pi) % two_pi
+        if mean_anomaly < 0.0:
+            mean_anomaly += two_pi
+        mean_anomaly -= math.pi
+
+        ecc_anomaly = mean_anomaly
+        for _ in range(12):
+            f = ecc_anomaly - e * math.sin(ecc_anomaly) - mean_anomaly
+            fp = 1.0 - e * math.cos(ecc_anomaly)
+            if abs(fp) <= 1e-14:
+                break
+            delta = f / fp
+            ecc_anomaly -= delta
+            if abs(delta) <= 1e-13:
+                break
+
+        cos_e = math.cos(ecc_anomaly)
+        sin_e = math.sin(ecc_anomaly)
+        r = a * (1.0 - e * cos_e)
+        if r <= 0.0 or not math.isfinite(r):
+            return 0.0, 0.0, 0
+
+        nu = math.atan2(sqrt_one_minus_e2 * sin_e, cos_e - e)
+        x_orb = r * math.cos(nu)
+        y_orb = r * math.sin(nu)
+        c = math.cos(arg)
+        s = math.sin(arg)
+        rel_x = x_orb * c - y_orb * s
+        rel_y = x_orb * s + y_orb * c
+        return rel_x, rel_y, 1
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _body_position_at_time_numba(
+        index,
+        local_t,
+        body_x,
+        body_y,
+        body_m,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+    ):
+        n = body_x.shape[0]
+        if index < 0 or index >= n:
+            return 0.0, 0.0
+
+        chain = np.empty(n, dtype=np.int64)
+        chain_count = 0
+        cur = index
+
+        while cur >= 0 and cur < n and chain_count < n:
+            parent = body_parent[cur]
+            if body_scripted[cur] == 0 or body_a[cur] <= 0.0 or parent < 0 or parent >= n:
+                break
+            chain[chain_count] = cur
+            chain_count += 1
+            cur = parent
+
+        if cur < 0 or cur >= n:
+            cur = index
+            chain_count = 0
+
+        wx = body_x[cur]
+        wy = body_y[cur]
+
+        for chain_pos in range(chain_count - 1, -1, -1):
+            child = chain[chain_pos]
+            rel_x, rel_y, ok = _body_scripted_relative_xy_numba(
+                child,
+                local_t,
+                body_m,
+                body_a,
+                body_e,
+                body_theta,
+                body_arg,
+                body_parent,
+                G,
+            )
+            if ok == 0:
+                return body_x[index], body_y[index]
+            wx += rel_x
+            wy += rel_y
+
+        return wx, wy
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _compute_acc_time_numba(
+        x,
+        y,
+        local_t,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        use_time_dependent_bodies,
+    ):
+        ax = 0.0
+        ay = 0.0
+        for i in range(body_x.shape[0]):
+            if body_fixed[i] == 0:
+                continue
+
+            if use_time_dependent_bodies != 0:
+                source_x, source_y = _body_position_at_time_numba(
+                    i,
+                    local_t,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_scripted,
+                    body_a,
+                    body_e,
+                    body_theta,
+                    body_arg,
+                    body_parent,
+                    G,
+                )
+            else:
+                source_x = body_x[i]
+                source_y = body_y[i]
+
+            dx = source_x - x
+            dy = source_y - y
+            dist2 = dx * dx + dy * dy
+            if dist2 < 1e-12:
+                continue
+            invd = 1.0 / math.sqrt(dist2)
+            accm = G * body_m[i] / dist2
+            ax += dx * invd * accm
+            ay += dy * invd * accm
+        return ax, ay
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rkn_acc_time_numba(
+        x,
+        y,
+        local_t,
+        ref_enabled,
+        ref_index,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        use_time_dependent_bodies,
+    ):
+        ref_ax = 0.0
+        ref_ay = 0.0
+        if ref_enabled != 0:
+            if use_time_dependent_bodies != 0 and ref_index >= 0 and ref_index < body_x.shape[0]:
+                rpx, rpy = _body_position_at_time_numba(
+                    ref_index,
+                    local_t,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_scripted,
+                    body_a,
+                    body_e,
+                    body_theta,
+                    body_arg,
+                    body_parent,
+                    G,
+                )
+            else:
+                rpx = ref_px
+                rpy = ref_py
+            ref_ax, ref_ay = _compute_acc_time_numba(
+                rpx,
+                rpy,
+                local_t,
+                body_x,
+                body_y,
+                body_m,
+                body_fixed,
+                body_scripted,
+                body_a,
+                body_e,
+                body_theta,
+                body_arg,
+                body_parent,
+                G,
+                use_time_dependent_bodies,
+            )
+
+        ax, ay = _compute_acc_time_numba(
+            x,
+            y,
+            local_t,
+            body_x,
+            body_y,
+            body_m,
+            body_fixed,
+            body_scripted,
+            body_a,
+            body_e,
+            body_theta,
+            body_arg,
+            body_parent,
+            G,
+            use_time_dependent_bodies,
+        )
+        return ax - ref_ax, ay - ref_ay
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rkn4_step_time_numba(
+        px,
+        py,
+        vx,
+        vy,
+        local_t,
+        dt,
+        ref_enabled,
+        ref_index,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        use_time_dependent_bodies,
+    ):
+        dt2 = dt * dt
+        half_dt = 0.5 * dt
+        mid_t = local_t + half_dt
+        end_t = local_t + dt
+
+        k1_ax, k1_ay = _rkn_acc_time_numba(
+            px, py, local_t, ref_enabled, ref_index, ref_px, ref_py,
+            body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+        )
+
+        p2x = px + half_dt * vx + 0.125 * dt2 * k1_ax
+        p2y = py + half_dt * vy + 0.125 * dt2 * k1_ay
+        k2_ax, k2_ay = _rkn_acc_time_numba(
+            p2x, p2y, mid_t, ref_enabled, ref_index, ref_px, ref_py,
+            body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+        )
+
+        p3x = px + half_dt * vx + 0.125 * dt2 * k2_ax
+        p3y = py + half_dt * vy + 0.125 * dt2 * k2_ay
+        k3_ax, k3_ay = _rkn_acc_time_numba(
+            p3x, p3y, mid_t, ref_enabled, ref_index, ref_px, ref_py,
+            body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+        )
+
+        p4x = px + dt * vx + 0.5 * dt2 * k3_ax
+        p4y = py + dt * vy + 0.5 * dt2 * k3_ay
+        k4_ax, k4_ay = _rkn_acc_time_numba(
+            p4x, p4y, end_t, ref_enabled, ref_index, ref_px, ref_py,
+            body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+        )
+
+        next_px = px + dt * vx + (dt2 / 6.0) * (k1_ax + k2_ax + k3_ax)
+        next_py = py + dt * vy + (dt2 / 6.0) * (k1_ay + k2_ay + k3_ay)
+        next_vx = vx + (dt / 6.0) * (k1_ax + 2.0 * k2_ax + 2.0 * k3_ax + k4_ax)
+        next_vy = vy + (dt / 6.0) * (k1_ay + 2.0 * k2_ay + 2.0 * k3_ay + k4_ay)
+
+        return next_px, next_py, next_vx, next_vy
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _rkn_adaptive_step_time_numba(
+        px,
+        py,
+        vx,
+        vy,
+        local_t,
+        dt,
+        min_dt,
+        max_dt,
+        rtol,
+        atol_pos,
+        atol_vel,
+        safety,
+        min_factor,
+        max_factor,
+        max_rejects,
+        ref_enabled,
+        ref_index,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        use_time_dependent_bodies,
+    ):
+        if use_time_dependent_bodies == 0:
+            return _rkn_adaptive_step_numba(
+                px,
+                py,
+                vx,
+                vy,
+                dt,
+                min_dt,
+                max_dt,
+                rtol,
+                atol_pos,
+                atol_vel,
+                safety,
+                min_factor,
+                max_factor,
+                max_rejects,
+                ref_enabled,
+                ref_px,
+                ref_py,
+                body_x,
+                body_y,
+                body_m,
+                body_fixed,
+                G,
+            )
+
+        if (not math.isfinite(min_dt)) or min_dt <= 0.0:
+            min_dt = 1e-9
+        if (not math.isfinite(max_dt)) or max_dt <= 0.0:
+            max_dt = min_dt
+        if max_dt < min_dt:
+            max_dt = min_dt
+        if (not math.isfinite(rtol)) or rtol < 0.0:
+            rtol = 0.0
+        if (not math.isfinite(atol_pos)) or atol_pos <= 0.0:
+            atol_pos = 1e-12
+        if (not math.isfinite(atol_vel)) or atol_vel <= 0.0:
+            atol_vel = 1e-12
+        if (not math.isfinite(safety)) or safety <= 0.0:
+            safety = 0.9
+        if (not math.isfinite(min_factor)) or min_factor <= 0.0:
+            min_factor = 0.2
+        if (not math.isfinite(max_factor)) or max_factor < min_factor:
+            max_factor = min_factor
+        if max_rejects < 0:
+            max_rejects = 0
+
+        step_dt = dt
+        if (not math.isfinite(step_dt)) or step_dt <= 0.0:
+            step_dt = max_dt
+        if step_dt < min_dt:
+            step_dt = min_dt
+        if step_dt > max_dt:
+            step_dt = max_dt
+
+        rejected_count = 0
+
+        while True:
+            half_dt = 0.5 * step_dt
+
+            full_px, full_py, full_vx, full_vy = _rkn4_step_time_numba(
+                px, py, vx, vy, local_t, step_dt, ref_enabled, ref_index, ref_px, ref_py,
+                body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
+                body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+            )
+            half1_px, half1_py, half1_vx, half1_vy = _rkn4_step_time_numba(
+                px, py, vx, vy, local_t, half_dt, ref_enabled, ref_index, ref_px, ref_py,
+                body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
+                body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+            )
+            half2_px, half2_py, half2_vx, half2_vy = _rkn4_step_time_numba(
+                half1_px, half1_py, half1_vx, half1_vy, local_t + half_dt, half_dt,
+                ref_enabled, ref_index, ref_px, ref_py, body_x, body_y, body_m, body_fixed,
+                body_scripted, body_a, body_e, body_theta, body_arg, body_parent, G,
+                use_time_dependent_bodies
+            )
+
+            finite_state = (
+                math.isfinite(full_px)
+                and math.isfinite(full_py)
+                and math.isfinite(full_vx)
+                and math.isfinite(full_vy)
+                and math.isfinite(half2_px)
+                and math.isfinite(half2_py)
+                and math.isfinite(half2_vx)
+                and math.isfinite(half2_vy)
+            )
+
+            if finite_state:
+                pos_dx = half2_px - full_px
+                pos_dy = half2_py - full_py
+                vel_dx = half2_vx - full_vx
+                vel_dy = half2_vy - full_vy
+
+                pos_err = math.sqrt(pos_dx * pos_dx + pos_dy * pos_dy) / 15.0
+                vel_err = math.sqrt(vel_dx * vel_dx + vel_dy * vel_dy) / 15.0
+
+                cur_r = math.sqrt(px * px + py * py)
+                next_r = math.sqrt(half2_px * half2_px + half2_py * half2_py)
+                cur_speed = math.sqrt(vx * vx + vy * vy)
+                next_speed = math.sqrt(half2_vx * half2_vx + half2_vy * half2_vy)
+                motion_scale = cur_speed * step_dt
+
+                pos_ref = cur_r
+                if next_r > pos_ref:
+                    pos_ref = next_r
+                if motion_scale > pos_ref:
+                    pos_ref = motion_scale
+                if pos_ref < 1.0:
+                    pos_ref = 1.0
+
+                vel_ref = cur_speed
+                if next_speed > vel_ref:
+                    vel_ref = next_speed
+                if vel_ref < 1.0:
+                    vel_ref = 1.0
+
+                pos_scale = atol_pos + rtol * pos_ref
+                vel_scale = atol_vel + rtol * vel_ref
+                if pos_scale <= 0.0 or not math.isfinite(pos_scale):
+                    pos_scale = 1e-30
+                if vel_scale <= 0.0 or not math.isfinite(vel_scale):
+                    vel_scale = 1e-30
+
+                pos_norm = pos_err / pos_scale
+                vel_norm = vel_err / vel_scale
+                err_norm = pos_norm
+                if vel_norm > err_norm:
+                    err_norm = vel_norm
+            else:
+                err_norm = 1e300
+
+            if math.isfinite(err_norm) and err_norm <= 1.0:
+                if err_norm <= 1e-300:
+                    factor = max_factor
+                else:
+                    factor = safety * err_norm ** (-0.2)
+                    if factor < min_factor:
+                        factor = min_factor
+                    if factor > max_factor:
+                        factor = max_factor
+
+                proposed_next_dt = step_dt * factor
+                if proposed_next_dt < min_dt:
+                    proposed_next_dt = min_dt
+                if proposed_next_dt > max_dt:
+                    proposed_next_dt = max_dt
+
+                return (
+                    half2_px,
+                    half2_py,
+                    half2_vx,
+                    half2_vy,
+                    step_dt,
+                    proposed_next_dt,
+                    err_norm,
+                    1,
+                    rejected_count,
+                    0,
+                )
+
+            if not math.isfinite(err_norm):
+                err_norm = 1e300
+
+            if step_dt <= min_dt * (1.0 + 1e-12):
+                return (px, py, vx, vy, 0.0, min_dt, err_norm, 0, rejected_count, 6)
+
+            if rejected_count >= max_rejects:
+                return (px, py, vx, vy, 0.0, step_dt, err_norm, 0, rejected_count, 2)
+
+            if err_norm <= 1e-300:
+                factor = min_factor
+            else:
+                factor = safety * err_norm ** (-0.2)
+            if factor < min_factor:
+                factor = min_factor
+            if factor > max_factor:
+                factor = max_factor
+
+            next_dt = step_dt * factor
+            if next_dt >= step_dt:
+                next_dt = step_dt * min_factor
+            if next_dt < min_dt:
+                next_dt = min_dt
+            if next_dt > max_dt:
+                next_dt = max_dt
+
+            rejected_count += 1
+            step_dt = next_dt
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _compute_distance_points_rkn_numba(
+        init_px,
+        init_py,
+        init_vx,
+        init_vy,
+        ref_enabled,
+        ref_px,
+        ref_py,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        base_dt,
+        precision,
+        max_points,
+        max_iters,
+        min_dt,
+        max_dt,
+        rtol,
+        atol_pos,
+        atol_vel,
+        safety,
+        min_factor,
+        max_factor,
+        max_rejects,
+        use_time_dependent_bodies,
+        ref_index,
+    ):
+        out = np.empty((max_points, 3), dtype=np.float64)
+        out[0, 0] = init_px
+        out[0, 1] = init_py
+        out[0, 2] = 0.0
+
+        stats = np.zeros(7, dtype=np.float64)
+
+        count = 1
+        px = init_px
+        py = init_py
+        vx = init_vx
+        vy = init_vy
+        t = 0.0
+        accumulated = 0.0
+        proposed_dt = base_dt
+
+        accepted_steps = 0.0
+        rejected_steps = 0.0
+        min_used_dt = 1e300
+        max_used_dt = 0.0
+        max_error_norm = 0.0
+        failure_code = 0.0
+
+        for _ in range(max_iters):
+            if count >= max_points:
+                break
+            if (
+                not math.isfinite(px)
+                or not math.isfinite(py)
+                or not math.isfinite(vx)
+                or not math.isfinite(vy)
+            ):
+                failure_code = 1.0
+                break
+
+            if use_time_dependent_bodies == 0:
+                (
+                    next_px,
+                    next_py,
+                    next_vx,
+                    next_vy,
+                    used_dt,
+                    next_proposed_dt,
+                    err_norm,
+                    accepted_flag,
+                    rejected_count,
+                    step_failure_code,
+                ) = _rkn_adaptive_step_numba(
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    proposed_dt,
+                    min_dt,
+                    max_dt,
+                    rtol,
+                    atol_pos,
+                    atol_vel,
+                    safety,
+                    min_factor,
+                    max_factor,
+                    max_rejects,
+                    ref_enabled,
+                    ref_px,
+                    ref_py,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_fixed,
+                    G,
+                )
+            else:
+                (
+                    next_px,
+                    next_py,
+                    next_vx,
+                    next_vy,
+                    used_dt,
+                    next_proposed_dt,
+                    err_norm,
+                    accepted_flag,
+                    rejected_count,
+                    step_failure_code,
+                ) = _rkn_adaptive_step_time_numba(
+                    px,
+                    py,
+                    vx,
+                    vy,
+                    t,
+                    proposed_dt,
+                    min_dt,
+                    max_dt,
+                    rtol,
+                    atol_pos,
+                    atol_vel,
+                    safety,
+                    min_factor,
+                    max_factor,
+                    max_rejects,
+                    ref_enabled,
+                    ref_index,
+                    ref_px,
+                    ref_py,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_fixed,
+                    body_scripted,
+                    body_a,
+                    body_e,
+                    body_theta,
+                    body_arg,
+                    body_parent,
+                    G,
+                    use_time_dependent_bodies,
+                )
+
+            rejected_steps += float(rejected_count)
+
+            if accepted_flag == 0:
+                failure_code = float(step_failure_code)
+                if failure_code == 0.0:
+                    failure_code = 2.0
+                if math.isfinite(err_norm) and err_norm > max_error_norm:
+                    max_error_norm = err_norm
+                break
+
+            if (
+                used_dt <= 0.0
+                or not math.isfinite(used_dt)
+                or not math.isfinite(next_px)
+                or not math.isfinite(next_py)
+                or not math.isfinite(next_vx)
+                or not math.isfinite(next_vy)
+            ):
+                failure_code = 3.0
+                break
+
+            accepted_steps += 1.0
+            if used_dt < min_used_dt:
+                min_used_dt = used_dt
+            if used_dt > max_used_dt:
+                max_used_dt = used_dt
+            if math.isfinite(err_norm) and err_norm > max_error_norm:
+                max_error_norm = err_norm
+
+            seg_dx = next_px - px
+            seg_dy = next_py - py
+            seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+
+            if seg_len > 0.0 and math.isfinite(seg_len):
+                placed = 0.0
+                rem_len = seg_len
+
+                while rem_len + accumulated >= precision and count < max_points:
+                    if rem_len <= 0.0:
+                        break
+
+                    distance_to_place = precision - accumulated
+                    placed += distance_to_place
+                    s = placed / seg_len
+                    if s < 0.0:
+                        s = 0.0
+                    if s > 1.0:
+                        s = 1.0
+
+                    linear_px = px + seg_dx * s
+                    linear_py = py + seg_dy * s
+
+                    s2 = s * s
+                    s3 = s2 * s
+                    h00 = 2.0 * s3 - 3.0 * s2 + 1.0
+                    h10 = s3 - 2.0 * s2 + s
+                    h01 = -2.0 * s3 + 3.0 * s2
+                    h11 = s3 - s2
+
+                    sample_px = h00 * px + h10 * used_dt * vx + h01 * next_px + h11 * used_dt * next_vx
+                    sample_py = h00 * py + h10 * used_dt * vy + h01 * next_py + h11 * used_dt * next_vy
+                    if not math.isfinite(sample_px) or not math.isfinite(sample_py):
+                        sample_px = linear_px
+                        sample_py = linear_py
+
+                    sample_t = t + s * used_dt
+
+                    if (
+                        not math.isfinite(sample_px)
+                        or not math.isfinite(sample_py)
+                        or not math.isfinite(sample_t)
+                    ):
+                        failure_code = 3.0
+                        break
+
+                    out[count, 0] = sample_px
+                    out[count, 1] = sample_py
+                    out[count, 2] = sample_t
+                    count += 1
+
+                    accumulated = 0.0
+                    rem_len = seg_len - placed
+
+                if failure_code != 0.0:
+                    break
+
+                if rem_len + accumulated < precision:
+                    accumulated += rem_len
+
+            px = next_px
+            py = next_py
+            vx = next_vx
+            vy = next_vy
+            t += used_dt
+            proposed_dt = next_proposed_dt
+
+        if min_used_dt == 1e300:
+            min_used_dt = 0.0
+        if count < max_points and failure_code == 0.0:
+            failure_code = 4.0
+
+        stats[0] = accepted_steps
+        stats[1] = rejected_steps
+        stats[2] = min_used_dt
+        stats[3] = max_used_dt
+        stats[4] = max_error_norm
+        stats[5] = failure_code
+        stats[6] = t
+
+        return out, count, stats
 
 
     @njit(cache=True, nogil=True, fastmath=True)
@@ -666,13 +1777,25 @@ class Predictor:
         use_numba=True,
         async_compute=True,
         rolling_mode=None,
-        integrator_mode="rk4",
+        integrator_mode="rkn",
         aspi_min_dt=1.0,
         aspi_max_dt=120.0,
         aspi_safety_g=0.05,
         aspi_safety_m=0.5,
         aspi_close_acc_threshold=0.02,
         aspi_use_rk4_fallback=True,
+        rkn_min_dt=0.1,
+        rkn_max_dt=1500.0,
+        rkn_rtol=1e-7,
+        rkn_atol_pos=10.0,
+        rkn_atol_vel=1e-4,
+        rkn_safety=0.9,
+        rkn_min_factor=0.2,
+        rkn_max_factor=5.0,
+        rkn_max_rejects=32,
+        strict_snapshot_matching=True,
+        use_time_dependent_bodies=True,
+        use_reference_acceleration_correction=False,
     ):
         
         self.num_points = int(num_points)
@@ -687,6 +1810,37 @@ class Predictor:
         self.aspi_safety_m = float(aspi_safety_m)
         self.aspi_close_acc_threshold = float(aspi_close_acc_threshold)
         self.aspi_use_rk4_fallback = bool(aspi_use_rk4_fallback)
+        self.rkn_min_dt = float(rkn_min_dt)
+        self.rkn_max_dt = float(rkn_max_dt)
+        self.rkn_rtol = float(rkn_rtol)
+        self.rkn_atol_pos = float(rkn_atol_pos)
+        self.rkn_atol_vel = float(rkn_atol_vel)
+        self.rkn_safety = float(rkn_safety)
+        self.rkn_min_factor = float(rkn_min_factor)
+        self.rkn_max_factor = float(rkn_max_factor)
+        self.rkn_max_rejects = int(rkn_max_rejects)
+        self.rkn_last_accepted_steps = 0
+        self.rkn_last_rejected_steps = 0
+        self.rkn_last_min_dt = 0.0
+        self.rkn_last_max_dt = 0.0
+        self.rkn_last_max_error_norm = 0.0
+        self.rkn_last_failed = False
+        self.rkn_last_failure_reason = ""
+        self.strict_snapshot_matching = bool(strict_snapshot_matching)
+        self.use_time_dependent_bodies = bool(use_time_dependent_bodies)
+        self.use_reference_acceleration_correction = bool(use_reference_acceleration_correction)
+        self._trajectory_version = 0
+        self._last_seen_px = None
+        self._last_seen_py = None
+        self._last_seen_vx = None
+        self._last_seen_vy = None
+        self._last_seen_sim_time = None
+        self.velocity_invalidation_abs_tol = 1.0
+        self.velocity_invalidation_rel_tol = 1e-5
+        self.position_invalidation_abs_tol = 100.0
+        self.sync_recompute_on_velocity_change = True
+        self.max_async_sim_age = max(2.0 * self.dt, 1.0)
+        self.max_async_wall_age = 0.5
 
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
@@ -695,7 +1849,18 @@ class Predictor:
         self.initialized = False
         self.recompute_every_update = recompute_every_update
 
-        self.workers = 12 if workers is None else int(workers)
+        try:
+            requested_workers = 1 if workers is None else int(workers)
+        except Exception:
+            requested_workers = 1
+        self._requested_workers = int(requested_workers)
+        self._predictor_worker_threads = 1
+        self.workers = 1
+        if self._requested_workers != 1 and self.debug:
+            print(
+                f"PRED_DBG_THREAD: requested_workers={self._requested_workers} clamped_workers=1",
+                flush=True,
+            )
         self.use_numba = bool(use_numba)
 
         self.auto_precision_from_zoom = True
@@ -733,10 +1898,11 @@ class Predictor:
         self._last_swapped_snapshot = None
         self._integrator_debug_seen = set()
 
-        self.snapshot_velocity_rel_tol = 0.01
-        self.snapshot_velocity_abs_tol = 100.0
+        self.snapshot_velocity_rel_tol = self.velocity_invalidation_rel_tol
+        self.snapshot_velocity_abs_tol = self.velocity_invalidation_abs_tol
 
         self.snapshot_position_abs_tol = 1000.0
+        self.snapshot_sim_time_abs_tol = self.max_async_sim_age
 
         self.force_sync_on_stale = False
 
@@ -752,11 +1918,10 @@ class Predictor:
         # bewegung in einem körper-zentrierten nicht-rotierenden rahmen durch subtraktion
         # der referenzkörper-beschleunigung.
         self.reference_body_index = None
+        self._rolling_rkn_warning_printed = False
 
         if self.async_compute and not self.rolling_mode:
-            max_workers = max(1, int(self.workers))
-            self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
-
+            self._ensure_executor()
             self._pending_futures = []
 
     @staticmethod
@@ -764,10 +1929,26 @@ class Predictor:
         try:
             mode = str(mode).strip().lower()
         except Exception:
-            mode = "rk4"
+            mode = "rkn"
+        if mode in ("rkn", "rkn_adaptive", "rkn_adaptive_sd"):
+            return "rkn"
         if mode not in ("rk4", "aspi", "aspi_rk4_fallback"):
-            return "rk4"
+            return "rkn"
         return mode
+
+    def _ensure_executor(self):
+        if getattr(self, "_executor", None) is not None:
+            return
+        # The predictor uses exactly one dedicated worker thread. The main
+        # simulation/render thread remains separate, and one trajectory is
+        # integrated sequentially inside this worker.
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="predictor-worker")
+        self._predictor_worker_threads = 1
+        if self.debug:
+            try:
+                print("PRED_DBG_THREAD: predictor worker max_workers=1", flush=True)
+            except Exception:
+                pass
 
     def _debug_integrator_mode(self, action, snapshot):
         if not self.debug:
@@ -781,7 +1962,10 @@ class Predictor:
                 return
             seen.add(key)
             self._integrator_debug_seen = seen
-            print(f"PRED_DBG_INTEGRATOR: {action} mode={mode} aspi_rk4_fallback={fallback}", flush=True)
+            if mode == "aspi" or mode == "aspi_rk4_fallback":
+                print(f"PRED_DBG_INTEGRATOR: {action} mode={mode} aspi_rk4_fallback={fallback}", flush=True)
+            else:
+                print(f"PRED_DBG_INTEGRATOR: {action} mode={mode}", flush=True)
         except Exception:
             pass
 
@@ -794,28 +1978,43 @@ class Predictor:
             self.aspi_safety_m,
             self.aspi_close_acc_threshold,
             self.aspi_use_rk4_fallback,
+            self.rkn_min_dt,
+            self.rkn_max_dt,
+            self.rkn_rtol,
+            self.rkn_atol_pos,
+            self.rkn_atol_vel,
+            self.rkn_safety,
+            self.rkn_min_factor,
+            self.rkn_max_factor,
+            self.rkn_max_rejects,
         )
 
         q = str(quality).strip().lower()
         if q == "fast":
-            self.integrator_mode = "aspi"
-            self.aspi_min_dt = 5.0
-            self.aspi_max_dt = 300.0
-            self.aspi_safety_g = 0.08
-            self.aspi_safety_m = 0.8
-            self.aspi_use_rk4_fallback = False
+            self.integrator_mode = "rkn"
+            self.rkn_min_dt = 0.5
+            self.rkn_max_dt = 3000.0
+            self.rkn_rtol = 1e-5
+            self.rkn_atol_pos = 1000.0
+            self.rkn_atol_vel = 1e-2
         elif q == "balanced":
-            self.integrator_mode = "aspi_rk4_fallback"
-            self.aspi_min_dt = 1.0
-            self.aspi_max_dt = 120.0
-            self.aspi_safety_g = 0.05
-            self.aspi_safety_m = 0.5
-            self.aspi_close_acc_threshold = 0.02
-            self.aspi_use_rk4_fallback = True
+            self.integrator_mode = "rkn"
+            self.rkn_min_dt = 0.1
+            self.rkn_max_dt = 1500.0
+            self.rkn_rtol = 1e-7
+            self.rkn_atol_pos = 10.0
+            self.rkn_atol_vel = 1e-4
         elif q == "accurate":
+            self.integrator_mode = "rkn"
+            self.rkn_min_dt = 0.01
+            self.rkn_max_dt = 500.0
+            self.rkn_rtol = 1e-9
+            self.rkn_atol_pos = 0.1
+            self.rkn_atol_vel = 1e-6
+        elif q == "rk4":
             self.integrator_mode = "rk4"
         else:
-            raise ValueError("quality must be one of: fast, balanced, accurate")
+            raise ValueError("quality must be one of: fast, balanced, accurate, rk4")
 
         new = (
             self.integrator_mode,
@@ -825,9 +2024,64 @@ class Predictor:
             self.aspi_safety_m,
             self.aspi_close_acc_threshold,
             self.aspi_use_rk4_fallback,
+            self.rkn_min_dt,
+            self.rkn_max_dt,
+            self.rkn_rtol,
+            self.rkn_atol_pos,
+            self.rkn_atol_vel,
+            self.rkn_safety,
+            self.rkn_min_factor,
+            self.rkn_max_factor,
+            self.rkn_max_rejects,
         )
         if new != old:
             self.reset()
+
+    @staticmethod
+    def _rkn_failure_reason(code):
+        try:
+            code = int(code)
+        except Exception:
+            code = 0
+        if code == 0:
+            return ""
+        if code == 1:
+            return "non-finite input state"
+        if code == 2:
+            return "adaptive step rejected too often"
+        if code == 3:
+            return "non-finite adaptive step"
+        if code == 4:
+            return "maximum predictor iterations reached"
+        if code == 6:
+            return "minimum dt could not satisfy tolerance"
+        return f"failure code {code}"
+
+    def _apply_rkn_stats(self, stats):
+        if stats is None:
+            return
+        try:
+            self.rkn_last_accepted_steps = int(stats[0])
+            self.rkn_last_rejected_steps = int(stats[1])
+            self.rkn_last_min_dt = float(stats[2])
+            self.rkn_last_max_dt = float(stats[3])
+            self.rkn_last_max_error_norm = float(stats[4])
+            failure_code = int(stats[5])
+            self.rkn_last_failed = failure_code != 0
+            self.rkn_last_failure_reason = self._rkn_failure_reason(failure_code)
+            if self.debug and not getattr(self, "_suppress_dbg_computed", False):
+                print(
+                    "PRED_DBG_RKN: "
+                    f"accepted={self.rkn_last_accepted_steps} "
+                    f"rejected={self.rkn_last_rejected_steps} "
+                    f"min_dt={self.rkn_last_min_dt:.6g} "
+                    f"max_dt={self.rkn_last_max_dt:.6g} "
+                    f"max_err={self.rkn_last_max_error_norm:.6g} "
+                    f"failed={self.rkn_last_failed}",
+                    flush=True,
+                )
+        except Exception:
+            pass
 
     def reset(self):
         self._cancel_pending_job()
@@ -871,21 +2125,281 @@ class Predictor:
             return int(self.points.shape[0])
         return len(self.points)
 
+    def _current_reference_body_index(self):
+        try:
+            if self.reference_body_index is None:
+                return -1
+            return int(self.reference_body_index)
+        except Exception:
+            return -1
+
+    def _empty_points_array(self):
+        return np.empty((0, 3), dtype=np.float64) if np is not None else []
+
+    def _clear_prediction_points(self):
+        self.points = self._empty_points_array()
+        self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
+        self.initialized = False
+
+    def _allowed_velocity_delta(self, speed):
+        try:
+            speed = float(speed)
+        except Exception:
+            speed = 0.0
+        return max(
+            float(self.velocity_invalidation_abs_tol),
+            float(self.velocity_invalidation_rel_tol) * max(abs(speed), 1.0),
+        )
+
+    def _remember_ship_state(self, ship, world=None):
+        if ship is None:
+            return
+        try:
+            self._last_seen_px = float(ship.position.x)
+            self._last_seen_py = float(ship.position.y)
+            self._last_seen_vx = float(ship.velocity.x)
+            self._last_seen_vy = float(ship.velocity.y)
+        except Exception:
+            return
+        try:
+            self._last_seen_sim_time = float(world.time) if world is not None else None
+        except Exception:
+            self._last_seen_sim_time = None
+
+    def _warn_rolling_rkn_once(self):
+        if not self.debug:
+            return
+        if not self.rolling_mode or self.integrator_mode != "rkn":
+            return
+        if getattr(self, "_rolling_rkn_warning_printed", False):
+            return
+        self._rolling_rkn_warning_printed = True
+        try:
+            print("PRED_DBG_WARNING: rolling_mode uses RK4 state helper, not adaptive RKN", flush=True)
+        except Exception:
+            pass
+
+    def _handle_trajectory_branch_change(self, ship, world):
+        if ship is None:
+            return False
+
+        try:
+            cur_px = float(ship.position.x)
+            cur_py = float(ship.position.y)
+            cur_vx = float(ship.velocity.x)
+            cur_vy = float(ship.velocity.y)
+        except Exception:
+            return False
+
+        last_px = self._last_seen_px
+        last_py = self._last_seen_py
+        last_vx = self._last_seen_vx
+        last_vy = self._last_seen_vy
+        if last_px is None or last_py is None or last_vx is None or last_vy is None:
+            self._remember_ship_state(ship, world)
+            return False
+
+        delta_speed = math.hypot(cur_vx - float(last_vx), cur_vy - float(last_vy))
+        cur_speed = math.hypot(cur_vx, cur_vy)
+        allowed_speed = self._allowed_velocity_delta(cur_speed)
+
+        delta_pos = math.hypot(cur_px - float(last_px), cur_py - float(last_py))
+        try:
+            cur_time = float(world.time) if world is not None else None
+        except Exception:
+            cur_time = None
+        last_time = self._last_seen_sim_time
+        if cur_time is not None and last_time is not None:
+            dt_age = abs(cur_time - float(last_time))
+        else:
+            dt_age = abs(float(self.dt))
+        last_speed = math.hypot(float(last_vx), float(last_vy))
+        expected_motion = max(cur_speed, last_speed, 1.0) * max(dt_age, 0.0)
+        allowed_pos = max(float(self.position_invalidation_abs_tol), expected_motion * 4.0)
+
+        reason = None
+        if delta_speed > allowed_speed:
+            reason = "velocity"
+        elif delta_pos > allowed_pos:
+            reason = "position"
+
+        if reason is None:
+            self._remember_ship_state(ship, world)
+            return False
+
+        old_version = int(self._trajectory_version)
+        self._trajectory_version = old_version + 1
+        if self.debug:
+            try:
+                if reason == "velocity":
+                    print(
+                        "PRED_DBG_TRAJECTORY_INVALIDATED: "
+                        f"reason=velocity dv={delta_speed:.6e} allowed={allowed_speed:.6e} "
+                        f"old_version={old_version} new_version={self._trajectory_version}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "PRED_DBG_TRAJECTORY_INVALIDATED: "
+                        f"reason=position dp={delta_pos:.6e} allowed={allowed_pos:.6e} "
+                        f"old_version={old_version} new_version={self._trajectory_version}",
+                        flush=True,
+                    )
+            except Exception:
+                pass
+
+        self._cancel_pending_job()
+        self._clear_prediction_points()
+        self._remember_ship_state(ship, world)
+
+        if self.sync_recompute_on_velocity_change and world is not None:
+            self._compute_full(ship, world)
+        elif self.async_compute and world is not None and self.num_points > 0:
+            self._submit_async_compute(ship, world, self._get_target_point_cap())
+
+        return True
+
+    def _rebase_points_to_current_snapshot(self, points, snapshot, current_ship):
+        if points is None or snapshot is None or current_ship is None:
+            return points
+        try:
+            dx = float(current_ship.position.x) - float(snapshot.get("ship_px", 0.0))
+            dy = float(current_ship.position.y) - float(snapshot.get("ship_py", 0.0))
+        except Exception:
+            return points
+
+        if not math.isfinite(dx) or not math.isfinite(dy):
+            return points
+
+        if np is not None and isinstance(points, np.ndarray):
+            rebased = points.copy()
+            if rebased.shape[0] <= 0 or rebased.shape[1] < 2:
+                return rebased
+            rebased[:, 0] += dx
+            rebased[:, 1] += dy
+            rebased[0, 0] = float(current_ship.position.x)
+            rebased[0, 1] = float(current_ship.position.y)
+            return rebased
+
+        try:
+            rebased = []
+            for idx, p in enumerate(points):
+                if idx == 0:
+                    x = float(current_ship.position.x)
+                    y = float(current_ship.position.y)
+                else:
+                    x = float(p[0]) + dx
+                    y = float(p[1]) + dy
+                if hasattr(p, "__len__") and len(p) >= 3:
+                    rebased.append((x, y, float(p[2])))
+                else:
+                    rebased.append((x, y))
+            return rebased
+        except Exception:
+            return points
+
+    def _log_snapshot_result(self, accepted, reason, snapshot, cur_sim_time, sim_age, pos_delta, vel_delta):
+        if not self.debug:
+            return
+        try:
+            snap_sim_time = float(snapshot.get("sim_time", 0.0)) if snapshot is not None else 0.0
+        except Exception:
+            snap_sim_time = 0.0
+        try:
+            cur_time = float(cur_sim_time) if cur_sim_time is not None else float("nan")
+        except Exception:
+            cur_time = float("nan")
+        try:
+            age = float(sim_age) if sim_age is not None else float("nan")
+        except Exception:
+            age = float("nan")
+        try:
+            pd = float(pos_delta)
+        except Exception:
+            pd = float("nan")
+        try:
+            vd = float(vel_delta)
+        except Exception:
+            vd = float("nan")
+        try:
+            snapshot_version = int(snapshot.get("trajectory_version", -1)) if snapshot is not None else -1
+        except Exception:
+            snapshot_version = -1
+        try:
+            current_version = int(self._trajectory_version)
+        except Exception:
+            current_version = -1
+
+        if accepted:
+            print(
+                "PRED_DBG_ACCEPT_SNAPSHOT: "
+                f"reason={reason} "
+                f"version={current_version} "
+                f"sim_age={age:.6e} "
+                f"pos_delta={pd:.6e} "
+                f"vel_delta={vd:.6e} "
+                f"snapshot_sim_time={snap_sim_time:.6f} "
+                f"current_world_time={cur_time:.6f}",
+                flush=True,
+            )
+        else:
+            print(
+                "PRED_DBG_REJECT_SNAPSHOT: "
+                f"reason={reason} "
+                f"snapshot_version={snapshot_version} "
+                f"current_version={current_version} "
+                f"sim_age={age:.6e} "
+                f"pos_delta={pd:.6e} "
+                f"vel_delta={vd:.6e} "
+                f"snapshot_sim_time={snap_sim_time:.6f} "
+                f"current_world_time={cur_time:.6f}",
+                flush=True,
+            )
+
     def _anchor_first_point(self, ship):
         if self._points_count() == 0:
             return
         sx = float(ship.position.x)
         sy = float(ship.position.y)
         if np is not None and isinstance(self.points, np.ndarray):
-            self.points[0, 0] = sx
-            self.points[0, 1] = sy
+            dx = sx - float(self.points[0, 0])
+            dy = sy - float(self.points[0, 1])
+            if math.isfinite(dx) and math.isfinite(dy):
+                self.points[:, 0] += dx
+                self.points[:, 1] += dy
+                self.points[0, 0] = sx
+                self.points[0, 1] = sy
+                try:
+                    if (
+                        np is not None
+                        and isinstance(self._roll_states, np.ndarray)
+                        and self._roll_states.shape[0] == self.points.shape[0]
+                        and self._roll_states.shape[1] >= 2
+                    ):
+                        self._roll_states[:, 0] += dx
+                        self._roll_states[:, 1] += dy
+                        self._roll_states[0, 0] = sx
+                        self._roll_states[0, 1] = sy
+                except Exception:
+                    pass
         else:
             # timestamp beibehalten falls beim ersten punkt vorhanden
             try:
                 t0 = float(self.points[0][2])
             except Exception:
                 t0 = 0.0
-            self.points[0] = (sx, sy, t0)
+            try:
+                dx = sx - float(self.points[0][0])
+                dy = sy - float(self.points[0][1])
+                for i, p in enumerate(self.points):
+                    if i == 0:
+                        self.points[i] = (sx, sy, t0)
+                    elif hasattr(p, "__len__") and len(p) >= 3:
+                        self.points[i] = (float(p[0]) + dx, float(p[1]) + dy, float(p[2]))
+                    else:
+                        self.points[i] = (float(p[0]) + dx, float(p[1]) + dy)
+            except Exception:
+                self.points[0] = (sx, sy, t0)
 
     def _count_recomputed_points(self, old_points, new_points, tol=1e-6):
         """Gibt die Anzahl der Einträge in `new_points` zurück, die sich von `old_points` unterscheiden.
@@ -1023,6 +2537,50 @@ class Predictor:
             body_fixed[i] = 1 if getattr(b, "fixed", True) else 0
         return body_x, body_y, body_m, body_fixed
 
+    def _serialize_body_orbits_numba(self, world):
+        count = len(world.body)
+        body_scripted = np.empty(count, dtype=np.uint8)
+        body_a = np.empty(count, dtype=np.float64)
+        body_e = np.empty(count, dtype=np.float64)
+        body_theta = np.empty(count, dtype=np.float64)
+        body_arg = np.empty(count, dtype=np.float64)
+        body_parent = np.empty(count, dtype=np.int64)
+
+        body_to_index = {}
+        for i, b in enumerate(world.body):
+            body_to_index[b] = int(i)
+
+        for i, b in enumerate(world.body):
+            try:
+                a = float(getattr(b, "semi_major_axis", 0.0) or 0.0)
+            except Exception:
+                a = 0.0
+            try:
+                e = float(getattr(b, "eccentricity", 0.0) or 0.0)
+            except Exception:
+                e = 0.0
+            try:
+                theta = float(getattr(b, "theta", 0.0) or 0.0)
+            except Exception:
+                theta = 0.0
+            try:
+                arg = float(getattr(b, "arg_periapsis", 0.0) or 0.0)
+            except Exception:
+                arg = 0.0
+
+            parent = getattr(b, "is_moon_of", None)
+            parent_index = body_to_index.get(parent, -1)
+            scripted = bool(getattr(b, "scripted_orbit", False)) or (a > 0.0 and parent_index >= 0)
+
+            body_scripted[i] = 1 if scripted else 0
+            body_a[i] = a
+            body_e[i] = e
+            body_theta[i] = theta
+            body_arg[i] = arg
+            body_parent[i] = int(parent_index)
+
+        return body_scripted, body_a, body_e, body_theta, body_arg, body_parent
+
     def _compute_acc(self, position, bodies, G):
         total = Vec2(0.0, 0.0)
         for bx, by, mass, fixed in bodies:
@@ -1149,12 +2707,16 @@ class Predictor:
     def _make_snapshot(self, ship, world, max_points):
         effective_precision = self._effective_precision()
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
+        physics_ref_enabled = int(ref_enabled) if self.use_reference_acceleration_correction else 0
+        ref_index = self._current_reference_body_index()
         snapshot = {
             "ship_px": float(ship.position.x),
             "ship_py": float(ship.position.y),
             "ship_vx": float(ship.velocity.x),
             "ship_vy": float(ship.velocity.y),
-            "ref_enabled": int(ref_enabled),
+            "ref_enabled": int(physics_ref_enabled),
+            "reference_body_index": int(ref_index),
+            "trajectory_version": int(self._trajectory_version),
             "ref_px": float(ref_px),
             "ref_py": float(ref_py),
             "G": float(world.G),
@@ -1170,6 +2732,18 @@ class Predictor:
             "aspi_safety_m": float(self.aspi_safety_m),
             "aspi_close_acc_threshold": float(self.aspi_close_acc_threshold),
             "aspi_use_rk4_fallback": bool(self.aspi_use_rk4_fallback),
+            "rkn_min_dt": float(self.rkn_min_dt),
+            "rkn_max_dt": float(self.rkn_max_dt),
+            "rkn_rtol": float(self.rkn_rtol),
+            "rkn_atol_pos": float(self.rkn_atol_pos),
+            "rkn_atol_vel": float(self.rkn_atol_vel),
+            "rkn_safety": float(self.rkn_safety),
+            "rkn_min_factor": float(self.rkn_min_factor),
+            "rkn_max_factor": float(self.rkn_max_factor),
+            "rkn_max_rejects": int(self.rkn_max_rejects),
+            "strict_snapshot_matching": bool(self.strict_snapshot_matching),
+            "use_time_dependent_bodies": bool(self.use_time_dependent_bodies),
+            "use_reference_acceleration_correction": bool(self.use_reference_acceleration_correction),
         }
 
         try:
@@ -1190,13 +2764,121 @@ class Predictor:
         snapshot["body_y"] = body_y
         snapshot["body_m"] = body_m
         snapshot["body_fixed"] = body_fixed
+        (
+            body_scripted,
+            body_a,
+            body_e,
+            body_theta,
+            body_arg,
+            body_parent,
+        ) = self._serialize_body_orbits_numba(world)
+        snapshot["body_scripted"] = body_scripted
+        snapshot["body_a"] = body_a
+        snapshot["body_e"] = body_e
+        snapshot["body_theta"] = body_theta
+        snapshot["body_arg"] = body_arg
+        snapshot["body_parent"] = body_parent
         return snapshot
 
     def _compute_from_snapshot(self, snapshot):
-        mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", "rk4"))
+        mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", "rkn"))
         self._debug_integrator_mode("compute", snapshot)
+        rkn_stats = None
 
-        if mode == "aspi" or mode == "aspi_rk4_fallback":
+        if mode == "rkn":
+            min_dt = float(snapshot.get("rkn_min_dt", 0.1))
+            max_dt = float(snapshot.get("rkn_max_dt", 1500.0))
+            base_dt = float(snapshot.get("dt", 60.0))
+            rtol = float(snapshot.get("rkn_rtol", 1e-7))
+            atol_pos = float(snapshot.get("rkn_atol_pos", 10.0))
+            atol_vel = float(snapshot.get("rkn_atol_vel", 1e-4))
+            safety = float(snapshot.get("rkn_safety", 0.9))
+            min_factor = float(snapshot.get("rkn_min_factor", 0.2))
+            max_factor = float(snapshot.get("rkn_max_factor", 5.0))
+            max_rejects = int(snapshot.get("rkn_max_rejects", 32))
+
+            if (not math.isfinite(min_dt)) or min_dt <= 0.0:
+                min_dt = 0.1
+            if (not math.isfinite(max_dt)) or max_dt <= 0.0:
+                max_dt = 1500.0
+            if max_dt < min_dt:
+                max_dt = min_dt
+            if (not math.isfinite(base_dt)) or base_dt <= 0.0:
+                base_dt = max_dt
+            if (not math.isfinite(rtol)) or rtol < 0.0:
+                rtol = 1e-7
+            if (not math.isfinite(atol_pos)) or atol_pos <= 0.0:
+                atol_pos = 10.0
+            if (not math.isfinite(atol_vel)) or atol_vel <= 0.0:
+                atol_vel = 1e-4
+            if (not math.isfinite(safety)) or safety <= 0.0:
+                safety = 0.9
+            if (not math.isfinite(min_factor)) or min_factor <= 0.0:
+                min_factor = 0.2
+            if (not math.isfinite(max_factor)) or max_factor < min_factor:
+                max_factor = max(min_factor, 5.0)
+            if max_rejects < 0:
+                max_rejects = 0
+
+            body_scripted = snapshot.get("body_scripted", None)
+            body_a = snapshot.get("body_a", None)
+            body_e = snapshot.get("body_e", None)
+            body_theta = snapshot.get("body_theta", None)
+            body_arg = snapshot.get("body_arg", None)
+            body_parent = snapshot.get("body_parent", None)
+            body_count = snapshot["body_x"].shape[0]
+            if body_scripted is None:
+                body_scripted = np.zeros(body_count, dtype=np.uint8)
+            if body_a is None:
+                body_a = np.zeros(body_count, dtype=np.float64)
+            if body_e is None:
+                body_e = np.zeros(body_count, dtype=np.float64)
+            if body_theta is None:
+                body_theta = np.zeros(body_count, dtype=np.float64)
+            if body_arg is None:
+                body_arg = np.zeros(body_count, dtype=np.float64)
+            if body_parent is None:
+                body_parent = np.full(body_count, -1, dtype=np.int64)
+
+            use_time_dependent_bodies = 1 if bool(snapshot.get("use_time_dependent_bodies", True)) else 0
+            ref_index = int(snapshot.get("reference_body_index", -1))
+
+            out, used, rkn_stats = _compute_distance_points_rkn_numba(
+                snapshot["ship_px"],
+                snapshot["ship_py"],
+                snapshot["ship_vx"],
+                snapshot["ship_vy"],
+                int(snapshot.get("ref_enabled", 0)),
+                float(snapshot.get("ref_px", 0.0)),
+                float(snapshot.get("ref_py", 0.0)),
+                snapshot["body_x"],
+                snapshot["body_y"],
+                snapshot["body_m"],
+                snapshot["body_fixed"],
+                body_scripted,
+                body_a,
+                body_e,
+                body_theta,
+                body_arg,
+                body_parent,
+                snapshot["G"],
+                base_dt,
+                snapshot["precision"],
+                snapshot["max_points"],
+                snapshot["max_iters"],
+                min_dt,
+                max_dt,
+                rtol,
+                atol_pos,
+                atol_vel,
+                safety,
+                min_factor,
+                max_factor,
+                max_rejects,
+                use_time_dependent_bodies,
+                ref_index,
+            )
+        elif mode == "aspi" or mode == "aspi_rk4_fallback":
             min_dt = float(snapshot.get("aspi_min_dt", 1.0))
             max_dt = float(snapshot.get("aspi_max_dt", 120.0))
             base_dt = float(snapshot.get("dt", 60.0))
@@ -1286,7 +2968,7 @@ class Predictor:
         except Exception:
             pass
 
-        return {"points": points, "snapshot": snapshot, "computed": computed_count}
+        return {"points": points, "snapshot": snapshot, "computed": computed_count, "rkn_stats": rkn_stats}
 
     def _compute_full_rolling(self, ship, world):
         start_ts = time.time()
@@ -1304,8 +2986,7 @@ class Predictor:
             snapshot = self._make_snapshot(ship, world, max_points)
             base_t = float(snapshot.get("sim_time", 0.0))
 
-            # Rolling mode keeps the existing RK4 state path for now; ASPI can
-            # be added here later without changing the snapshot/full path.
+            # Rolling mode keeps the existing RK4 state path for now.
             out, used = _compute_distance_points_numba_state(
                 snapshot["ship_px"],
                 snapshot["ship_py"],
@@ -1375,6 +3056,8 @@ class Predictor:
 
         body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
+        if not self.use_reference_acceleration_correction:
+            ref_enabled = 0
         max_new_points = int(missing_points) + 1  # include seed sample at index 0
         max_iters = int(max(10000, max_new_points * 100))
 
@@ -1453,14 +3136,24 @@ class Predictor:
 
         # ensure executor exists (lazy creation)
         if getattr(self, '_executor', None) is None:
-            try:
-                max_workers = max(1, int(self.workers))
-            except Exception:
-                max_workers = 1
-            self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="predictor")
+            self._ensure_executor()
 
-        fut = self._executor.submit(self._compute_from_snapshot, snapshot)
         job_id = self._next_job_id
+        fut = self._executor.submit(self._compute_from_snapshot, snapshot)
+        if self.debug and not getattr(self, "_suppress_dbg_computed", False):
+            try:
+                print(
+                    "PRED_DBG_SUBMIT: "
+                    f"job={job_id} "
+                    f"version={int(snapshot.get('trajectory_version', -1))} "
+                    f"sim_time={float(snapshot.get('sim_time', 0.0)):.6f} "
+                    f"vx={float(snapshot.get('ship_vx', 0.0)):.6e} "
+                    f"vy={float(snapshot.get('ship_vy', 0.0)):.6e} "
+                    "thread=worker",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
         # mirror single-future state for legacy code paths
         try:
@@ -1518,10 +3211,21 @@ class Predictor:
             if isinstance(result, dict):
                 points = result.get("points")
                 snapshot = result.get("snapshot")
+                rkn_stats = result.get("rkn_stats")
             else:
                 points = result
                 snapshot = None
+                rkn_stats = None
 
+            if snapshot is not None:
+                try:
+                    snapshot_version = int(snapshot.get("trajectory_version", -1))
+                except Exception:
+                    snapshot_version = -1
+                current_version = int(self._trajectory_version)
+                if snapshot_version != current_version:
+                    self._log_snapshot_result(False, "trajectory_version", snapshot, None, None, float("nan"), float("nan"))
+                    return False
 
             if snapshot is not None and current_ship is not None:
                 svx = float(snapshot.get("ship_vx", 0.0))
@@ -1533,8 +3237,7 @@ class Predictor:
                 dvy = cur_vy - svy
                 delta_speed = math.hypot(dvx, dvy)
                 cur_speed = math.hypot(cur_vx, cur_vy)
-                snap_speed = math.hypot(svx, svy)
-                allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
+                allowed_speed = self._allowed_velocity_delta(cur_speed)
 
 
                 spx = float(snapshot.get("ship_px", 0.0))
@@ -1544,22 +3247,17 @@ class Predictor:
                 pos_delta = math.hypot(cur_px - spx, cur_py - spy)
 
                 sim_age = None
+                snap_sim_time = None
+                cur_sim_time = None
                 if current_world is not None:
                     try:
                         snap_sim_time = float(snapshot.get("sim_time", 0.0))
                         cur_sim_time = float(current_world.time)
-                        sim_age = max(0.0, cur_sim_time - snap_sim_time)
+                        sim_age = cur_sim_time - snap_sim_time
                     except Exception:
                         sim_age = None
 
-                submit_ts = float(snapshot.get("submit_ts", 0.0))
-                wall_age = max(0.0, time.time() - submit_ts)
-                if sim_age is None:
-                    motion_age = max(0.1, wall_age)
-                else:
-                    motion_age = sim_age
-                motion_speed = max(cur_speed, snap_speed, self.snapshot_velocity_abs_tol)
-                allowed_pos = max(self.snapshot_position_abs_tol, motion_speed * motion_age)
+                allowed_pos = float(self.snapshot_position_abs_tol)
 
 
                 snap_view = snapshot.get("view_scale", None)
@@ -1572,24 +3270,76 @@ class Predictor:
                 except Exception:
                     is_stale_view = False
 
-                # velocity stale-check only makes sense when no simulation-time delta is available
-                is_stale_speed = (sim_age is None) and (delta_speed > allowed_speed)
+                current_ref_index = self._current_reference_body_index()
+                try:
+                    snapshot_ref_index = int(snapshot.get("reference_body_index", -1))
+                except Exception:
+                    snapshot_ref_index = -1
+                is_stale_reference = snapshot_ref_index != current_ref_index
+                is_stale_speed = delta_speed > allowed_speed
                 is_stale_pos = pos_delta > allowed_pos
+                max_async_sim_age = float(getattr(self, "max_async_sim_age", max(2.0 * float(self.dt), 1.0)))
+                is_stale_sim_time = sim_age is not None and abs(float(sim_age)) > max_async_sim_age
+                wall_age = 0.0
+                try:
+                    wall_age = max(0.0, time.time() - float(snapshot.get("submit_ts", time.time())))
+                except Exception:
+                    wall_age = 0.0
+                max_wall_age = float(getattr(self, "max_async_wall_age", 0.5))
+                is_stale_wall_age = sim_age is None and wall_age > max_wall_age
 
-                if is_stale_view or is_stale_speed or is_stale_pos:
+                reject_reason = None
+                if is_stale_view:
+                    reject_reason = "view_scale"
+                elif is_stale_reference:
+                    reject_reason = "reference_frame"
+                elif is_stale_sim_time:
+                    reject_reason = "sim_age"
+                elif is_stale_wall_age:
+                    reject_reason = "wall_age"
+                elif is_stale_speed:
+                    reject_reason = "velocity"
+                elif is_stale_pos:
+                    reject_reason = "position"
 
-                    if is_stale_view:
-                            return False
+                if reject_reason is not None:
+                    self._log_snapshot_result(False, reject_reason, snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
 
-
-                    if self.force_sync_on_stale and current_world is not None:
+                    if (
+                        reject_reason != "view_scale"
+                        and reject_reason in ("sim_age", "wall_age")
+                        and self.force_sync_on_stale
+                        and current_world is not None
+                    ):
                         self._compute_full(current_ship, current_world)
-                        self._anchor_first_point(current_ship)
                         self._last_swapped_job_id = finished_job_id
                         self._jobs_swapped += 1
+                        self._log_snapshot_result(True, "force_sync_on_stale", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
                         return True
+                    return False
+
+                needs_rebase = pos_delta > 1e-9
+                if needs_rebase:
+                    sim_time_small = sim_age is None or abs(float(sim_age)) <= max_async_sim_age
+                    pos_delta_safe = math.isfinite(pos_delta) and pos_delta <= max(
+                        allowed_pos,
+                        max(cur_speed, 1.0) * max_async_sim_age * 2.0,
+                    )
+                    if delta_speed <= allowed_speed and (not is_stale_reference) and sim_time_small and pos_delta_safe:
+                        points = self._rebase_points_to_current_snapshot(points, snapshot, current_ship)
+                        self._log_snapshot_result(True, "rebased", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
                     else:
+                        reason = "unsafe_rebase"
+                        if not sim_time_small:
+                            reason = "unsafe_rebase_sim_time"
+                        elif delta_speed > allowed_speed:
+                            reason = "unsafe_rebase_velocity"
+                        elif not pos_delta_safe:
+                            reason = "unsafe_rebase_position"
+                        self._log_snapshot_result(False, reason, snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
                         return False
+                else:
+                    self._log_snapshot_result(True, "matched", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
 
 
             try:
@@ -1620,6 +3370,7 @@ class Predictor:
             self._last_swapped_job_id = finished_job_id
             self._jobs_swapped += 1
             self._last_swapped_snapshot = snapshot
+            self._apply_rkn_stats(rkn_stats)
             if self.debug:
                 try:
                     cnt = points.shape[0] if (np is not None and hasattr(points, "shape")) else len(points)
@@ -1672,6 +3423,7 @@ class Predictor:
             new_points = result["points"]
             self.points = new_points
             self._last_swapped_snapshot = result.get("snapshot")
+            self._apply_rkn_stats(result.get("rkn_stats"))
         else:
             new_points = result
             self.points = new_points
@@ -1731,6 +3483,16 @@ class Predictor:
 
         if self.precision <= 0.0:
             raise ValueError("Predictor precision must be > 0")
+
+        self._warn_rolling_rkn_once()
+        if self._handle_trajectory_branch_change(ship, world):
+            if self.debug and not getattr(self, "_suppress_dbg_computed", False):
+                try:
+                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
+                except Exception:
+                    pass
+            self._computed_since_last_update = 0
+            return
 
         if self.rolling_mode:
             # Detect sudden ship velocity changes (thrust) even in rolling
@@ -1865,9 +3627,16 @@ class Predictor:
                 allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
 
                 if delta_speed >= allowed_speed:
+                    old_version = int(self._trajectory_version)
+                    self._trajectory_version = old_version + 1
                     if self.debug:
                         try:
-                            print(f"PRED_DBG_VEL_CHANGE: dv={delta_speed:.6e} allowed={allowed_speed:.6e}", flush=True)
+                            print(
+                                "PRED_DBG_TRAJECTORY_INVALIDATED: "
+                                f"reason=velocity dv={delta_speed:.6e} allowed={allowed_speed:.6e} "
+                                f"old_version={old_version} new_version={self._trajectory_version}",
+                                flush=True,
+                            )
                         except Exception:
                             pass
 
@@ -1877,6 +3646,8 @@ class Predictor:
                         self._cancel_pending_job()
                     except Exception:
                         pass
+                    self._clear_prediction_points()
+                    self._remember_ship_state(ship, world)
 
                     if self.rolling_mode:
                         self._compute_full_rolling(ship, world)
@@ -1934,8 +3705,9 @@ class Predictor:
         if self.recompute_every_update or self._points_count() < target_points or swapped:
             self._submit_async_compute(ship, world, target_points)
 
-        if self.initialized:
-            self._anchor_first_point(ship)
+        # Async results are accepted only after strict snapshot matching, with
+        # whole-curve rebasing applied in _swap_ready_result when safe.
+        # Do not anchor here; that would hide stale curve tails.
         if self.debug and not getattr(self, "_suppress_dbg_computed", False):
             try:
                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -2000,6 +3772,12 @@ class Predictor:
             "swapped_jobs": self._jobs_swapped,
             "last_swapped_job_id": self._last_swapped_job_id,
             "effective_precision": self._effective_precision(),
+            "trajectory_version": int(getattr(self, "_trajectory_version", 0)),
+            "strict_snapshot_matching": bool(getattr(self, "strict_snapshot_matching", True)),
+            "use_time_dependent_bodies": bool(getattr(self, "use_time_dependent_bodies", False)),
+            "use_reference_acceleration_correction": bool(getattr(self, "use_reference_acceleration_correction", False)),
+            "worker_threads": int(getattr(self, "_predictor_worker_threads", 1)),
+            "requested_workers": int(getattr(self, "_requested_workers", 1)),
         }
 
     def close(self):

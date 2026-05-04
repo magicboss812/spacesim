@@ -60,7 +60,6 @@ class KeplerScriptedOrbit:
 
     def inertial_xy(self, true_anomaly_rad: float) -> tuple[float, float]:
         x_p, y_p = self.perifocal_xy(true_anomaly_rad)
-
         # astropy rotation_matrix() mit axis='z' folgt einer left-hand-rule konvention;
         # nutze -arg_periapsis um die in-plane +arg_periapsis-rotation unserer
         # scripted-orbit-gleichungen abzugleichen.
@@ -97,14 +96,46 @@ def _heading_world_to_frame(theta_world: float, frame_x_axis_angle_rad: float) -
     return math.atan2(fy, fx)
 
 
+def _has_scripted_orbit_data(body) -> bool:
+    try:
+        a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
+        e = float(getattr(body, "eccentricity", 0.0) or 0.0)
+    except Exception:
+        return False
+    return a > 0.0 and 0.0 <= e < 1.0
+
+
+def _body_true_anomaly(body) -> float:
+    # Loader/code versions use theta, theta0, or true_anomaly. Prefer live theta.
+    for attr in ("theta", "true_anomaly", "theta0"):
+        try:
+            value = getattr(body, attr, None)
+            if value is not None:
+                return float(value)
+        except Exception:
+            pass
+    return 0.0
+
+
+def _body_arg_periapsis(body) -> float:
+    for attr in ("arg_periapsis", "argument_of_periapsis"):
+        try:
+            value = getattr(body, attr, None)
+            if value is not None:
+                return float(value)
+        except Exception:
+            pass
+    return 0.0
+
+
 def _orbit_model_from_body(body) -> KeplerScriptedOrbit | None:
     try:
         a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
         e = float(getattr(body, "eccentricity", 0.0) or 0.0)
-        arg = float(getattr(body, "arg_periapsis", 0.0) or 0.0)
+        arg = _body_arg_periapsis(body)
     except Exception:
         return None
-    if a <= 0.0:
+    if a <= 0.0 or e < 0.0 or e >= 1.0:
         return None
     return KeplerScriptedOrbit(
         semi_major_axis_m=a,
@@ -117,7 +148,6 @@ class ReferenceFrame:
     label = "Barycentric"
 
     def set_epoch_time(self, time_s: float) -> None:
-        # standard: no-op für frames, die keine epoch-aware transformationen benötigen.
         return
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
@@ -145,6 +175,8 @@ class _BodyEphemerisMixin:
         self._epoch_initialized = False
         self._position_cache = {}
         self._relative_state_cache = {}
+        self.debug_ephemeris = False
+        self._debug_ephemeris_counter = 0
 
     def set_epoch_time(self, time_s: float) -> None:
         try:
@@ -191,13 +223,20 @@ class _BodyEphemerisMixin:
         parent = getattr(body, "is_moon_of", None)
         dt = qt - float(self._epoch_time_s)
 
+        # Predictor samples are future absolute positions. In a body-centred plotting
+        # frame, the origin body must also be evaluated at the same future sample time.
+        # Freezing a scripted body at the current epoch causes geocentric predictor artifacts.
         if parent is None:
             px = float(body.position.x)
             py = float(body.position.y)
 
-            # top-level scripted/feste körper bleiben an ihrer epoch-position;
-            # dynamische top-level körper erfahren für kurze zeiträume lineares driftverhalten.
-            if not getattr(body, "scripted_orbit", False) and not getattr(body, "fixed", False):
+            scripted_pos = None
+            if getattr(body, "scripted_orbit", False) or _has_scripted_orbit_data(body):
+                scripted_pos = self._scripted_top_level_position_at_time(body, dt)
+
+            if scripted_pos is not None:
+                wx, wy = scripted_pos
+            elif not getattr(body, "scripted_orbit", False) and not getattr(body, "fixed", False):
                 try:
                     vx = float(body.velocity.x)
                     vy = float(body.velocity.y)
@@ -217,6 +256,94 @@ class _BodyEphemerisMixin:
 
         stack.remove(body_id)
         self._position_cache[cache_key] = (float(wx), float(wy))
+        return float(wx), float(wy)
+
+    def _scripted_top_level_position_at_time(self, body, dt_s: float) -> tuple[float, float] | None:
+        """Visual-only propagation for parentless scripted bodies around world origin.
+
+        This is a fallback for top-level orbital elements. It does not mutate the body and
+        does not affect physics. Child orbits still use `_relative_position_to_parent_at_time`.
+        """
+        if not _has_scripted_orbit_data(body):
+            return None
+
+        try:
+            a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
+            e = float(getattr(body, "eccentricity", 0.0) or 0.0)
+            nu0 = _body_true_anomaly(body)
+            arg = _body_arg_periapsis(body)
+        except Exception:
+            return None
+
+        if a <= 0.0 or e < 0.0 or e >= 1.0:
+            return None
+
+        n = None
+        for attr in ("mean_motion", "angular_velocity", "orbit_angular_velocity"):
+            try:
+                value = getattr(body, attr, None)
+                if value is not None:
+                    n = float(value)
+                    break
+            except Exception:
+                pass
+
+        if n is None:
+            for attr in ("orbital_period", "period", "orbit_period"):
+                try:
+                    value = getattr(body, attr, None)
+                    if value is not None and float(value) > 0.0:
+                        n = 2.0 * math.pi / float(value)
+                        break
+                except Exception:
+                    pass
+
+        if n is None:
+            central_mass = None
+            for attr in ("central_mass", "parent_mass", "primary_mass"):
+                try:
+                    value = getattr(body, attr, None)
+                    if value is not None and float(value) > 0.0:
+                        central_mass = float(value)
+                        break
+                except Exception:
+                    pass
+            if central_mass is None:
+                # In this project, top-level scripted planets are usually intended to orbit
+                # the world-origin Sun. Without access to the body list from the frame object,
+                # use solar mass as a visual fallback only.
+                central_mass = 1.989e30
+            try:
+                n = math.sqrt(NEWTONIAN_G * central_mass / (a * a * a))
+            except Exception:
+                n = None
+
+        if n is None or not math.isfinite(n):
+            return None
+
+        nu = nu0 + float(n) * float(dt_s)
+        denom = 1.0 + e * math.cos(nu)
+        if abs(denom) < 1e-12:
+            return None
+        r = a * (1.0 - e * e) / denom
+        x_orb = r * math.cos(nu)
+        y_orb = r * math.sin(nu)
+        c = math.cos(arg)
+        s = math.sin(arg)
+        wx = x_orb * c - y_orb * s
+        wy = x_orb * s + y_orb * c
+
+        try:
+            if getattr(self, "debug_ephemeris", False):
+                self._debug_ephemeris_counter += 1
+                if self._debug_ephemeris_counter <= 5 or self._debug_ephemeris_counter % 250 == 0:
+                    print(
+                        f"FRAME_EPHEMERIS_DBG: body={getattr(body, 'name', '?')} "
+                        f"dt={float(dt_s):.3f} pos=({wx:.6e},{wy:.6e}) mode=top_level_scripted"
+                    )
+        except Exception:
+            pass
+
         return float(wx), float(wy)
 
     def _relative_position_to_parent_at_time(self, body, parent, dt_s: float) -> tuple[float, float]:
@@ -281,14 +408,16 @@ class _BodyEphemerisMixin:
         return state
 
     def _scripted_relative_state_from_elements(self, body, parent):
-        if not getattr(body, "scripted_orbit", False):
+        # Do not rely only on `scripted_orbit`. Some loader versions mark orbital
+        # bodies through semi_major_axis/eccentricity/is_moon_of without setting that flag.
+        if not (getattr(body, "scripted_orbit", False) or _has_scripted_orbit_data(body)):
             return None
 
         try:
             a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
             e = float(getattr(body, "eccentricity", 0.0) or 0.0)
-            nu = float(getattr(body, "theta", 0.0) or 0.0)
-            arg = float(getattr(body, "arg_periapsis", 0.0) or 0.0)
+            nu = _body_true_anomaly(body)
+            arg = _body_arg_periapsis(body)
             parent_mass = float(getattr(parent, "mass", 0.0) or 0.0)
         except Exception:
             return None
@@ -341,10 +470,7 @@ class BodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
         origin_x, origin_y = self._body_world_position_at_time(self.primary_body, time_s)
-        return (
-            float(x) - origin_x,
-            float(y) - origin_y,
-        )
+        return (float(x) - origin_x, float(y) - origin_y)
 
 
 class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
@@ -354,17 +480,14 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
     so dargestellt wird, als würde er seinen scripted-Mond umkreisen,
     ohne den Physikzustand zu verändern.
     """
+
     def __init__(self, primary_body, child_body):
         self._init_ephemeris()
         self.primary_body = primary_body
         self.child_body = child_body
-        self.label = (
-            f"Virtual-swap ({getattr(primary_body, 'name', '?')} <- {getattr(child_body, 'name', '?')})"
-        )
+        self.label = f"Virtual-swap ({getattr(primary_body, 'name', '?')} <- {getattr(child_body, 'name', '?')})"
 
     def _virtual_primary_pos(self, time_s: float):
-        # berechnete virtuelle primärposition pro zeit cachen um wiederholte
-        # scripted-orbit-berechnungen bei jeder punkt-transform zu vermeiden.
         try:
             if getattr(self, "_cache_vp_time", None) == float(time_s):
                 return Vec2(self._cache_vp_x, self._cache_vp_y)
@@ -380,7 +503,7 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
             self._cache_vp_y = float(vp.y)
             return vp
 
-        theta_child = float(getattr(self.child_body, "theta", 0.0) or 0.0)
+        theta_child = _body_true_anomaly(self.child_body)
         try:
             parent = getattr(self.child_body, "is_moon_of", None)
             if parent is not None:
@@ -388,21 +511,14 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
                 parent_x, parent_y = self._body_world_position_at_time(parent, time_s)
                 rel_x = child_x - parent_x
                 rel_y = child_y - parent_y
-                arg = float(getattr(self.child_body, "arg_periapsis", 0.0) or 0.0)
+                arg = _body_arg_periapsis(self.child_body)
                 theta_child = math.atan2(rel_y, rel_x) - arg
         except Exception:
             pass
 
-        # dieselbe scripted-ellipse verwenden und die wahre anomalie um PI versetzen damit
-        # der virtuelle primärkörper gegenüber dem kind angezeigt wird.
         rel_x, rel_y = orbit.inertial_xy(theta_child + math.pi)
-
-        # Place the virtual primary relative to the child's absolute position
         child_x, child_y = self._body_world_position_at_time(self.child_body, time_s)
-        vp = Vec2(
-            float(child_x) + rel_x,
-            float(child_y) + rel_y,
-        )
+        vp = Vec2(float(child_x) + rel_x, float(child_y) + rel_y)
         self._cache_vp_time = float(time_s)
         self._cache_vp_x = float(vp.x)
         self._cache_vp_y = float(vp.y)
@@ -413,16 +529,12 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
         return float(x) - float(vp.x), float(y) - float(vp.y)
 
 
-
 class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
     def __init__(self, primary_body, secondary_body):
         self._init_ephemeris()
         self.primary_body = primary_body
         self.secondary_body = secondary_body
-        self.label = (
-            f"Body-direction ({getattr(primary_body, 'name', '?')} -> "
-            f"{getattr(secondary_body, 'name', '?')})"
-        )
+        self.label = f"Body-direction ({getattr(primary_body, 'name', '?')} -> {getattr(secondary_body, 'name', '?')})"
 
     def _x_axis_angle(self, time_s: float) -> float:
         primary_x, primary_y = self._body_world_position_at_time(self.primary_body, time_s)
@@ -441,7 +553,6 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
                 return
         except Exception:
             pass
-
         angle = self._x_axis_angle(cache_time)
         origin_x, origin_y = self._body_world_position_at_time(self.primary_body, cache_time)
         self._cache_cos = math.cos(angle)
@@ -472,10 +583,7 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         self._init_ephemeris()
         self.target_body = target_body
         self.reference_body = reference_body
-        self.label = (
-            f"Target overlay ({getattr(target_body, 'name', '?')} vs "
-            f"{getattr(reference_body, 'name', '?')})"
-        )
+        self.label = f"Target overlay ({getattr(target_body, 'name', '?')} vs {getattr(reference_body, 'name', '?')})"
 
     def _x_axis_angle(self, time_s: float) -> float:
         target_x, target_y = self._body_world_position_at_time(self.target_body, time_s)
@@ -494,7 +602,6 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
                 return
         except Exception:
             pass
-
         angle = self._x_axis_angle(cache_time)
         origin_x, origin_y = self._body_world_position_at_time(self.target_body, cache_time)
         self._cache_cos = math.cos(angle)
@@ -539,10 +646,7 @@ def _fallback_secondary_index(primary_index: int, bodies: Sequence[object]) -> i
 def _find_virtual_swap_child(primary_body, bodies: Sequence[object]):
     """Gibt das scripted-kind zurück, das für einen rein visuellen orbit-swap verwendet wird, oder None."""
     try:
-        has_orbit = (
-            getattr(primary_body, 'semi_major_axis', None) is not None
-            and float(getattr(primary_body, 'semi_major_axis', 0.0)) > 0.0
-        )
+        has_orbit = getattr(primary_body, 'semi_major_axis', None) is not None and float(getattr(primary_body, 'semi_major_axis', 0.0)) > 0.0
     except Exception:
         has_orbit = False
 
@@ -551,7 +655,7 @@ def _find_virtual_swap_child(primary_body, bodies: Sequence[object]):
 
     candidate = None
     for child in bodies:
-        if getattr(child, 'is_moon_of', None) is primary_body and getattr(child, 'scripted_orbit', False):
+        if getattr(child, 'is_moon_of', None) is primary_body and (getattr(child, 'scripted_orbit', False) or _has_scripted_orbit_data(child)):
             try:
                 if float(getattr(child, 'semi_major_axis', 0.0) or 0.0) > 0.0:
                     return child
@@ -562,17 +666,8 @@ def _find_virtual_swap_child(primary_body, bodies: Sequence[object]):
     return candidate
 
 
-def resolve_plotting_camera_target_index(
-    frame_parameters: PlottingFrameParameters,
-    bodies: Sequence[object],
-) -> int:
-    """
-    Bestimmt, welchem körper die kamera für den ausgewählten plotting-frame folgen soll.
-
-    Bei virtuell getauschten nicht-rotierenden rahmen ist der visuelle ursprung das scripted
-    child (z.B. Erde), nicht der ausgewählte feste parent (z.B. Sonne). Dem effektiven
-    zentrum zu folgen vermeidet den "locked sun"-artefakt.
-    """
+def resolve_plotting_camera_target_index(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> int:
+    """Bestimmt, welchem körper die kamera für den ausgewählten plotting-frame folgen soll."""
     primary_index = int(frame_parameters.primary_index)
     extension = int(frame_parameters.extension)
     if extension != BODY_CENTRED_NON_ROTATING:
@@ -589,19 +684,14 @@ def resolve_plotting_camera_target_index(
     return primary_index
 
 
-def new_plotting_frame(
-    frame_parameters: PlottingFrameParameters,
-    bodies: Sequence[object],
-) -> ReferenceFrame:
+def new_plotting_frame(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> ReferenceFrame:
     extension = int(frame_parameters.extension)
     primary = _resolve_body(frame_parameters.primary_index, bodies)
 
     if extension == BODY_CENTRED_NON_ROTATING:
-        # Visualization-only orbit swap for fixed/no-orbit primaries.
         candidate = _find_virtual_swap_child(primary, bodies)
         if candidate is not None:
             return VirtualBodyCentredNonRotatingReferenceFrame(primary, candidate)
-
         return BodyCentredNonRotatingReferenceFrame(primary)
 
     if extension == BODY_CENTRED_BODY_DIRECTION:
@@ -614,10 +704,7 @@ def new_plotting_frame(
     return IdentityReferenceFrame()
 
 
-def describe_plotting_frame(
-    frame_parameters: PlottingFrameParameters,
-    bodies: Sequence[object],
-) -> str:
+def describe_plotting_frame(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> str:
     extension = int(frame_parameters.extension)
     primary = _resolve_body(frame_parameters.primary_index, bodies)
     primary_name = getattr(primary, "name", f"#{frame_parameters.primary_index}")
@@ -688,11 +775,7 @@ class ReferenceFrameSelector:
 
     def effect_change(self) -> None:
         if self._on_change is not None:
-            self._on_change(
-                self._frame_parameters,
-                self._target_body_index,
-                self._target_reference_index,
-            )
+            self._on_change(self._frame_parameters, self._target_body_index, self._target_reference_index)
 
 
 class PlottingFrameAdapter:
@@ -714,17 +797,10 @@ class PlottingFrameAdapter:
             self._renderer.clear_target_frame()
             return
 
-        reference_index = (
-            int(target_reference_index)
-            if target_reference_index is not None
-            else int(frame_parameters.primary_index)
-        )
+        reference_index = int(target_reference_index) if target_reference_index is not None else int(frame_parameters.primary_index)
         target_body = _resolve_body(int(target_body_index), self._bodies)
         reference_body = _resolve_body(reference_index, self._bodies)
 
         target_frame = TargetBodyDirectionReferenceFrame(target_body, reference_body)
-        target_label = (
-            f"Target overlay ({getattr(target_body, 'name', '?')} vs "
-            f"{getattr(reference_body, 'name', '?')})"
-        )
+        target_label = f"Target overlay ({getattr(target_body, 'name', '?')} vs {getattr(reference_body, 'name', '?')})"
         self._renderer.set_target_frame(target_frame, label=target_label)

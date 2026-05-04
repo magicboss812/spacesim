@@ -65,19 +65,15 @@ Diese Trennung macht das System deutlich flexibler. Der Predictor kann intern we
 
 ---
 
-## Ongoing Issues
+## Gelöste Probleme
 
-Der Predictor ist weiterhin nicht vollständig mit dem Frame-Plotting-System kompatibel.
+Der Predictor ist nun deutlich stabiler, weil die alte ASPI-Lösung durch einen **RK45-Integrator** ersetzt wurde. RK45 arbeitet mit adaptiven Schritten: In einfachen Bereichen kann größer gerechnet werden, während in schwierigeren Bereichen automatisch kleinere und genauere Schritte verwendet werden.
 
-Besonders in körperzentrierten Referenzsystemen, zum Beispiel im geozentrischen Modus der Erde, entstehen noch sichtbare Probleme. Die eigentliche Bahn des Schiffes kann im absoluten Raum stabil sein, aber die Darstellung im Referenzsystem ist nicht immer korrekt.
+Zusätzlich besitzt RK45 eine Fehlerkontrolle. Dadurch wird nicht nur ungefähr geschätzt, wie groß ein Schritt sein sollte, sondern die Berechnung kann ihre eigene Genauigkeit besser überprüfen und bei Bedarf korrigieren. Das sorgt für eine deutlich zuverlässigere und stabilere Predictor-Linie, auch wenn sich Geschwindigkeit, Entfernung oder Gravitationseinfluss verändern.
 
-Das Problem liegt vor allem darin, dass der Predictor nicht nur die zukünftige Position des Schiffes berücksichtigen muss. Er muss gleichzeitig auch die zukünftige Position des Reference-Körpers einbeziehen.
+Auch das Rendering des Predictors wurde überarbeitet. Die Predictor-Linie berücksichtigt nun Reference-Körper korrekt. Dadurch wird die Vorhersage nicht mehr nur im absoluten Raum gezeichnet, sondern passend zum gewählten Referenzsystem dargestellt. Wenn also ein Reference-Körper ausgewählt ist, wird dessen Bewegung in der Darstellung der zukünftigen Flugbahn mit einbezogen.
 
-Beispiel:
+Damit sind zwei zentrale Probleme gelöst:
 
-```text
-korrekt:
-Schiff(t) - Erde(t)
-
-problematisch:
-Schiff(t) - Erde(jetzt)
+- Der Predictor rechnet nun stabiler und genauer durch adaptive RK45-Schritte mit Fehlerkontrolle.
+- Die Darstellung der Predictor-Linie ist nun mit Reference-Körpern kompatibel und passt sich dem gewählten Referenzsystem an.
