@@ -604,4 +604,5 @@ Das Hierarchien-System erlaubt es die eigene Erstellung von weiteren Systemen od
 
 **Wie man das Spiel startet:** 
 Requirements: `pip install pyopengl pyopengl_accelerate pygame astropy poliastro numba`
+
 Starten: `python test.py`
