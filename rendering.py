@@ -82,6 +82,8 @@ class Renderer:
         self._prediction_line_cache_stats = {}
         self._prediction_frame_transform_debug_key = None
         self._current_body_index_by_id = {}
+        self.current_reference_body = None
+        self.ship_velocity_vector_length_px = 70.0
 
         # frame-status (principia-ähnlich): physik bleibt absolut, rendering
         # wendet den aktuell ausgewählten plotting-frame plus optionales target-
@@ -1076,7 +1078,7 @@ class Renderer:
         except Exception:
             pass
 
-    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None):
+    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None, reference_body=None):
         frame_t0 = time.perf_counter()
         timings = {
             'bodies_ms': 0.0,
@@ -1088,6 +1090,7 @@ class Renderer:
 
         if sim_time is not None:
             self.set_frame_time(sim_time)
+        self.current_reference_body = reference_body
         try:
             self._current_body_index_by_id = {id(body): idx for idx, body in enumerate(bodies)}
         except Exception:
@@ -1197,6 +1200,7 @@ class Renderer:
         if ship_body is not None:
             bodies_t0 = time.perf_counter()
             self._draw_body(ship_body, camera)
+            self.draw_ship_velocity_vector(ship_body, camera, reference_body=reference_body)
             timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
         hud_t0 = time.perf_counter()
@@ -1207,6 +1211,38 @@ class Renderer:
         timings['swap_or_present_ms'] = (time.perf_counter() - swap_t0) * 1000.0
         timings['frame_ms'] = (time.perf_counter() - frame_t0) * 1000.0
         self._emit_render_benchmark(timings)
+
+    def draw_ship_velocity_vector(self, ship, camera, reference_body=None):
+        if ship is None:
+            return
+
+        try:
+            vx = float(ship.velocity.x)
+            vy = float(ship.velocity.y)
+            if reference_body is None:
+                reference_body = getattr(self, "current_reference_body", None)
+            if reference_body is not None:
+                vx -= float(reference_body.velocity.x)
+                vy -= float(reference_body.velocity.y)
+
+            frame = self._active_frame()
+            vx, vy = frame.to_this_frame_vector_xy(self._frame_time_s, vx, vy)
+
+            mag = math.hypot(vx, vy)
+            if mag <= 1e-12:
+                return
+
+            dir_x = vx / mag
+            dir_y = vy / mag
+
+            sx, sy = self._world_to_screen_xy(float(ship.position.x), float(ship.position.y), camera)
+            length_px = max(20.0, min(90.0, float(getattr(self, "ship_velocity_vector_length_px", 70.0))))
+            ex = sx + dir_x * length_px
+            ey = sy - dir_y * length_px
+
+            self._draw_polyline([(sx, sy), (ex, ey)], color=(0.2, 0.8, 1.0, 0.9), width=2.0)
+        except Exception:
+            return
     
     def _draw_body(self, body, camera):
         camera_frame_xy = self._frame_camera_xy(camera)

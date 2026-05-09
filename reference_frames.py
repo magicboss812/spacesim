@@ -157,8 +157,20 @@ class ReferenceFrame:
         px, py = self.to_this_frame_xy(time_s, position.x, position.y)
         return Vec2(px, py)
 
+    def to_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
+        return float(vx), float(vy)
+
+    def from_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
+        return float(vx), float(vy)
+
     def transform_heading(self, time_s: float, theta_world: float) -> float:
         return float(theta_world)
+
+    def heading_from_this_frame(self, time_s: float, theta_frame: float) -> float:
+        vx = math.cos(float(theta_frame))
+        vy = math.sin(float(theta_frame))
+        wx, wy = self.from_this_frame_vector_xy(time_s, vx, vy)
+        return math.atan2(wy, wx)
 
 
 class IdentityReferenceFrame(ReferenceFrame):
@@ -570,12 +582,22 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
         return rx, ry
 
     def transform_heading(self, time_s: float, theta_world: float) -> float:
-        self._prepare_cache(time_s)
         hx = math.cos(float(theta_world))
         hy = math.sin(float(theta_world))
-        fx = self._cache_cos * hx - self._cache_sin * hy
-        fy = self._cache_sin * hx + self._cache_cos * hy
+        fx, fy = self.to_this_frame_vector_xy(time_s, hx, hy)
         return math.atan2(fy, fx)
+
+    def to_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
+        self._prepare_cache(time_s)
+        rx = self._cache_cos * float(vx) - self._cache_sin * float(vy)
+        ry = self._cache_sin * float(vx) + self._cache_cos * float(vy)
+        return rx, ry
+
+    def from_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
+        self._prepare_cache(time_s)
+        wx = self._cache_cos * float(vx) + self._cache_sin * float(vy)
+        wy = -self._cache_sin * float(vx) + self._cache_cos * float(vy)
+        return wx, wy
 
 
 class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
@@ -619,12 +641,22 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         return rx, ry
 
     def transform_heading(self, time_s: float, theta_world: float) -> float:
-        self._prepare_cache(time_s)
         hx = math.cos(float(theta_world))
         hy = math.sin(float(theta_world))
-        fx = self._cache_cos * hx - self._cache_sin * hy
-        fy = self._cache_sin * hx + self._cache_cos * hy
+        fx, fy = self.to_this_frame_vector_xy(time_s, hx, hy)
         return math.atan2(fy, fx)
+
+    def to_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
+        self._prepare_cache(time_s)
+        rx = self._cache_cos * float(vx) - self._cache_sin * float(vy)
+        ry = self._cache_sin * float(vx) + self._cache_cos * float(vy)
+        return rx, ry
+
+    def from_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
+        self._prepare_cache(time_s)
+        wx = self._cache_cos * float(vx) + self._cache_sin * float(vy)
+        wy = -self._cache_sin * float(vx) + self._cache_cos * float(vy)
+        return wx, wy
 
 
 def _resolve_body(index: int, bodies: Sequence[object]):

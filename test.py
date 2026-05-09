@@ -286,13 +286,24 @@ def main():
             # geschwindigkeit vor dem schub erfassen um nur schub-verursachte änderung zu melden
             if ship is not None:
                 old_v = ship.velocity.copy()
-                ship_control.apply_thrust(keys)
+                ship_control.apply_thrust(keys, frame_dt)
+                reference_body = w.body[reference_index] if reference_index is not None else None
+                burn_acc = ship_control.thrust_acc
+                if reference_body is not None:
+                    if keys[pygame.K_i]:
+                        ship_control.apply_prograde_thrust(reference_body, burn_acc, frame_dt)
+                    if keys[pygame.K_k]:
+                        ship_control.apply_retrograde_thrust(reference_body, burn_acc, frame_dt)
+                    if keys[pygame.K_l]:
+                        ship_control.apply_radial_out_thrust(reference_body, burn_acc, frame_dt)
+                    if keys[pygame.K_j]:
+                        ship_control.apply_radial_in_thrust(reference_body, burn_acc, frame_dt)
                 dv = ship.velocity - old_v
                 if dv.x != 0.0 or dv.y != 0.0:
                     mag = math.hypot(dv.x, dv.y)
                     print(f"THRUST_DELTA: dx={dv.x:.6e}, dy={dv.y:.6e}, |dv|={mag:.6e}")
             else:
-                ship_control.apply_thrust(keys)
+                ship_control.apply_thrust(keys, frame_dt)
 
         # Simulation aktualisieren (nur für dynamik in unterschritte aufteilen)
         total_sim = camera.sim_dt
@@ -323,7 +334,8 @@ def main():
         # Rendern
 
         
-        renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time)
+        reference_body = w.body[reference_index] if reference_index is not None else None
+        renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time, reference_body=reference_body)
         frame_count += 1
         if max_frames > 0 and frame_count >= max_frames:
             running = False
