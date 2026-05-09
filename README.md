@@ -1,10 +1,6 @@
 # Entwicklung des Main-Branches seit April 2026
 
 Diese Datei dokumentiert die Entwicklung von **SpaceSim** seit dem Stand `04/2026`.  
-Der Schwerpunkt liegt auf den Änderungen an **Reference Frames**, **Predictor**, **Rendering**, **Schiffskontrolle**, **Weltphysik** und den aktuell noch bestehenden Problemen.
-
-> [!NOTE]
-> Diese Datei ergänzt die eigentliche `README.md`. Sie ist stärker als Entwicklungs- und Evaluationsdokument gedacht und beschreibt, warum bestimmte technische Änderungen notwendig wurden.
 
 ---
 
