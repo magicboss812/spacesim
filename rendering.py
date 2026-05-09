@@ -1287,6 +1287,71 @@ class Renderer:
             self._draw_polyline([(sx, sy), (ex, ey)], color=(1.0, 0.5, 0.1, 0.95), width=2.0)
         except Exception:
             return
+
+    def _ship_relative_speed_m_s(self, ship, reference_body=None):
+        if ship is None:
+            return None
+
+        try:
+            vx = float(ship.velocity.x)
+            vy = float(ship.velocity.y)
+        except Exception:
+            return None
+
+        if reference_body is not None:
+            try:
+                vx -= float(reference_body.velocity.x)
+                vy -= float(reference_body.velocity.y)
+            except Exception:
+                pass
+
+        return math.hypot(vx, vy)
+
+    def _ship_frame_speed_m_s(self, ship, dt_s=1.0):
+        """
+        Returns the ship's apparent speed in the active plotting frame.
+
+        This respects translated, rotating, target-overlay, and time-dependent
+        frames by finite-differencing the active frame transform. It does not
+        use the clamped visual velocity vector length.
+        """
+        if ship is None:
+            return None
+
+        try:
+            t0 = float(self._frame_time_s)
+            dt = max(1e-3, float(dt_s))
+
+            x0 = float(ship.position.x)
+            y0 = float(ship.position.y)
+            vx = float(ship.velocity.x)
+            vy = float(ship.velocity.y)
+
+            frame = self._active_frame()
+
+            fx0, fy0 = frame.to_this_frame_xy(t0, x0, y0)
+            fx1, fy1 = frame.to_this_frame_xy(
+                t0 + dt,
+                x0 + vx * dt,
+                y0 + vy * dt,
+            )
+
+            dvx = float(fx1) - float(fx0)
+            dvy = float(fy1) - float(fy0)
+
+            return math.hypot(dvx, dvy) / dt
+        except Exception:
+            return None
+
+    def _format_speed_label(self, speed_m_s):
+        if speed_m_s is None:
+            return ""
+
+        speed_m_s = float(speed_m_s)
+        if speed_m_s >= 1000.0:
+            return f"{speed_m_s / 1000.0:.2f} km/s"
+
+        return f"{speed_m_s:.1f} m/s"
     
     def _draw_body(self, body, camera):
         camera_frame_xy = self._frame_camera_xy(camera)
@@ -1323,10 +1388,34 @@ class Renderer:
                 if entry:
                     _, w, h = entry
                     label_x = float(lx) - (float(w) / 2.0)
-                    label_y = float(ly) + 12.0 + 6.0
+                    label_y = float(ly) - 16.0
                     self._blit_cached_text(body.name, label_x, label_y, self.font_small)
                 else:
                     self._blit_cached_text(body.name, float(lx) + 12.0, float(ly) - 8.0, self.font_small)
+                speed = self._ship_frame_speed_m_s(body)
+                if getattr(self, "debug_frame", False):
+                    try:
+                        period = max(1, int(getattr(self, "_frame_debug_period", 30)))
+                        if int(getattr(self, "_frame_debug_counter", 0)) % period == 0:
+                            backend_rel = self._ship_relative_speed_m_s(body, getattr(self, "current_reference_body", None))
+                            frame_speed = speed
+                            if backend_rel is not None and frame_speed is not None:
+                                print(
+                                    f"SHIP_SPEED_DBG: "
+                                    f"backend_rel={backend_rel:.3f} m/s "
+                                    f"frame={frame_speed:.3f} m/s "
+                                    f"frame_label={getattr(self._active_frame(), 'label', '?')}"
+                                )
+                    except Exception:
+                        pass
+                speed_text = self._format_speed_label(speed)
+                if speed_text:
+                    speed_entry = self._get_label_texture(speed_text, self.font_small)
+                    if speed_entry:
+                        _, sw, _ = speed_entry
+                        self._blit_cached_text(speed_text, float(lx) - (float(sw) / 2.0), float(ly) + 24.0, self.font_small)
+                    else:
+                        self._blit_cached_text(speed_text, float(lx) + 12.0, float(ly) + 24.0, self.font_small)
             except Exception:
                 try:
                     self._draw_body_label(body.name, screen_pos, 12)

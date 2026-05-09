@@ -11,6 +11,16 @@ class world:
         self.G = G
         self.body = []
         self.time = 0.0
+        self.integrator_max_step = 30.0
+        self.integrator_min_step = 0.01
+        self.integrator_position_tolerance = 1.0
+        self.integrator_velocity_tolerance = 0.001
+        self.integrator_debug = False
+        self.integrator_last_substeps = 0
+        self.integrator_last_rejections = 0
+        self.integrator_last_min_step_forced = 0
+        self.integrator_last_worst_pos_error = 0.0
+        self.integrator_last_worst_vel_error = 0.0
         # Epicycle (Ptolemaic) mode state. When enabled, top-level bodies
         # (those with no parent) will be reparented to the chosen center
         # body so that the resulting motion produces epicycles relative
@@ -71,7 +81,8 @@ class world:
             radial = delta.normalize()
             tangent = Vec2(-radial.y, radial.x)
         
-            body.velocity = radial * v_r + tangent * v_t
+            parent_velocity = getattr(parent, "velocity", Vec2(0.0, 0.0))
+            body.velocity = parent_velocity + radial * v_r + tangent * v_t
 
             body.scripted_orbit = False
             body.is_moon_of = None
@@ -96,6 +107,109 @@ class world:
         # Hinweis: Der Epizykel-Modus wird durch Umparenting der Top-Level-
         # Körper zum gewählten Zentrum via `enable_epicycles()` aktiviert; 
         # update_planets folgt einfach den aktuell gesetzten Elternbeziehungen.
+
+    def _body_position_at_time(self, body, time_s):
+        """
+        Return the body's world position at a given simulation time.
+
+        For now:
+        - if the body has a time-aware orbit method later, use it here
+        - otherwise fall back to current body.position
+
+        This keeps the integrator ready for scripted moving planets at intermediate stages.
+        """
+        try:
+            if hasattr(body, "position_at_time"):
+                return body.position_at_time(time_s)
+        except Exception:
+            pass
+
+        return body.position
+
+    def acceleration_at(self, target_body, position, time_s=None):
+        acc = Vec2(0.0, 0.0)
+
+        if time_s is None:
+            time_s = self.time
+
+        for other in self.body:
+            if other is target_body:
+                continue
+
+            try:
+                other_pos = self._body_position_at_time(other, time_s)
+            except Exception:
+                other_pos = other.position
+
+            delta = other_pos - position
+            r2 = delta.magnitude_squared()
+            if r2 < 1e-10:
+                continue
+
+            r = math.sqrt(r2)
+            acc += delta * (self.G * other.mass / (r2 * r))
+
+        return acc
+
+    def _rkn4_step_body_state(self, body, p0, v0, t0, h):
+        """
+        One explicit RKN4-style step for r'' = a(r, t).
+
+        p0: initial position
+        v0: initial velocity
+        t0: initial simulation time
+        h: step size in seconds
+
+        Returns:
+            new_position, new_velocity
+        """
+        a1 = self.acceleration_at(body, p0, t0)
+
+        p2 = p0 + v0 * (h * 0.5) + a1 * (h * h * 0.125)
+        a2 = self.acceleration_at(body, p2, t0 + h * 0.5)
+
+        p3 = p0 + v0 * (h * 0.5) + a2 * (h * h * 0.125)
+        a3 = self.acceleration_at(body, p3, t0 + h * 0.5)
+
+        p4 = p0 + v0 * h + a3 * (h * h * 0.5)
+        a4 = self.acceleration_at(body, p4, t0 + h)
+
+        new_p = p0 + v0 * h + (a1 + a2 + a3) * (h * h / 6.0)
+        new_v = v0 + (a1 + 2.0 * a2 + 2.0 * a3 + a4) * (h / 6.0)
+
+        return new_p, new_v
+
+    def _adaptive_rkn_step_body_state(
+        self,
+        body,
+        p0,
+        v0,
+        t0,
+        h,
+        pos_tol=1.0,
+        vel_tol=0.001,
+    ):
+        """
+        Adaptive embedded RKN-style step by step-doubling.
+
+        Compares:
+        - one full step h
+        - two half steps h/2
+
+        Returns:
+            accepted, new_position, new_velocity, pos_error, vel_error
+        """
+        p_full, v_full = self._rkn4_step_body_state(body, p0, v0, t0, h)
+
+        half = h * 0.5
+        p_half, v_half = self._rkn4_step_body_state(body, p0, v0, t0, half)
+        p_two, v_two = self._rkn4_step_body_state(body, p_half, v_half, t0 + half, half)
+
+        pos_err = (p_two - p_full).magnitude()
+        vel_err = (v_two - v_full).magnitude()
+
+        accepted = pos_err <= pos_tol and vel_err <= vel_tol
+        return accepted, p_two, v_two, pos_err, vel_err
 
     def _rv_to_orbital(self, r_vec, v_vec, mu):
         """konvertiert position/geschwindigkeit (relativ zum parent) in orbitale elementen.
@@ -157,43 +271,114 @@ class world:
                 factor = self.G * other.mass / (r2 * r)
                 body.acceleration += delta * factor
     def update_dynamics(self, dt):
-        for body in self.body:
-            # scripted-orbit körper oder als fixed markierte körper nicht integrieren —
-            # diese sollten an ihren scripted/initial positionen bleiben.
-            if body.scripted_orbit or getattr(body, 'fixed', False):
-                continue
-            
-            # RK4 Stage 1
-            self.calculate_forces()
-            k1_v = body.acceleration.copy()
-            k1_p = body.velocity.copy()
-            
-            # RK4 Stage 2
-            body.position += k1_p * (dt / 2)
-            body.velocity += k1_v * (dt / 2)
-            self.calculate_forces()
-            k2_v = body.acceleration.copy()
-            k2_p = body.velocity.copy()
-            
-            # RK4 Stage 3
-            body.position += k2_p * (dt / 2) - k1_p * (dt / 2)
-            body.velocity += k2_v * (dt / 2) - k1_v * (dt / 2)
-            self.calculate_forces()
-            k3_v = body.acceleration.copy()
-            k3_p = body.velocity.copy()
-            
-            # RK4 Stage 4
-            body.position += k3_p * dt - k2_p * (dt / 2)
-            body.velocity += k3_v * dt - k2_v * (dt / 2)
-            self.calculate_forces()
-            k4_v = body.acceleration.copy()
-            k4_p = body.velocity.copy()
-            
-            # Combine all stages (weighted average)
-            body.position += (k1_p + 2*k2_p + 2*k3_p + k4_p) * (dt / 6) - k3_p * dt
-            body.velocity += (k1_v + 2*k2_v + 2*k3_v + k4_v) * (dt / 6) - k3_v * dt
-        
-        self.time += dt
+        self.integrator_last_substeps = 0
+        self.integrator_last_rejections = 0
+        self.integrator_last_min_step_forced = 0
+        self.integrator_last_worst_pos_error = 0.0
+        self.integrator_last_worst_vel_error = 0.0
+
+        dynamic_bodies = [
+            b for b in self.body
+            if not getattr(b, "scripted_orbit", False) and not getattr(b, "fixed", False)
+        ]
+
+        total_dt = float(dt)
+        if not dynamic_bodies:
+            self.time += total_dt
+            return
+
+        direction = 1.0 if total_dt >= 0.0 else -1.0
+        remaining = abs(total_dt)
+
+        max_step = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
+        min_step = max(float(getattr(self, "integrator_min_step", 0.01)), 1e-12)
+        pos_tol = max(float(getattr(self, "integrator_position_tolerance", 1.0)), 1e-12)
+        vel_tol = max(float(getattr(self, "integrator_velocity_tolerance", 0.001)), 1e-12)
+
+        t = float(self.time)
+
+        while remaining > 1e-12:
+            h = min(max_step, remaining) * direction
+
+            while True:
+                saved_states = [
+                    (b, b.position.copy(), b.velocity.copy())
+                    for b in dynamic_bodies
+                ]
+
+                accepted_all = True
+                worst_pos_err = 0.0
+                worst_vel_err = 0.0
+                new_states = []
+
+                for b, p0, v0 in saved_states:
+                    accepted, p_new, v_new, pos_err, vel_err = self._adaptive_rkn_step_body_state(
+                        b,
+                        p0,
+                        v0,
+                        t,
+                        h,
+                        pos_tol=pos_tol,
+                        vel_tol=vel_tol,
+                    )
+
+                    worst_pos_err = max(worst_pos_err, pos_err)
+                    worst_vel_err = max(worst_vel_err, vel_err)
+
+                    if not accepted and abs(h) > min_step:
+                        accepted_all = False
+                        break
+
+                    new_states.append((b, p_new, v_new))
+
+                self.integrator_last_worst_pos_error = max(self.integrator_last_worst_pos_error, worst_pos_err)
+                self.integrator_last_worst_vel_error = max(self.integrator_last_worst_vel_error, worst_vel_err)
+
+                if accepted_all:
+                    for b, p_new, v_new in new_states:
+                        b.position = p_new
+                        b.velocity = v_new
+
+                    self.integrator_last_substeps += 1
+                    t += h
+                    remaining -= abs(h)
+                    break
+
+                for b, p_old, v_old in saved_states:
+                    b.position = p_old
+                    b.velocity = v_old
+
+                self.integrator_last_rejections += 1
+                h *= 0.5
+
+                if abs(h) <= min_step:
+                    new_states = []
+                    for b, p0, v0 in saved_states:
+                        p_new, v_new = self._rkn4_step_body_state(b, p0, v0, t, h)
+                        new_states.append((b, p_new, v_new))
+
+                    for b, p_new, v_new in new_states:
+                        b.position = p_new
+                        b.velocity = v_new
+
+                    self.integrator_last_substeps += 1
+                    self.integrator_last_min_step_forced += 1
+                    t += h
+                    remaining -= abs(h)
+                    break
+
+        if getattr(self, "integrator_debug", False):
+            print(
+                "INTEGRATOR_DBG: "
+                f"dt={total_dt:.6g} "
+                f"substeps={self.integrator_last_substeps} "
+                f"rejections={self.integrator_last_rejections} "
+                f"forced={self.integrator_last_min_step_forced} "
+                f"worst_pos={self.integrator_last_worst_pos_error:.6e} "
+                f"worst_vel={self.integrator_last_worst_vel_error:.6e}"
+            )
+
+        self.time += total_dt
 
     def enable_epicycles(self, center):
         """epizykel-modus aktivieren mit wurzel in `center`.

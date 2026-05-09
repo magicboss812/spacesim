@@ -118,7 +118,7 @@ if NUMBA_AVAILABLE:
     @njit(cache=True, nogil=True, fastmath=True)
     def _rkn_acc_numba(x, y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G):
         ax, ay = _compute_acc_numba(x, y, body_x, body_y, body_m, body_fixed, G)
-        return ax - ref_ax, ay - ref_ay
+        return ax, ay
 
 
     @njit(cache=True, nogil=True, fastmath=True)
@@ -666,7 +666,7 @@ if NUMBA_AVAILABLE:
             G,
             use_time_dependent_bodies,
         )
-        return ax - ref_ax, ay - ref_ay
+        return ax, ay
 
 
     @njit(cache=True, nogil=True, fastmath=True)
@@ -1828,7 +1828,8 @@ class Predictor:
         self.rkn_last_failure_reason = ""
         self.strict_snapshot_matching = bool(strict_snapshot_matching)
         self.use_time_dependent_bodies = bool(use_time_dependent_bodies)
-        self.use_reference_acceleration_correction = bool(use_reference_acceleration_correction)
+        self.use_reference_acceleration_correction = False
+        self.debug_moving_sources = False
         self._trajectory_version = 0
         self._last_seen_px = None
         self._last_seen_py = None
@@ -2119,6 +2120,138 @@ class Predictor:
             return 1, float(ref.position.x), float(ref.position.y)
         except Exception:
             return 0, 0.0, 0.0
+
+    def _snapshot_body_index_by_names(self, snapshot, names):
+        body_names = snapshot.get("body_names", None) if snapshot is not None else None
+        if body_names is None:
+            return -1
+        wanted = set(names)
+        for i, name in enumerate(body_names):
+            key = str(name).strip().lower()
+            if key in wanted:
+                return int(i)
+        return -1
+
+    def _snapshot_body_position_at_local_t(self, snapshot, index, local_t):
+        if snapshot is None or index < 0:
+            return None
+        try:
+            if bool(snapshot.get("use_time_dependent_bodies", True)):
+                return _body_position_at_time_numba(
+                    int(index),
+                    float(local_t),
+                    snapshot["body_x"],
+                    snapshot["body_y"],
+                    snapshot["body_m"],
+                    snapshot["body_scripted"],
+                    snapshot["body_a"],
+                    snapshot["body_e"],
+                    snapshot["body_theta"],
+                    snapshot["body_arg"],
+                    snapshot["body_parent"],
+                    float(snapshot["G"]),
+                )
+            return float(snapshot["body_x"][index]), float(snapshot["body_y"][index])
+        except Exception:
+            return None
+
+    def _snapshot_body_velocity_at_local_t(self, snapshot, index, local_t):
+        dt = 1.0
+        p0 = self._snapshot_body_position_at_local_t(snapshot, index, float(local_t) - dt)
+        p1 = self._snapshot_body_position_at_local_t(snapshot, index, float(local_t) + dt)
+        if p0 is None or p1 is None:
+            return None
+        return (float(p1[0]) - float(p0[0])) / (2.0 * dt), (float(p1[1]) - float(p0[1])) / (2.0 * dt)
+
+    def _debug_moving_source_snapshot(self, snapshot):
+        if not getattr(self, "debug_moving_sources", False):
+            return
+        try:
+            labels = [
+                ("Earth", ("earth", "erde")),
+                ("Mun", ("mun", "moon", "mond")),
+            ]
+            parts = []
+            for label, names in labels:
+                idx = self._snapshot_body_index_by_names(snapshot, names)
+                if idx < 0:
+                    continue
+                samples = []
+                for t in (0.0, 3600.0, 7200.0):
+                    pos = self._snapshot_body_position_at_local_t(snapshot, idx, t)
+                    if pos is not None:
+                        samples.append(f"t=+{t:.0f} {label}=({pos[0]:.6e},{pos[1]:.6e})")
+                if samples:
+                    parts.append(" ".join(samples))
+            if parts:
+                print("PRED_SOURCE_DBG: " + " | ".join(parts), flush=True)
+        except Exception:
+            pass
+
+    def _debug_predictor_energy(self, snapshot, points):
+        if not getattr(self, "debug_moving_sources", False):
+            return
+        try:
+            if points is None:
+                return
+            if np is not None and isinstance(points, np.ndarray):
+                n = int(points.shape[0])
+                if n < 3:
+                    return
+                get_point = lambda i: (float(points[i, 0]), float(points[i, 1]), float(points[i, 2]))
+            else:
+                n = len(points)
+                if n < 3:
+                    return
+                get_point = lambda i: (float(points[i][0]), float(points[i][1]), float(points[i][2]))
+
+            earth_idx = self._snapshot_body_index_by_names(snapshot, ("earth", "erde"))
+            if earth_idx < 0:
+                return
+
+            base_t = float(snapshot.get("sim_time", 0.0))
+            earth_mass = float(snapshot["body_m"][earth_idx])
+            G = float(snapshot["G"])
+            indices = [0, n // 2, n - 1]
+            parts = []
+            for idx in indices:
+                px, py, abs_t = get_point(idx)
+                local_t = abs_t - base_t
+                earth_pos = self._snapshot_body_position_at_local_t(snapshot, earth_idx, local_t)
+                earth_vel = self._snapshot_body_velocity_at_local_t(snapshot, earth_idx, local_t)
+                if earth_pos is None or earth_vel is None:
+                    continue
+
+                if idx <= 0:
+                    px2, py2, t2 = get_point(1)
+                    dt = max(1e-9, t2 - abs_t)
+                    ship_vx = (px2 - px) / dt
+                    ship_vy = (py2 - py) / dt
+                elif idx >= n - 1:
+                    px0, py0, t0 = get_point(n - 2)
+                    dt = max(1e-9, abs_t - t0)
+                    ship_vx = (px - px0) / dt
+                    ship_vy = (py - py0) / dt
+                else:
+                    px0, py0, t0 = get_point(idx - 1)
+                    px2, py2, t2 = get_point(idx + 1)
+                    dt = max(1e-9, t2 - t0)
+                    ship_vx = (px2 - px0) / dt
+                    ship_vy = (py2 - py0) / dt
+
+                rel_x = px - float(earth_pos[0])
+                rel_y = py - float(earth_pos[1])
+                rel_vx = ship_vx - float(earth_vel[0])
+                rel_vy = ship_vy - float(earth_vel[1])
+                r = math.hypot(rel_x, rel_y)
+                if r <= 1e-9:
+                    continue
+                energy = 0.5 * (rel_vx * rel_vx + rel_vy * rel_vy) - G * earth_mass / r
+                parts.append(f"i={idx} t=+{local_t:.3f}s E={energy:.6e}")
+            if parts:
+                print("PRED_ENERGY_DBG: " + " | ".join(parts), flush=True)
+        except Exception:
+            pass
 
     def _points_count(self):
         if np is not None and isinstance(self.points, np.ndarray):
@@ -2707,7 +2840,7 @@ class Predictor:
     def _make_snapshot(self, ship, world, max_points):
         effective_precision = self._effective_precision()
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
-        physics_ref_enabled = int(ref_enabled) if self.use_reference_acceleration_correction else 0
+        physics_ref_enabled = 0
         ref_index = self._current_reference_body_index()
         snapshot = {
             "ship_px": float(ship.position.x),
@@ -2743,7 +2876,7 @@ class Predictor:
             "rkn_max_rejects": int(self.rkn_max_rejects),
             "strict_snapshot_matching": bool(self.strict_snapshot_matching),
             "use_time_dependent_bodies": bool(self.use_time_dependent_bodies),
-            "use_reference_acceleration_correction": bool(self.use_reference_acceleration_correction),
+            "use_reference_acceleration_correction": False,
         }
 
         try:
@@ -2778,6 +2911,9 @@ class Predictor:
         snapshot["body_theta"] = body_theta
         snapshot["body_arg"] = body_arg
         snapshot["body_parent"] = body_parent
+        snapshot["body_names"] = [str(getattr(b, "name", "")) for b in world.body]
+        if getattr(self, "debug_moving_sources", False):
+            self._debug_moving_source_snapshot(snapshot)
         return snapshot
 
     def _compute_from_snapshot(self, snapshot):
@@ -2848,7 +2984,7 @@ class Predictor:
                 snapshot["ship_py"],
                 snapshot["ship_vx"],
                 snapshot["ship_vy"],
-                int(snapshot.get("ref_enabled", 0)),
+                0,
                 float(snapshot.get("ref_px", 0.0)),
                 float(snapshot.get("ref_py", 0.0)),
                 snapshot["body_x"],
@@ -2906,7 +3042,7 @@ class Predictor:
                 snapshot["ship_py"],
                 snapshot["ship_vx"],
                 snapshot["ship_vy"],
-                int(snapshot.get("ref_enabled", 0)),
+                0,
                 float(snapshot.get("ref_px", 0.0)),
                 float(snapshot.get("ref_py", 0.0)),
                 snapshot["body_x"],
@@ -2931,7 +3067,7 @@ class Predictor:
                 snapshot["ship_py"],
                 snapshot["ship_vx"],
                 snapshot["ship_vy"],
-                int(snapshot.get("ref_enabled", 0)),
+                0,
                 float(snapshot.get("ref_px", 0.0)),
                 float(snapshot.get("ref_py", 0.0)),
                 snapshot["body_x"],
@@ -2967,6 +3103,9 @@ class Predictor:
                 points = pts
         except Exception:
             pass
+
+        if getattr(self, "debug_moving_sources", False):
+            self._debug_predictor_energy(snapshot, points)
 
         return {"points": points, "snapshot": snapshot, "computed": computed_count, "rkn_stats": rkn_stats}
 
@@ -3056,8 +3195,7 @@ class Predictor:
 
         body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
-        if not self.use_reference_acceleration_correction:
-            ref_enabled = 0
+        ref_enabled = 0
         max_new_points = int(missing_points) + 1  # include seed sample at index 0
         max_iters = int(max(10000, max_new_points * 100))
 

@@ -79,7 +79,8 @@ def main():
     predictor.strict_snapshot_matching = True
     predictor.use_time_dependent_bodies = True
     predictor.use_reference_acceleration_correction = False
-    predictor.set_integrator_quality("balanced")  # Use "rk4" to compare against the old fixed-step predictor.
+    predictor.set_integrator_quality("balanced")
+    predictor.debug_moving_sources = True  # Use "rk4" to compare against the old fixed-step predictor.
     print(f"PREDICTOR DEBUG: async_compute = {predictor.async_compute}")
     print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
 
