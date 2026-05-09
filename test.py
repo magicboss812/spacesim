@@ -89,6 +89,9 @@ def main():
 
     # OpenGL Renderer initialisieren
     renderer = Renderer(WIDTH, HEIGHT, enable_fxaa=True)
+    renderer.reference_trajectories_enabled = True
+    renderer.reference_trajectories_max_points = 300
+    renderer.reference_trajectories_sample_step_s = 300.0
     renderer.debug_predictor = False
     print("=== Renderer initialisiert ===")
     # predictor-darstellung bei gleichem zoom detaillierter machen

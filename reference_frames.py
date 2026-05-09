@@ -168,7 +168,7 @@ class IdentityReferenceFrame(ReferenceFrame):
 class _BodyEphemerisMixin:
     # zeitabfragen für gecachte ephemeris-positionen quantisieren, um predictor-rendering
     # glatt zu halten und teure pro-punkt-propagationsaufrufe zu vermeiden.
-    frame_time_quantization_s = 600.0
+    frame_time_quantization_s = 0
 
     def _init_ephemeris(self) -> None:
         self._epoch_time_s = 0.0
