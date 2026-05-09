@@ -198,6 +198,7 @@ def main():
 
     # Hauptschleife
     frame_count = 0
+    last_burn_ref_debug_t = -1.0e30
     while running:
         frame_dt = clock.tick(FPS) / 1000.0
 
@@ -279,7 +280,11 @@ def main():
         
         # Schiff-Steuerung
         keys = pygame.key.get_pressed()
+        reference_body = w.body[reference_index] if reference_index is not None else None
         if ship_control:
+            ship_control.last_thrust_direction = None
+            if ship is not None:
+                setattr(ship, "last_thrust_direction", None)
             # rotation: in echtzeit sanft
             ship_control.handle_rotation(keys, frame_dt)
             # schub: einmal pro echtem frame festen delta-v anwenden (unabhängig von sim_dt)
@@ -287,8 +292,13 @@ def main():
             if ship is not None:
                 old_v = ship.velocity.copy()
                 ship_control.apply_thrust(keys, frame_dt)
-                reference_body = w.body[reference_index] if reference_index is not None else None
                 burn_acc = ship_control.thrust_acc
+                directional_burn_pressed = (
+                    keys[pygame.K_i] or
+                    keys[pygame.K_k] or
+                    keys[pygame.K_l] or
+                    keys[pygame.K_j]
+                )
                 if reference_body is not None:
                     if keys[pygame.K_i]:
                         ship_control.apply_prograde_thrust(reference_body, burn_acc, frame_dt)
@@ -298,6 +308,16 @@ def main():
                         ship_control.apply_radial_out_thrust(reference_body, burn_acc, frame_dt)
                     if keys[pygame.K_j]:
                         ship_control.apply_radial_in_thrust(reference_body, burn_acc, frame_dt)
+                if directional_burn_pressed and (time.perf_counter() - last_burn_ref_debug_t) >= 0.5:
+                    rel_v = ship_control.relative_velocity_to(reference_body)
+                    rel_p = ship_control.relative_position_to(reference_body)
+                    ref_name = reference_body.name if reference_body is not None else 'None'
+                    print(
+                        f"BURN_REF: ref={ref_name} "
+                        f"rel_v=({rel_v.x:.3e},{rel_v.y:.3e}) "
+                        f"rel_p=({rel_p.x:.3e},{rel_p.y:.3e})"
+                    )
+                    last_burn_ref_debug_t = time.perf_counter()
                 dv = ship.velocity - old_v
                 if dv.x != 0.0 or dv.y != 0.0:
                     mag = math.hypot(dv.x, dv.y)
@@ -334,7 +354,6 @@ def main():
         # Rendern
 
         
-        reference_body = w.body[reference_index] if reference_index is not None else None
         renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time, reference_body=reference_body)
         frame_count += 1
         if max_frames > 0 and frame_count >= max_frames:
