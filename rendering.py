@@ -1703,43 +1703,89 @@ class Renderer:
         )
 
     def _prediction_scan_indices(self, raw_count, stats):
-        max_scan = int(max(1, self.prediction_render_max_raw_scan))
-        if raw_count <= max_scan:
-            stats['raw_stride'] = 1
-            stats['skipped_by_stride'] = 0
-            return list(range(raw_count))
+        try:
+            max_scan = int(self.prediction_render_max_raw_scan)
+        except Exception:
+            max_scan = 0
+        indices = self._iter_prediction_indices_evenly(raw_count, max_scan)
+        if len(indices) >= 2:
+            stride_est = max(1, int(round((int(raw_count) - 1) / float(len(indices) - 1))))
+        else:
+            stride_est = 1
+        stats['raw_stride'] = stride_est
+        stats['skipped_by_stride'] = max(0, int(raw_count) - len(indices))
+        return indices
 
-        stride = max(1, int(math.ceil(raw_count / max_scan)))
-        indices = list(range(0, raw_count, stride))
-        if not indices or indices[0] != 0:
-            indices.insert(0, 0)
-        if indices[-1] != raw_count - 1 and len(indices) < max_scan:
-            indices.append(raw_count - 1)
+    def _iter_prediction_indices_evenly(self, count, max_scan):
+        count = int(count)
+        max_scan = int(max_scan)
 
-        stats['raw_stride'] = stride
-        stats['skipped_by_stride'] = max(0, raw_count - len(indices))
+        if count <= 0:
+            return []
+
+        if max_scan <= 0 or count <= max_scan:
+            return list(range(count))
+
+        if max_scan == 1:
+            return [0]
+
+        step = (count - 1) / float(max_scan - 1)
+        indices = []
+        last = -1
+        for i in range(max_scan):
+            idx = int(round(i * step))
+            idx = max(0, min(count - 1, idx))
+            if idx != last:
+                indices.append(idx)
+                last = idx
         return indices
 
     def _cap_runs_by_screen_length(self, runs, max_screen_length_px, stats):
         if max_screen_length_px is None:
             return runs
         try:
-            remaining = float(max_screen_length_px)
+            max_length = float(max_screen_length_px)
         except Exception:
             return runs
-        if remaining <= 0.0:
+        if max_length <= 0.0:
             stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + sum(len(run) for run in runs)
             return []
 
-        capped = []
-        rejected = 0
+        run_lengths = []
+        total_length = 0.0
         for run in runs:
             if len(run) < 2:
+                run_lengths.append(0.0)
+                continue
+            length = 0.0
+            for i in range(len(run) - 1):
+                lx, ly = run[i]
+                sx, sy = run[i + 1]
+                dx = float(sx) - float(lx)
+                dy = float(sy) - float(ly)
+                length += math.sqrt(dx * dx + dy * dy)
+            run_lengths.append(length)
+            total_length += length
+
+        if total_length <= max_length:
+            return runs
+
+        capped = []
+        rejected = 0
+        for run, run_length in zip(runs, run_lengths):
+            if len(run) < 2 or run_length <= 1e-12:
                 rejected += len(run)
                 continue
+
+            remaining = max_length * (run_length / total_length)
+            if remaining <= 1e-12:
+                rejected += len(run)
+                continue
+
             current = [run[0]]
-            for sx, sy in run[1:]:
+            for i in range(len(run) - 1):
                 lx, ly = current[-1]
+                sx, sy = run[i + 1]
                 dx = float(sx) - float(lx)
                 dy = float(sy) - float(ly)
                 seg_len = math.sqrt(dx * dx + dy * dy)
@@ -1750,60 +1796,70 @@ class Renderer:
                 if seg_len > 1e-12 and remaining > 0.0:
                     frac = remaining / seg_len
                     current.append((lx + dx * frac, ly + dy * frac))
-                rejected += max(0, len(run) - len(current))
-                remaining = 0.0
                 break
             if len(current) >= 2:
                 capped.append(current)
-            if remaining <= 0.0:
-                break
+            rejected += max(0, len(run) - len(current))
 
         stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + rejected
         return capped
 
     def _cap_runs_by_point_budget(self, runs, max_points, stats):
-        max_points = max(2, int(max_points))
+        capped = self._limit_polyline_runs_evenly(runs, max_points)
+        rejected = max(0, sum(len(run) for run in runs) - sum(len(run) for run in capped))
+        stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + rejected
+        return capped
+
+    def _limit_polyline_runs_evenly(self, runs, max_points):
+        max_points = int(max_points)
+        if max_points <= 0:
+            return []
+
         total = sum(len(run) for run in runs)
         if total <= max_points:
             return runs
 
-        capped = []
-        remaining = max_points
-        rejected = 0
-        for run in runs:
-            if remaining < 2:
-                rejected += len(run)
-                break
-            if len(run) <= remaining:
-                capped.append(run)
-                remaining -= len(run)
-                continue
-            target = max(2, remaining)
-            step = (len(run) - 1) / (target - 1)
-            reduced = []
-            last_idx = -1
-            for i in range(target):
-                idx = int(round(i * step))
-                idx = max(0, min(len(run) - 1, idx))
-                if idx != last_idx:
-                    reduced.append(run[idx])
-                    last_idx = idx
-            if len(reduced) >= 2:
-                capped.append(reduced)
-            rejected += max(0, len(run) - len(reduced))
-            remaining = 0
-            break
+        limited = []
+        points_left = max_points
+        runs_left = len(runs)
 
-        stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + rejected
-        return capped
+        for run in runs:
+            if runs_left <= 0 or points_left <= 1:
+                break
+
+            budget = max(2, points_left // runs_left)
+            if len(run) <= budget:
+                limited.append(run)
+                points_left -= len(run)
+            else:
+                step = (len(run) - 1) / float(budget - 1)
+                sampled = []
+                last = -1
+                for i in range(budget):
+                    idx = int(round(i * step))
+                    idx = max(0, min(len(run) - 1, idx))
+                    if idx != last:
+                        sampled.append(run[idx])
+                        last = idx
+                if len(sampled) >= 2:
+                    limited.append(sampled)
+                points_left -= len(sampled)
+
+            runs_left -= 1
+
+        return limited
 
     def draw_prediction(self, path_points, camera, anchor_world=None, predictor=None):
 
         input_count = self._points_count(path_points)
         stats = {
             'raw_in': int(input_count),
+            'raw_points': int(input_count),
             'scanned': 0,
+            'scanned_points': 0,
             'visible': 0,
+            'runs': 0,
+            'draw_points': 0,
             'drawn': 0,
             'skipped_by_stride': 0,
             'clipped_or_rejected': 0,
@@ -1849,6 +1905,7 @@ class Renderer:
             sampled_runs = self._prediction_line_cache_points
             stats.update(dict(self._prediction_line_cache_stats))
             stats['raw_in'] = int(input_count)
+            stats['raw_points'] = int(input_count)
             stats['prepare_ms'] = (time.perf_counter() - prepare_t0) * 1000.0
             stats['cache_hit'] = True
         else:
@@ -1904,6 +1961,8 @@ class Renderer:
             self._draw_polyline(run, color=(1.0, 1.0, 1.0, 0.6), width=2.0)
         stats['draw_ms'] = (time.perf_counter() - draw_t0) * 1000.0
         stats['drawn'] = sum(len(run) for run in sampled_runs)
+        stats['draw_points'] = int(stats['drawn'])
+        stats['runs'] = len(sampled_runs)
         self.debug_info['prediction_points_drawn'] = int(stats['drawn'])
         self._last_prediction_render_stats = stats
 
@@ -2039,6 +2098,7 @@ class Renderer:
                 sx = half_w + (frame_x - camera_frame_xy[0]) * scale
                 sy = half_h - (frame_y - camera_frame_xy[1]) * scale
             stats['scanned'] = stats.get('scanned', 0) + 1
+            stats['scanned_points'] = stats.get('scanned_points', 0) + 1
 
             near_visible = self._is_on_screen(sx, sy, margin_px)
             if near_visible:
@@ -2053,16 +2113,15 @@ class Renderer:
                 break
 
         runs = self._build_clipped_polyline_runs(screen_points, margin_px)
+        stats['runs'] = len(runs)
+        stats['clipped_runs'] = len(runs)
         if not runs:
+            stats['draw_points'] = 0
             return []
 
         sampled_runs = []
-        remaining_budget = max(2, int(max_points))
 
         for run in runs:
-            if remaining_budget < 2:
-                break
-
             run = self._densify_screen_run(run, max_segment_px)
 
             run_starts_at_path_origin = (
@@ -2126,26 +2185,8 @@ class Renderer:
             else:
                 sampled = compact
 
-            if len(sampled) > remaining_budget:
-                target = max(2, remaining_budget)
-                step = (len(sampled) - 1) / (target - 1)
-                reduced = []
-                last_idx = -1
-                for i in range(target):
-                    idx = int(round(i * step))
-                    idx = max(0, min(len(sampled) - 1, idx))
-                    if idx != last_idx:
-                        reduced.append(sampled[idx])
-                        last_idx = idx
-                if reduced[0] != sampled[0]:
-                    reduced.insert(0, sampled[0])
-                if reduced[-1] != sampled[-1]:
-                    reduced.append(sampled[-1])
-                sampled = reduced
-
             if len(sampled) >= 2:
                 sampled_runs.append(sampled)
-                remaining_budget -= len(sampled)
 
         sampled_runs = self._cap_runs_by_screen_length(
             sampled_runs,
@@ -2154,6 +2195,8 @@ class Renderer:
         )
         sampled_runs = self._cap_runs_by_point_budget(sampled_runs, max_points, stats)
         stats['drawn'] = sum(len(run) for run in sampled_runs)
+        stats['draw_points'] = stats['drawn']
+        stats['runs'] = len(sampled_runs)
         return sampled_runs
 
     def _is_visible(self, screen_pos, radius):
