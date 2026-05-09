@@ -746,6 +746,101 @@ class Renderer:
             glVertex2f(float(sx), float(sy))
         glEnd()
 
+    def _clip_segment_to_rect(self, x0, y0, x1, y1, left, top, right, bottom):
+        """
+        Liang-Barsky clipping for screen-space line segments.
+        Returns (cx0, cy0, cx1, cy1) or None if the segment is fully outside.
+        Screen coordinates: x right, y down.
+        """
+        dx = x1 - x0
+        dy = y1 - y0
+
+        p = [-dx, dx, -dy, dy]
+        q = [x0 - left, right - x0, y0 - top, bottom - y0]
+
+        u1 = 0.0
+        u2 = 1.0
+
+        for pi, qi in zip(p, q):
+            if pi == 0.0:
+                if qi < 0.0:
+                    return None
+                continue
+
+            t = qi / pi
+
+            if pi < 0.0:
+                if t > u2:
+                    return None
+                if t > u1:
+                    u1 = t
+            else:
+                if t < u1:
+                    return None
+                if t < u2:
+                    u2 = t
+
+        return (
+            x0 + u1 * dx,
+            y0 + u1 * dy,
+            x0 + u2 * dx,
+            y0 + u2 * dy,
+        )
+
+    def _build_clipped_polyline_runs(self, screen_points, margin_px=128.0):
+        """
+        Converts one logical predictor polyline into multiple visible screen-space runs.
+        Important: preserve original segment topology. Never connect visible points
+        across an offscreen gap.
+        """
+        if screen_points is None or len(screen_points) < 2:
+            return []
+
+        left = -float(margin_px)
+        top = -float(margin_px)
+        right = float(self.width) + float(margin_px)
+        bottom = float(self.height) + float(margin_px)
+
+        runs = []
+        run = []
+
+        for i in range(len(screen_points) - 1):
+            x0, y0 = screen_points[i]
+            x1, y1 = screen_points[i + 1]
+
+            clipped = self._clip_segment_to_rect(
+                float(x0), float(y0),
+                float(x1), float(y1),
+                left, top, right, bottom
+            )
+
+            if clipped is None:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+                continue
+
+            cx0, cy0, cx1, cy1 = clipped
+
+            if not run:
+                run = [(cx0, cy0), (cx1, cy1)]
+                continue
+
+            last_x, last_y = run[-1]
+            gap_px = math.hypot(cx0 - last_x, cy0 - last_y)
+
+            if gap_px > 2.0:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = [(cx0, cy0), (cx1, cy1)]
+            else:
+                run.append((cx1, cy1))
+
+        if len(run) >= 2:
+            runs.append(run)
+
+        return runs
+
     def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density, light_intensity):
         """Zeichnet einen körper als shader-gesteuertes quad (scheibe + optional atmosphäre + glow)."""
         if self._body_program is None or self._body_quad_vbo is None:
@@ -1464,96 +1559,8 @@ class Renderer:
                 x1, y1 = x, y
                 c1 = outcode(x1, y1)
 
-    def _clip_segment_to_rect(self, x0, y0, x1, y1, xmin, xmax, ymin, ymax):
-        left = 1
-        right = 2
-        bottom = 4
-        top = 8
-
-        def outcode(x, y):
-            code = 0
-            if x < xmin:
-                code |= left
-            elif x > xmax:
-                code |= right
-            if y < ymin:
-                code |= bottom
-            elif y > ymax:
-                code |= top
-            return code
-
-        c0 = outcode(x0, y0)
-        c1 = outcode(x1, y1)
-
-        while True:
-            if (c0 | c1) == 0:
-                return x0, y0, x1, y1
-            if (c0 & c1) != 0:
-                return None
-
-            out = c0 if c0 != 0 else c1
-            if out & top:
-                if y1 == y0:
-                    return None
-                x = x0 + (x1 - x0) * (ymax - y0) / (y1 - y0)
-                y = ymax
-            elif out & bottom:
-                if y1 == y0:
-                    return None
-                x = x0 + (x1 - x0) * (ymin - y0) / (y1 - y0)
-                y = ymin
-            elif out & right:
-                if x1 == x0:
-                    return None
-                y = y0 + (y1 - y0) * (xmax - x0) / (x1 - x0)
-                x = xmax
-            else:
-                if x1 == x0:
-                    return None
-                y = y0 + (y1 - y0) * (xmin - x0) / (x1 - x0)
-                x = xmin
-
-            if out == c0:
-                x0, y0 = x, y
-                c0 = outcode(x0, y0)
-            else:
-                x1, y1 = x, y
-                c1 = outcode(x1, y1)
-
     def _visible_window_runs(self, screen_points, margin_px):
-        n = len(screen_points)
-        if n < 2:
-            return []
-
-        xmin = -margin_px
-        xmax = self.width + margin_px
-        ymin = -margin_px
-        ymax = self.height + margin_px
-
-        runs = []
-        current = []
-        for i in range(n - 1):
-            x0, y0 = screen_points[i]
-            x1, y1 = screen_points[i + 1]
-            clipped = self._clip_segment_to_rect(
-                x0, y0, x1, y1, xmin, xmax, ymin, ymax
-            )
-            if clipped is not None:
-                cx0, cy0, cx1, cy1 = clipped
-                if not current:
-                    current.append((cx0, cy0))
-                elif current[-1] != (cx0, cy0):
-                    current.append((cx0, cy0))
-                current.append((cx1, cy1))
-            else:
-                if len(current) >= 2:
-                    runs.append(current)
-                current = []
-
-        if len(current) >= 2:
-            runs.append(current)
-
-        return runs
+        return self._build_clipped_polyline_runs(screen_points, margin_px)
 
     def _effective_sampling_tolerance(self, camera):
         scale = abs(float(camera.scale))
@@ -1947,16 +1954,9 @@ class Renderer:
         except Exception:
             max_world_length = None
 
-        xmin = -margin_px
-        xmax = self.width + margin_px
-        ymin = -margin_px
-        ymax = self.height + margin_px
         prev_world = None
         prev_time = None
         world_accum = 0.0
-        prev_screen_all = None
-        prev_near_all = False
-        pending_offscreen = None
 
         for i in indices:
             point = path_points[i]
@@ -2008,48 +2008,15 @@ class Renderer:
             if near_visible:
                 stats['visible'] = stats.get('visible', 0) + 1
 
-            current_screen = (sx, sy)
-            if not screen_points:
-                screen_points.append(current_screen)
-            elif near_visible:
-                if pending_offscreen is not None and screen_points[-1] != pending_offscreen:
-                    screen_points.append(pending_offscreen)
-                screen_points.append(current_screen)
-                pending_offscreen = None
-            else:
-                crosses_view = False
-                if prev_screen_all is not None:
-                    crosses_view = self._segment_intersects_rect(
-                        prev_screen_all[0],
-                        prev_screen_all[1],
-                        sx,
-                        sy,
-                        xmin,
-                        xmax,
-                        ymin,
-                        ymax,
-                    )
-                if crosses_view:
-                    if prev_screen_all is not None and screen_points[-1] != prev_screen_all:
-                        screen_points.append(prev_screen_all)
-                    screen_points.append(current_screen)
-                    pending_offscreen = None
-                elif prev_near_all:
-                    screen_points.append(current_screen)
-                    pending_offscreen = None
-                else:
-                    pending_offscreen = current_screen
-                    stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + 1
+            screen_points.append((sx, sy))
 
             prev_world = (px, py)
             prev_time = sample_time
-            prev_screen_all = current_screen
-            prev_near_all = near_visible
             if stop_after_point:
                 stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + max(0, raw_count - i - 1)
                 break
 
-        runs = self._visible_window_runs(screen_points, margin_px)
+        runs = self._build_clipped_polyline_runs(screen_points, margin_px)
         if not runs:
             return []
 

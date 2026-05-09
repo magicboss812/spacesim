@@ -669,18 +669,6 @@ def _find_virtual_swap_child(primary_body, bodies: Sequence[object]):
 def resolve_plotting_camera_target_index(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> int:
     """Bestimmt, welchem körper die kamera für den ausgewählten plotting-frame folgen soll."""
     primary_index = int(frame_parameters.primary_index)
-    extension = int(frame_parameters.extension)
-    if extension != BODY_CENTRED_NON_ROTATING:
-        return primary_index
-
-    primary = _resolve_body(primary_index, bodies)
-    child = _find_virtual_swap_child(primary, bodies)
-    if child is None:
-        return primary_index
-
-    for idx, body in enumerate(bodies):
-        if body is child:
-            return idx
     return primary_index
 
 
@@ -689,9 +677,6 @@ def new_plotting_frame(frame_parameters: PlottingFrameParameters, bodies: Sequen
     primary = _resolve_body(frame_parameters.primary_index, bodies)
 
     if extension == BODY_CENTRED_NON_ROTATING:
-        candidate = _find_virtual_swap_child(primary, bodies)
-        if candidate is not None:
-            return VirtualBodyCentredNonRotatingReferenceFrame(primary, candidate)
         return BodyCentredNonRotatingReferenceFrame(primary)
 
     if extension == BODY_CENTRED_BODY_DIRECTION:
