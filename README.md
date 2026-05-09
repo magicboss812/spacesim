@@ -603,6 +603,7 @@ Das Spiel ist nun wirklich spielbar. Abgesehen von klaren Performance Problemen,
 Das Hierarchien-System erlaubt es die eigene Erstellung von weiteren Systemen oder die Änderung von Werten. Die `solar_system.json` Datei zeigt schon einigermaßen, wie Systeme erstellt werden können.
 
 **Wie man das Spiel startet:** 
+
 Requirements: `pip install pyopengl pyopengl_accelerate pygame astropy poliastro numba`
 
 Starten: `python test.py`
