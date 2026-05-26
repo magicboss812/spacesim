@@ -1,13 +1,27 @@
+# Entwicklung des Main-Branches seit April 2026
+
+Diese Datei dokumentiert die Entwicklung von **SpaceSim** seit dem Stand `04/2026`.  
+
+---
+
 ## Inhaltsverzeichnis
 
 1. [Ausgangslage im April 2026](#ausgangslage-im-april-2026)
+   - [Reference-Body-System](#reference-body-system)
+   - [Predictor](#predictor)
+   - [Snapshot-Konzept](#snapshot-konzept-des-predictors)
+   - [Screen-Culling](#screen-culling-im-april-stand)
+   - [Rendering](#rendering)
+   - [Schiffskontrolle](#schiffskontrolle)
+   - [Performance-Problem](#performance-problem)
 2. [Entwicklung nach dem April-Stand](#entwicklung-nach-dem-april-stand)
    - [Reference-Frame-System](#reference-frame-system)
    - [Orbit- und Bahndaten](#orbit--und-bahndaten)
    - [Zeitbasierte Predictor-Darstellung](#zeitbasierte-predictor-darstellung)
    - [Predictor und Integratoren](#predictor-und-integratoren)
+   - [Predictor RKN](#predictor-rkn)
    - [Rendering der Predictor-Linie](#rendering-der-predictor-linie)
-   - [Schiffskontrolle](#schiffskontrolle)
+   - [Schiffskontrolle](#schiffskontrolle-1)
    - [Weltphysik](#weltphysik)
 3. [Aktueller Entwicklungsstand](#aktueller-entwicklungsstand)
 4. [Aktuelle Probleme](#aktuelle-probleme)
@@ -17,11 +31,11 @@
 
 # Ausgangslage im April 2026
 
-Der Stand `04/2026` war ein wichtiger Zwischenstand, da dort mehrere Kernideen der Simulation bereits vorhanden waren. Viele dieser Systeme waren aber noch prototypisch, technisch instabil oder nicht vollständig miteinander verbunden.
+Der Stand `04/2026` war ein wichtiger Zwischenstand. Mehrere Kernideen der Simulation waren bereits vorhanden, aber viele Systeme waren noch prototypisch, technisch instabil oder nicht vollständig miteinander verbunden.
 
 ## Reference-Body-System
 
-Das **Reference-Body-System** war bereits als zentrale Idee vorhanden. Körper konnten als Bezugspunkt der Darstellung ausgewählt werden. Dadurch sollte es möglich werden, die Simulation nicht nur aus einem absoluten, sonnenzentrierten Blickwinkel zu betrachten, sondern auch relativ zu einem ausgewählten Planeten.
+Das **Reference-Body-System** war bereits als zentrale Idee vorhanden. Körper konnten als Bezugspunkt der Darstellung ausgewählt werden. Dadurch sollte die Simulation nicht nur aus einem absoluten, sonnenzentrierten Blickwinkel betrachtet werden, sondern auch relativ zu einem ausgewählten Planeten.
 
 Beispiel:
 
@@ -42,11 +56,14 @@ Das System war zu diesem Zeitpunkt jedoch nur teilweise funktional.
 - Die Energieerhaltung bzw. Bahndarstellung des Predictors war sichtbar ungenau.
 - Die dargestellte Umlaufbahn des Schiffs wich teilweise stark von der erwarteten Bahn ab.
 
+> [!WARNING]
+> Das Reference-Body-System war im April-Stand hauptsächlich eine visuelle Idee. Die Backend-Physik blieb weiterhin absolut, während die Darstellung bereits relativ zu einem gewählten Körper wirken sollte. Dadurch entstanden Konflikte zwischen Darstellung und Berechnung.
+
 ---
 
 ## Predictor
 
-Der Predictor wurde im April-Stand bereits auf einen **vierstufigen Runge-Kutta-Integrator (RK4)** umgestellt. Dadurch wurde die Flugbahn genauer als mit einfacheren Integrationsverfahren. Besonders die Energieerhaltung wurde dadurch verbessert.
+Der Predictor wurde im April-Stand bereits auf einen **vierstufigen Runge-Kutta-Integrator (RK4)** umgestellt. Dadurch wurde die Flugbahn genauer als mit einfacheren Integrationsverfahren. Besonders die Energieerhaltung wurde verbessert.
 
 ### Vorteile
 
@@ -84,6 +101,9 @@ Dadurch sollte verhindert werden, dass der Predictor pro Frame vollständig neu 
 ### Problem
 
 Das Snapshot-System stoppte nach einiger Zeit teilweise ohne erkennbaren Grund. Neue Punkte wurden dann nicht mehr korrekt am Ende ergänzt. Dadurch blieb der Predictor stehen oder zeigte veraltete Daten an.
+
+> [!CAUTION]
+> Das Snapshot-Konzept war als Performance-Optimierung sinnvoll, führte aber zu neuen Stabilitätsproblemen. Besonders kritisch war, dass alte und neue Predictor-Punkte nicht immer zuverlässig synchronisiert wurden.
 
 ---
 
@@ -160,6 +180,19 @@ Nach dem Stand `04/2026` verschob sich der Schwerpunkt der Entwicklung deutlich.
 
 Im April ging es vor allem darum, zentrale Funktionen überhaupt umzusetzen. Danach ging es zunehmend darum, diese Funktionen stabiler, genauer und performanter miteinander zu verbinden.
 
+## Entwicklungsstatus der wichtigsten Systeme
+
+- [x] Reference-Body-Idee als Kernkonzept eingebaut
+- [x] OpenGL-Rendering grundsätzlich integriert
+- [x] Predictor mit RK4 umgesetzt
+- [x] Predictor-Punkte mit Zeitinformationen erweitert
+- [x] Screen-Culling verbessert
+- [x] Thrust- und Velocity-Vektor visualisiert
+- [x] RKN-Verfahren für Predictor und Weltphysik untersucht bzw. eingebaut
+- [ ] Culling-Skalierung bei starkem Zoom vollständig lösen
+- [ ] Performance bei sehr langen Predictor-Linien vollständig stabilisieren
+- [ ] Energieabweichungen im Sonne-Erde-Mond-Testsystem genauer beheben
+
 ---
 
 ## Reference-Frame-System
@@ -173,7 +206,7 @@ Physik bleibt im absoluten Raum.
 Rendering transformiert die Darstellung in das gewählte Bezugssystem.
 ```
 
-Das System beeinflusst also vor allem die visuelle Darstellung:
+Das System beeinflusst vor allem die visuelle Darstellung:
 
 - Predictor-Linien
 - Körperpositionen im Bild
@@ -195,6 +228,9 @@ Das Reference-Frame-System sollte nicht nur Positionen verschieben, sondern lang
 - Thrust-Vector
 - Velocity-Vector
 - visuelle Bahnlinien
+
+> [!IMPORTANT]
+> Die zentrale Architekturentscheidung lautet: Die physikalische Simulation bleibt absolut. Das Reference-Frame-System verändert primär die Darstellung. Dadurch bleibt das Backend einfacher, während die visuelle Perspektive trotzdem flexibel wird.
 
 ---
 
@@ -264,8 +300,6 @@ Wenn die Erde als Bezugskörper gewählt wird, muss die Predictor-Linie relativ 
 
 Nach dem April-Stand wurde der Predictor mehrfach überarbeitet. Dabei ging es zunächst um Performance, später stärker um Genauigkeit und Stabilität.
 
----
-
 ### Rolling-System
 
 Anfangs lag der Fokus auf einem **Rolling-System**.
@@ -331,6 +365,9 @@ spätere Punkte hängen von früheren Punkten ab
 Wenn Leapfrog in einem frühen Abschnitt bereits ungenaue Ergebnisse liefert, kann RK4 später nicht mehr vollständig korrigieren, weil es auf diesen ungenauen Ausgangswerten aufbaut.
 
 Dadurch war ASPI als Ansatz zwar interessant, aber praktisch nicht stabil genug.
+
+> [!WARNING]
+> Der ASPI-Ansatz zeigte ein grundsätzliches Problem sequenzieller Integration: Ein später genaueres Verfahren kann Fehler aus früheren ungenauen Schritten nicht vollständig rückgängig machen.
 
 ---
 
@@ -414,8 +451,6 @@ Das Rendering stellte sich nach weiteren Tests als einer der wichtigsten Perform
 
 Anfangs wurde angenommen, dass vor allem die Berechnung des Predictors teuer sei. Später wurde klar, dass auch das Zeichnen der Linie selbst sehr viel Leistung kosten kann.
 
----
-
 ### Problem: zu viele Punkte im Bildschirmraum
 
 Predictor-Punkte wurden teilweise zu detailliert gerendert. Das heißt: Es wurden viele Punkte verarbeitet, obwohl der Unterschied auf dem Bildschirm kaum sichtbar war.
@@ -488,6 +523,9 @@ Das Culling scheint teilweise noch falsch skaliert zu sein. Besonders bei starke
 
 Das betrifft zum Beispiel Planetenorbits oder enge lokale Bahnabschnitte.
 
+> [!CAUTION]
+> Das Rendering ist deutlich stabiler als im April-Stand, aber das Culling ist noch nicht vollständig korrekt skaliert. Besonders bei starkem Zoom-in kann die Linie zu stark reduziert werden.
+
 ---
 
 ## Schiffskontrolle
@@ -531,7 +569,7 @@ Wenn der Predictor ein anderes Verfahren nutzt als die reale Bewegung des Schiff
 
 # Aktueller Entwicklungsstand
 
-**Wichtige Fortschritte**
+## Wichtige Fortschritte
 
 | Bereich | Fortschritt |
 |---|---|
@@ -542,11 +580,21 @@ Wenn der Predictor ein anderes Verfahren nutzt als die reale Bewegung des Schiff
 | Weltphysik | RKN-Verfahren für dynamische Körper |
 | Debugging | bessere Messbarkeit von Fehlern und Performance |
 
+## Status-Checkliste
+
+- [x] Spiel grundsätzlich startbar
+- [x] Schiff steuerbar
+- [x] Planeten-Transfers möglich
+- [x] Flybys möglich
+- [x] Reference Bodies visuell nutzbar
+- [x] Hierarchien über `solar_system.json` möglich
+- [ ] Performance bei langen Predictor-Linien vollständig stabil
+- [ ] Culling bei hohem Zoom vollständig korrekt
+- [ ] Energiefehler im Sonne-Erde-Mond-System vollständig geklärt
+
 ---
 
 # Aktuelle Probleme
-
----
 
 ## Integration
 
@@ -554,7 +602,7 @@ Die Integration ist bei Körpern, die um die Sonne kreisen, teilweise noch ungen
 
 Tests mit Sonne, Erde und Mond zeigten, dass das Schiff in der Nähe der Erde teilweise eine ungenaue Energieentwicklung aufweist.
 
-Mögliche Ursache:
+### Mögliche Ursachen
 
 - hohe Geschwindigkeit der Planeten
 - hohe relative Geschwindigkeit des Schiffs
@@ -570,7 +618,10 @@ Die Physik selbst bleibt im absoluten Raum.
 
 Das bedeutet: In einem geozentrischen Modus wirkt es für den Betrachter so, als würde sich die Sonne um die Erde bewegen. Im Backend bleibt die Sonne aber weiterhin der stationäre bzw. absolute Zentralkörper.
 
-Das ist bewusst einfacher als ein vollständig transformiertes physikalisches Bezugssystem, aber es erzeugt technische Grenzen.
+Das ist bewusst einfacher als ein vollständig transformiertes physikalisches Bezugssystem, erzeugt aber technische Grenzen.
+
+> [!IMPORTANT]
+> Das aktuelle Reference-System ist kein vollständig transformiertes physikalisches Bezugssystem. Es ist primär eine visuelle Transformation. Diese Trennung macht das Projekt einfacher umsetzbar, erklärt aber einige Abweichungen zwischen Darstellung und Backend-Physik.
 
 ---
 
@@ -596,12 +647,35 @@ Das deutet darauf hin, dass die Culling- oder Sampling-Skalierung noch nicht vol
 
 ---
 
-## Spielstatus
+# Spielstatus
 
-Das Spiel ist nun wirklich spielbar. Abgesehen von klaren Performance Problemen, sind Planeten-Transfers und Flybys möglich.
+Das Spiel ist inzwischen grundsätzlich spielbar. Abgesehen von klaren Performance-Problemen sind Planeten-Transfers und Flybys möglich.
 
-Das Hierarchien-System erlaubt es die eigene Erstellung von weiteren Systemen oder die Änderung von Werten. Die `solar_system.json` Datei zeigt schon einigermaßen, wie Systeme erstellt werden können.
+Das Hierarchien-System erlaubt es, eigene Systeme zu erstellen oder vorhandene Werte zu verändern. Die Datei `solar_system.json` zeigt bereits, wie solche Systeme aufgebaut werden können.
 
-**Wie man das Spiel startet:** 
-Requirements: `pip install pyopengl pyopengl_accelerate pygame astropy poliastro numba`
-Starten: `python test.py`
+## Startanleitung
+
+### Voraussetzungen
+
+```bash
+pip install pyopengl pyopengl_accelerate pygame astropy poliastro numba
+```
+
+### Start
+
+```bash
+python test.py
+```
+
+## Spielstatus-Checkliste
+
+- [x] Spiel kann gestartet werden
+- [x] Schiff kann beschleunigt und gesteuert werden
+- [x] Reference Bodies können visuell genutzt werden
+- [x] Velocity- und Thrust-Vektoren unterstützen die Orientierung
+- [x] Transfers und Flybys sind grundsätzlich möglich
+- [ ] Performance bei sehr langen Predictor-Linien ist noch nicht vollständig stabil
+- [ ] Integration in komplexeren Systemen muss weiter geprüft werden
+
+> [!NOTE]
+> Der aktuelle Stand ist spielbar, aber weiterhin ein Entwicklungsstand. Die wichtigsten Systeme funktionieren grundsätzlich, benötigen jedoch weitere Optimierung und genauere Tests.
