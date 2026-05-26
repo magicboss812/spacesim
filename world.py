@@ -16,6 +16,7 @@ class world:
         self.integrator_position_tolerance = 1.0
         self.integrator_velocity_tolerance = 0.001
         self.integrator_debug = False
+        self.integrator_mode = "rkn4"  # "rkn4" | "verlet"
         self.integrator_last_substeps = 0
         self.integrator_last_rejections = 0
         self.integrator_last_min_step_forced = 0
@@ -97,8 +98,11 @@ class world:
             parent_pos = body.is_moon_of.position if body.is_moon_of else None
             mu = self.G * body.is_moon_of.mass if body.is_moon_of else None
 
-            # ERST Position aktualisieren
+            # Advance position; record epoch so position_at_time can extrapolate
+            # correctly during the next update_dynamics call.
             body.position = body.orbit_position(dt, parent_pos, mu)
+            body._kepler_ref_theta = body.theta
+            body._kepler_ref_time = self.time
 
             # DANN prüfen ob Release nötig
             if self.should_release(body):
@@ -179,6 +183,14 @@ class world:
 
         return new_p, new_v
 
+    def _verlet_step_body_state(self, body, p0, v0, t0, h):
+        """Störmer-Verlet (KDK leapfrog) — 2nd-order symplectic RKN."""
+        a0 = self.acceleration_at(body, p0, t0)
+        p1 = p0 + v0 * h + a0 * (0.5 * h * h)
+        a1 = self.acceleration_at(body, p1, t0 + h)
+        v1 = v0 + (a0 + a1) * (0.5 * h)
+        return p1, v1
+
     def _adaptive_rkn_step_body_state(
         self,
         body,
@@ -199,11 +211,14 @@ class world:
         Returns:
             accepted, new_position, new_velocity, pos_error, vel_error
         """
-        p_full, v_full = self._rkn4_step_body_state(body, p0, v0, t0, h)
+        step_fn = self._verlet_step_body_state if getattr(self, "integrator_mode", "rkn4") == "verlet" \
+            else self._rkn4_step_body_state
+
+        p_full, v_full = step_fn(body, p0, v0, t0, h)
 
         half = h * 0.5
-        p_half, v_half = self._rkn4_step_body_state(body, p0, v0, t0, half)
-        p_two, v_two = self._rkn4_step_body_state(body, p_half, v_half, t0 + half, half)
+        p_half, v_half = step_fn(body, p0, v0, t0, half)
+        p_two, v_two = step_fn(body, p_half, v_half, t0 + half, half)
 
         pos_err = (p_two - p_full).magnitude()
         vel_err = (v_two - v_full).magnitude()
@@ -352,9 +367,11 @@ class world:
                 h *= 0.5
 
                 if abs(h) <= min_step:
+                    step_fn = self._verlet_step_body_state if getattr(self, "integrator_mode", "rkn4") == "verlet" \
+                        else self._rkn4_step_body_state
                     new_states = []
                     for b, p0, v0 in saved_states:
-                        p_new, v_new = self._rkn4_step_body_state(b, p0, v0, t, h)
+                        p_new, v_new = step_fn(b, p0, v0, t, h)
                         new_states.append((b, p_new, v_new))
 
                     for b, p_new, v_new in new_states:

@@ -193,8 +193,8 @@ def main():
 
     def update(world, dt):
         """Aktualisiert die Simulation."""
-        world.update_planets(dt)
         world.update_dynamics(dt)
+        world.update_planets(dt) 
 
 
     # Hauptschleife
