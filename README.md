@@ -1,5 +1,3 @@
----
-
 # Stand bis 31.05.2026
 
 > [!IMPORTANT]
