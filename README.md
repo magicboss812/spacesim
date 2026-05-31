@@ -1,681 +1,196 @@
-# Entwicklung des Main-Branches seit April 2026
+---
 
-Diese Datei dokumentiert die Entwicklung von **SpaceSim** seit dem Stand `04/2026`.  
+# Stand bis 31.05.2026
+
+> [!IMPORTANT]
+> Dieser Abschnitt dokumentiert alle wesentlichen Änderungen und Verbesserungen, die seit dem Commit vom **9. Mai 2026** bis zum **31. Mai 2026** in die Simulation eingeflossen sind.
 
 ---
 
 ## Inhaltsverzeichnis
 
-1. [Ausgangslage im April 2026](#ausgangslage-im-april-2026)
-   - [Reference-Body-System](#reference-body-system)
-   - [Predictor](#predictor)
-   - [Snapshot-Konzept](#snapshot-konzept-des-predictors)
-   - [Screen-Culling](#screen-culling-im-april-stand)
-   - [Rendering](#rendering)
-   - [Schiffskontrolle](#schiffskontrolle)
-   - [Performance-Problem](#performance-problem)
-2. [Entwicklung nach dem April-Stand](#entwicklung-nach-dem-april-stand)
-   - [Reference-Frame-System](#reference-frame-system)
-   - [Orbit- und Bahndaten](#orbit--und-bahndaten)
-   - [Zeitbasierte Predictor-Darstellung](#zeitbasierte-predictor-darstellung)
-   - [Predictor und Integratoren](#predictor-und-integratoren)
-   - [Predictor RKN](#predictor-rkn)
-   - [Rendering der Predictor-Linie](#rendering-der-predictor-linie)
-   - [Schiffskontrolle](#schiffskontrolle-1)
-   - [Weltphysik](#weltphysik)
-3. [Aktueller Entwicklungsstand](#aktueller-entwicklungsstand)
-4. [Aktuelle Probleme](#aktuelle-probleme)
-5. [Spielstatus](#spielstatus)
+- [Inhaltsverzeichnis](#inhaltsverzeichnis)
+- [Physik der Schiffsintegration](#physik-der-schiffsintegration)
+  - [Gravitationsquellen bewegen sich mit der Zeit](#gravitationsquellen-bewegen-sich-mit-der-zeit)
+  - [Auswirkung](#auswirkung)
+- [Adaptive Präzision im Predictor](#adaptive-präzision-im-predictor)
+  - [Schrittweite gekoppelt an den Abtastabstand](#schrittweite-gekoppelt-an-den-abtastabstand)
+- [Darstellung weit entfernter Körper](#darstellung-weit-entfernter-körper)
+  - [Icon-Swap bei kleinem Bildschirmradius](#icon-swap-bei-kleinem-bildschirmradius)
+  - [Auswirkung im Überblick](#auswirkung-im-überblick)
+- [Orbit-Spur-Culling](#orbit-spur-culling)
+- [Rendering-Pipeline der Vorhersagelinie](#rendering-pipeline-der-vorhersagelinie)
+  - [Reihenfolge: RDP vor Densify](#reihenfolge-rdp-vor-densify)
+- [Weitere Performance-Verbesserungen](#weitere-performance-verbesserungen)
+- [Gesamtbild](#gesamtbild)
+  - [Status-Checkliste (31.05.2026)](#status-checkliste-31052026)
 
 ---
 
-# Ausgangslage im April 2026
+## Physik der Schiffsintegration
 
-Der Stand `04/2026` war ein wichtiger Zwischenstand. Mehrere Kernideen der Simulation waren bereits vorhanden, aber viele Systeme waren noch prototypisch, technisch instabil oder nicht vollständig miteinander verbunden.
+### Gravitationsquellen bewegen sich mit der Zeit
 
-## Reference-Body-System
+Bisher verhielten sich alle Planeten und Monde aus Sicht des Integrators als **ruhende Massepunkte** — ihre Positionen wurden für den gesamten Integrationsschritt eingefroren, unabhängig davon, wie weit in der Zukunft der jeweilige Punkt liegt.
 
-Das **Reference-Body-System** war bereits als zentrale Idee vorhanden. Körper konnten als Bezugspunkt der Darstellung ausgewählt werden. Dadurch sollte die Simulation nicht nur aus einem absoluten, sonnenzentrierten Blickwinkel betrachtet werden, sondern auch relativ zu einem ausgewählten Planeten.
+Physikalisch bedeutete das: Das Gravitationsfeld, das auf das Schiff wirkt, gehörte zum Zeitpunkt $t_0$, nicht zum Zeitpunkt $t$.
 
-Beispiel:
-
-```text
-Erde als Reference Body
-→ Erde wirkt als Zentrum der Darstellung
-→ Sonne und andere Körper bewegen sich relativ zur Erde
 ```
-
-Das System war zu diesem Zeitpunkt jedoch nur teilweise funktional.
-
-### Probleme im April-Stand
-
-- Das System war noch stark prototypisch.
-- Der Predictor war noch nicht sauber auf Reference Bodies ausgelegt.
-- Dadurch entstanden visuelle Fehler und Konflikte in der Berechnung.
-- Die Predictor-Linie bildete noch keine korrekten Schleifen in körperzentrierten Bezugssystemen.
-- Die Energieerhaltung bzw. Bahndarstellung des Predictors war sichtbar ungenau.
-- Die dargestellte Umlaufbahn des Schiffs wich teilweise stark von der erwarteten Bahn ab.
-
-> [!WARNING]
-> Das Reference-Body-System war im April-Stand hauptsächlich eine visuelle Idee. Die Backend-Physik blieb weiterhin absolut, während die Darstellung bereits relativ zu einem gewählten Körper wirken sollte. Dadurch entstanden Konflikte zwischen Darstellung und Berechnung.
-
----
-
-## Predictor
-
-Der Predictor wurde im April-Stand bereits auf einen **vierstufigen Runge-Kutta-Integrator (RK4)** umgestellt. Dadurch wurde die Flugbahn genauer als mit einfacheren Integrationsverfahren. Besonders die Energieerhaltung wurde verbessert.
-
-### Vorteile
-
-- genauere Vorausberechnung der Flugbahn
-- bessere Energieerhaltung als vorher
-- stabilere Bahnkurven bei normalen Bedingungen
-
-### Nachteile
-
-- fixe Schrittweite
-- keine adaptive Fehlerkontrolle
-- hohe Kosten bei langen Zukunftsvorhersagen
-- schwache Behandlung weit in der Zukunft liegender Punkte
-- unzuverlässige Verbindung mit dem Reference-Body-System
-
----
-
-## Snapshot-Konzept des Predictors
-
-Um die Performance zu verbessern, wurde ein Snapshot-Konzept umgesetzt.
-
-Die Grundidee:
-
-```text
-Nicht jedes Frame 10.000 Punkte neu berechnen,
-sondern:
-1. komplette Linie einmal berechnen
-2. alte Punkte entfernen
-3. neue Punkte am Ende ergänzen
-4. vorhandene Punkte weiterverwenden
-```
-
-Dadurch sollte verhindert werden, dass der Predictor pro Frame vollständig neu berechnet werden muss.
-
-### Problem
-
-Das Snapshot-System stoppte nach einiger Zeit teilweise ohne erkennbaren Grund. Neue Punkte wurden dann nicht mehr korrekt am Ende ergänzt. Dadurch blieb der Predictor stehen oder zeigte veraltete Daten an.
-
-> [!CAUTION]
-> Das Snapshot-Konzept war als Performance-Optimierung sinnvoll, führte aber zu neuen Stabilitätsproblemen. Besonders kritisch war, dass alte und neue Predictor-Punkte nicht immer zuverlässig synchronisiert wurden.
-
----
-
-## Screen-Culling im April-Stand
-
-Das erste Screen-Culling entfernte Predictor-Punkte außerhalb des sichtbaren Bildschirms aus dem Rendering.
-
-Das war grundsätzlich sinnvoll, führte aber zu einem neuen Problem:
-
-```text
-sichtbarer Punkt unten rechts
-→ viele Punkte außerhalb des Bildschirms
-→ sichtbarer Punkt oben links
-```
-
-Der Renderer verband dann den letzten sichtbaren Punkt unten rechts direkt mit dem nächsten sichtbaren Punkt oben links. Dadurch entstand eine gerade Linie quer über den Bildschirm, obwohl die eigentliche Umlaufbahn außerhalb des sichtbaren Bereichs weiterverlief.
-
-### Beispiel
-
-```text
-eigentliche Bahn:
-sichtbar → außerhalb → außerhalb → sichtbar
-
-fehlerhafte Darstellung:
-sichtbar ───────────── sichtbar
-```
-
-Dieses Problem entstand, weil sichtbare Punkte weiterhin wie eine zusammenhängende Linie behandelt wurden, obwohl unsichtbare Abschnitte dazwischenlagen.
-
----
-
-## Rendering
-
-Im April-Stand wurde das Rendering bereits auf **OpenGL** umgestellt. Außerdem wurden Orbit-Lines ergänzt.
-
-### Bereits vorhandene Funktionen
-
-- OpenGL-basierte Darstellung
-- erste GPU-orientierte Struktur
-- Orbit-Lines
-- farbliche Anpassung der Orbit-Lines an die jeweiligen Körper
-- hierarchiekompatible Darstellung von Bahnen
-
-### Probleme
-
-- Die OpenGL-Umstellung war noch nicht vollständig funktional ausgenutzt.
-- Viele Berechnungen liefen weiterhin auf der CPU.
-- Der Main-Thread wurde stark belastet.
-- Das Rendering war besonders bei langen Predictor-Linien ein Performance-Problem.
-
----
-
-## Schiffskontrolle
-
-Die Schiffskontrolle konnte bereits den Geschwindigkeitsvektor des Schiffs verändern. Die Beschleunigung wurde durch einen Thrust-Vector bestimmt, der sich aus Richtung und Stärke des Schubs ergab.
-
-### Problem
-
-Die Schiffskontrolle war noch nicht ausreichend mit dem Reference-Body-System verbunden. Dadurch konnte die visuelle Ausrichtung des Schubs von der erwarteten Richtung im gewählten Bezugssystem abweichen.
-
----
-
-## Performance-Problem
-
-Ein großes Problem war die Performance bei aktivem Reference-System, besonders wenn der erste Körper, also ein absoluter Elternkörper wie die Sonne, als Reference Body ausgewählt wurde.
-
-Das führte zu hoher Auslastung, weil viele Elemente relativ zu diesem Bezugssystem transformiert oder neu berechnet werden mussten.
-
----
-
-# Entwicklung nach dem April-Stand
-
-Nach dem Stand `04/2026` verschob sich der Schwerpunkt der Entwicklung deutlich.
-
-Im April ging es vor allem darum, zentrale Funktionen überhaupt umzusetzen. Danach ging es zunehmend darum, diese Funktionen stabiler, genauer und performanter miteinander zu verbinden.
-
-## Entwicklungsstatus der wichtigsten Systeme
-
-- [x] Reference-Body-Idee als Kernkonzept eingebaut
-- [x] OpenGL-Rendering grundsätzlich integriert
-- [x] Predictor mit RK4 umgesetzt
-- [x] Predictor-Punkte mit Zeitinformationen erweitert
-- [x] Screen-Culling verbessert
-- [x] Thrust- und Velocity-Vektor visualisiert
-- [x] RKN-Verfahren für Predictor und Weltphysik untersucht bzw. eingebaut
-- [ ] Culling-Skalierung bei starkem Zoom vollständig lösen
-- [ ] Performance bei sehr langen Predictor-Linien vollständig stabilisieren
-- [ ] Energieabweichungen im Sonne-Erde-Mond-Testsystem genauer beheben
-
----
-
-## Reference-Frame-System
-
-Das Reference-System wurde nach dem April-Stand stärker als eigenständiges **Plotting-Frame-System** verstanden.
-
-Dabei gilt:
-
-```text
-Physik bleibt im absoluten Raum.
-Rendering transformiert die Darstellung in das gewählte Bezugssystem.
-```
-
-Das System beeinflusst vor allem die visuelle Darstellung:
-
-- Predictor-Linien
-- Körperpositionen im Bild
-- Text- und HUD-Elemente
-- Vektoren
-- relative Geschwindigkeiten
-- Orientierung des Schiffs
-
-Die Idee wurde unter anderem von der KSP-Modifikation **Principia** inspiriert. Dort werden ebenfalls verschiedene Bezugssysteme für die Darstellung orbitaler Bewegungen genutzt.
-
-### Ziel
-
-Das Reference-Frame-System sollte nicht nur Positionen verschieben, sondern langfristig auch weitere Größen sinnvoll transformieren:
-
-- Position
-- Orientierung
-- Geschwindigkeit
-- Predictor-Darstellung
-- Thrust-Vector
-- Velocity-Vector
-- visuelle Bahnlinien
-
-> [!IMPORTANT]
-> Die zentrale Architekturentscheidung lautet: Die physikalische Simulation bleibt absolut. Das Reference-Frame-System verändert primär die Darstellung. Dadurch bleibt das Backend einfacher, während die visuelle Perspektive trotzdem flexibel wird.
-
----
-
-## Orbit- und Bahndaten
-
-Auch die Bahndarstellung wurde erweitert. Besonders wichtig war das **Argument der Periapsis**.
-
-Damit kann eine Umlaufbahn nicht nur durch Größe und Exzentrizität beschrieben werden, sondern auch durch ihre Ausrichtung.
-
-### Warum war das wichtig?
-
-Für Reference Frames und Predictor-Darstellung reicht eine einfache Umlaufbahn um den Ursprung nicht aus. Bahnen müssen korrekt gedreht werden können.
-
-Vereinfacht:
-
-```text
 vorher:
-Orbit liegt immer in Standardausrichtung
+  F_Schiff(t) = G·M / |r_Schiff(t) - r_Planet(t₀)|²
 
-nachher:
-Orbit kann durch Argument der Periapsis gedreht werden
+jetzt:
+  F_Schiff(t) = G·M / |r_Schiff(t) - r_Planet(t)|²
 ```
 
-Dadurch lassen sich elliptische Bahnen realistischer und flexibler darstellen.
-
----
-
-## Zeitbasierte Predictor-Darstellung
-
-Ein zentraler Fortschritt war die Erweiterung der Predictor-Punkte um Zeitinformationen.
-
-Vorher enthielt ein Predictor-Punkt hauptsächlich:
-
-```text
-x, y
-```
-
-Später wurde daraus:
-
-```text
-x, y, t
-```
-
-Das bedeutet: Jeder Predictor-Punkt enthält nicht nur seine Position, sondern auch den zukünftigen Zeitpunkt, zu dem diese Position erreicht wird.
-
-### Warum ist das wichtig?
-
-Für einen Reference Body reicht es nicht, nur die zukünftige Position des Schiffs zu kennen. Auch die zukünftige Position des Bezugskörpers muss bekannt sein.
-
-Korrekt ist:
-
-```text
-Schiff(t) - Erde(t)
-```
-
-Problematisch ist:
-
-```text
-Schiff(t) - Erde(jetzt)
-```
-
-Wenn die Erde als Bezugskörper gewählt wird, muss die Predictor-Linie relativ zur zukünftigen Erdposition dargestellt werden. Sonst entstehen falsche Bahnen oder falsch gedrehte Schleifen.
-
----
-
-## Predictor und Integratoren
-
-Nach dem April-Stand wurde der Predictor mehrfach überarbeitet. Dabei ging es zunächst um Performance, später stärker um Genauigkeit und Stabilität.
-
-### Rolling-System
-
-Anfangs lag der Fokus auf einem **Rolling-System**.
-
-Die Idee:
-
-```text
-alte Predictor-Punkte entfernen
-neue Punkte am Ende ergänzen
-bestehende Punkte weiterverwenden
-```
-
-Dadurch sollte die Performance deutlich verbessert werden, weil nicht die gesamte Predictor-Linie ständig neu berechnet werden muss.
-
-### Ergebnis
-
-Die Resultate waren widersprüchlich.
-
-- Die erwartete Performance-Verbesserung war nicht eindeutig.
-- Das System wurde komplexer.
-- Es entstanden neue Fehler durch veraltete oder nicht korrekt ergänzte Punkte.
-- Es wurde unklar, ob die Berechnung selbst oder das Rendering der eigentliche Engpass war.
-
-Diese Phase war trotzdem wichtig, weil sie gezeigt hat, dass das Performance-Problem nicht nur im Predictor selbst lag.
-
----
-
-### ASPI-Idee
-
-Danach wurde die Idee eines adaptiven Integrators verfolgt: **ASPI**.
-
-ASPI steht hier für:
-
-```text
-Adaptive Symplectic Predictor Integrator
-```
-
-Die Grundidee war eine Kombination aus:
-
-- Leapfrog für große Distanzen
-- RK4 für Bereiche nahe an massereichen Körpern
-
-### Gedanke
-
-```text
-weit weg von Körpern:
-→ geringere Genauigkeit reicht aus
-→ Leapfrog spart Rechenleistung
-
-nah an Körpern:
-→ hohe Genauigkeit nötig
-→ RK4 wird verwendet
-```
-
-### Problem
-
-Der Übergang zwischen Leapfrog und RK4 war nicht glatt genug. Außerdem ist die Integration sequenziell. Das bedeutet:
-
-```text
-spätere Punkte hängen von früheren Punkten ab
-```
-
-Wenn Leapfrog in einem frühen Abschnitt bereits ungenaue Ergebnisse liefert, kann RK4 später nicht mehr vollständig korrigieren, weil es auf diesen ungenauen Ausgangswerten aufbaut.
-
-Dadurch war ASPI als Ansatz zwar interessant, aber praktisch nicht stabil genug.
-
-> [!WARNING]
-> Der ASPI-Ansatz zeigte ein grundsätzliches Problem sequenzieller Integration: Ein später genaueres Verfahren kann Fehler aus früheren ungenauen Schritten nicht vollständig rückgängig machen.
-
----
-
-### Wechsel auf RK45
-
-Ein Wechsel auf **RK45** war deshalb sinnvoller.
-
-RK45 arbeitet ähnlich wie RK4, besitzt aber eine eingebaute Fehlerabschätzung. Dabei werden Ergebnisse unterschiedlicher Ordnung verglichen, um den lokalen Fehler zu bestimmen.
-
-### Vorteile
-
-- adaptive Schrittweite
-- bessere Fehlerkontrolle
-- höhere Genauigkeit in kritischen Bereichen
-- größere Schritte in einfachen Bereichen
-- bessere Balance zwischen Performance und Genauigkeit
-
-Vereinfacht:
-
-```text
-Fehler klein
-→ größerer Zeitschritt möglich
-
-Fehler groß
-→ kleinerer Zeitschritt nötig
-```
-
-Dadurch wurde der Predictor deutlich stabiler.
-
----
-
-### Zeitabhängige Körperpositionen im Predictor
-
-Ein weiteres Problem war die ungenaue Prediction im Reference-Frame-System. Die Umlaufbahn schien sich im Verlauf teilweise zu drehen oder hatte keinen sauberen Bezug zum Reference Body.
-
-Die Lösung war, zukünftige Körperpositionen in die Predictor-Darstellung einzubeziehen.
-
-Dadurch konnte der Predictor nicht nur die zukünftige Position des Schiffs darstellen, sondern auch die zukünftige Bewegung des Bezugskörpers berücksichtigen.
-
-Das löste das zentrale Problem:
-
-```text
-Predictor relativ zu einem bewegten Reference Body
-```
-
----
-
-## Predictor RKN
-
-Später wurde zusätzlich das **Runge-Kutta-Nyström-Verfahren (RKN)** untersucht und eingebaut.
-
-Dieses Verfahren eignet sich besonders für Systeme, bei denen die Beschleunigung direkt von Position und Zeit abhängt. Genau das ist bei orbitaler Bewegung der Fall.
-
-### Warum RKN?
-
-Die Bewegung in der Simulation folgt im Kern:
-
-```text
-Position → Beschleunigung → neue Geschwindigkeit → neue Position
-```
-
-RKN-Verfahren sind für solche Gleichungen oft effizienter als allgemeine RK-Verfahren, weil sie direkt mit Gleichungen zweiter Ordnung arbeiten.
-
-### Vorteile
-
-- effizienter für gravitative Bewegung
-- bessere Kontrolle über Positions- und Geschwindigkeitsfehler
-- sinnvoll für enge Umlaufbahnen
-- adaptive Zeitschritte möglich
-- bessere Stabilität bei kritischen Bahnbereichen
-
-### Bedeutung für den Predictor
-
-Der Predictor kann dadurch genauer und kontrollierter berechnen, wann kleinere Schritte nötig sind. Besonders bei engen Umlaufbahnen um Planeten ist das wichtig, weil dort kleine Fehler schnell sichtbar werden.
-
----
-
-## Rendering der Predictor-Linie
-
-Das Rendering stellte sich nach weiteren Tests als einer der wichtigsten Performance-Engpässe heraus.
-
-Anfangs wurde angenommen, dass vor allem die Berechnung des Predictors teuer sei. Später wurde klar, dass auch das Zeichnen der Linie selbst sehr viel Leistung kosten kann.
-
-### Problem: zu viele Punkte im Bildschirmraum
-
-Predictor-Punkte wurden teilweise zu detailliert gerendert. Das heißt: Es wurden viele Punkte verarbeitet, obwohl der Unterschied auf dem Bildschirm kaum sichtbar war.
-
-Problematisch war dabei die Trennung zwischen:
-
-```text
-Weltkoordinaten
-```
-
-und
-
-```text
-Bildschirmkoordinaten
-```
-
-Eine Predictor-Linie kann in Weltkoordinaten extrem lang sein, aber auf dem Bildschirm nur wenige Pixel einnehmen. Umgekehrt kann ein kleiner Weltabschnitt bei starkem Zoom sehr groß erscheinen.
-
-Deshalb muss das Rendering abhängig vom Bildschirmraum arbeiten, nicht nur abhängig von Weltmetern.
-
----
-
-### Verbesserung: sichtbare Abschnitte statt einer Punktliste
-
-Das Screen-Culling wurde erweitert.
-
-Vorher wurden Punkte außerhalb des Bildschirms entfernt. Das führte aber zu falschen Verbindungen zwischen getrennten sichtbaren Abschnitten.
-
-Nachher wird die Linie stärker in sichtbare Teilabschnitte getrennt.
-
-```text
-vorher:
-sichtbarer Punkt → unsichtbare Punkte → sichtbarer Punkt
-= direkte Verbindung
-
-nachher:
-sichtbarer Abschnitt 1
-sichtbarer Abschnitt 2
-= getrennte Linien
-```
-
-Dadurch wurden die falschen Linien quer über den Bildschirm weitgehend beseitigt.
-
----
-
-### Verbesserung: begrenzte Punktanzahl beim Rendering
-
-Der Renderer verarbeitet nicht mehr automatisch alle Predictor-Punkte. Stattdessen wird kontrolliert:
-
-- wie viele Rohpunkte existieren
-- wie viele Punkte geprüft werden
-- wie viele Punkte sichtbar sind
-- wie viele Punkte tatsächlich gezeichnet werden
-
-Dadurch wird verhindert, dass eine sehr lange Predictor-Linie das Rendering unnötig stark belastet.
-
----
-
-### Verbesserung: Zwischenspeicherung der gerenderten Linie
-
-Die vorbereitete Predictor-Linie wird zwischengespeichert. Wenn sich Kamera, Zoom oder Predictor-Daten nicht wesentlich ändern, muss die Linie nicht jedes Frame komplett neu vorbereitet werden.
-
-Das reduziert die CPU-Last.
-
----
-
-### Weiterhin bestehendes Problem
-
-Das Culling scheint teilweise noch falsch skaliert zu sein. Besonders bei starkem Zoom-in werden offenbar zu viele Punkte entfernt, obwohl auf dem Bildschirm eigentlich genug Platz für eine detailliertere Darstellung vorhanden wäre.
-
-Das betrifft zum Beispiel Planetenorbits oder enge lokale Bahnabschnitte.
-
-> [!CAUTION]
-> Das Rendering ist deutlich stabiler als im April-Stand, aber das Culling ist noch nicht vollständig korrekt skaliert. Besonders bei starkem Zoom-in kann die Linie zu stark reduziert werden.
-
----
-
-## Schiffskontrolle
-
-Die Schiffskontrolle war im April-Stand noch kaum auf das Reference-Frame-System ausgelegt.
-
-Später wurde die Ausrichtung des Thrust-Vectors besser an den gewählten Reference Body angepasst.
-
-### Verbesserung
-
-Der Thrust-Vector wird nun passend zum Reference Frame rotiert. Dadurch wirkt die Beschleunigung in der erwarteten visuellen Richtung auf den Velocity-Vektor.
-
-Das ist wichtig, weil der Spieler das Schiff aus dem aktuell gewählten Bezugssystem steuert. Wenn Darstellung und Schubrichtung nicht zusammenpassen, fühlt sich die Steuerung falsch an.
-
-### Zusätzliche Visualisierung
-
-Im Zuge der Fehlerbehebung wurden auch visuelle Hilfen ergänzt:
-
-- Velocity-Vector
-- Thrust-Vector
-- Anzeige der relativen Geschwindigkeit
-- Geschwindigkeitsanzeige unter dem Schiff
-
-Dadurch sind Transfers bereits besser nachvollziehbar und teilweise praktisch möglich.
-
----
-
-## Weltphysik
-
-Um die echte Bewegung des Schiffs besser mit dem Predictor vergleichen zu können, wurde auch die Weltphysik angepasst.
-
-Das RK4-Verfahren für dynamische Körper, insbesondere das Schiff, wurde durch ein RKN-Verfahren ersetzt.
-
-### Ziel
-
-Predictor und echte Simulation sollen numerisch besser vergleichbar sein.
-
-Wenn der Predictor ein anderes Verfahren nutzt als die reale Bewegung des Schiffs, können Abweichungen entstehen, die nicht aus der Physik, sondern aus unterschiedlichen Integrationsmethoden stammen.
-
----
-
-# Aktueller Entwicklungsstand
-
-## Wichtige Fortschritte
-
-| Bereich | Fortschritt |
-|---|---|
-| Reference Frames | stärkeres eigenes Transformationssystem |
-| Predictor | zeitbasierte Punkte und adaptive Integration |
-| Rendering | bessere Culling-Logik und Punktbegrenzung |
-| Schiffskontrolle | bessere Ausrichtung im Reference Frame |
-| Weltphysik | RKN-Verfahren für dynamische Körper |
-| Debugging | bessere Messbarkeit von Fehlern und Performance |
-
-## Status-Checkliste
-
-- [x] Spiel grundsätzlich startbar
-- [x] Schiff steuerbar
-- [x] Planeten-Transfers möglich
-- [x] Flybys möglich
-- [x] Reference Bodies visuell nutzbar
-- [x] Hierarchien über `solar_system.json` möglich
-- [ ] Performance bei langen Predictor-Linien vollständig stabil
-- [ ] Culling bei hohem Zoom vollständig korrekt
-- [ ] Energiefehler im Sonne-Erde-Mond-System vollständig geklärt
-
----
-
-# Aktuelle Probleme
-
-## Integration
-
-Die Integration ist bei Körpern, die um die Sonne kreisen, teilweise noch ungenau. Das Problem ist nicht immer gravierend, aber sichtbar.
-
-Tests mit Sonne, Erde und Mond zeigten, dass das Schiff in der Nähe der Erde teilweise eine ungenaue Energieentwicklung aufweist.
-
-### Mögliche Ursachen
-
-- hohe Geschwindigkeit der Planeten
-- hohe relative Geschwindigkeit des Schiffs
-- komplexe Überlagerung von Sonnen- und Erdgravitation
-- Unterschiede zwischen visueller Reference-Frame-Darstellung und absoluter Backend-Physik
-
-Wichtig ist:
-
-```text
-Das Reference-System ist derzeit hauptsächlich visuell.
-Die Physik selbst bleibt im absoluten Raum.
-```
-
-Das bedeutet: In einem geozentrischen Modus wirkt es für den Betrachter so, als würde sich die Sonne um die Erde bewegen. Im Backend bleibt die Sonne aber weiterhin der stationäre bzw. absolute Zentralkörper.
-
-Das ist bewusst einfacher als ein vollständig transformiertes physikalisches Bezugssystem, erzeugt aber technische Grenzen.
-
-> [!IMPORTANT]
-> Das aktuelle Reference-System ist kein vollständig transformiertes physikalisches Bezugssystem. Es ist primär eine visuelle Transformation. Diese Trennung macht das Projekt einfacher umsetzbar, erklärt aber einige Abweichungen zwischen Darstellung und Backend-Physik.
-
----
-
-## Performance
-
-Die Performance wurde verbessert, ist aber noch nicht vollständig gelöst.
-
-Besonders die Länge des Predictors in Weltkoordinaten beeinflusst weiterhin die Leistung. Das gilt auch dann, wenn nicht mehr direkt mehr Punkte in `predictor.py` erzeugt werden.
-
-Das zeigt, dass weiterhin nicht nur die Berechnung, sondern auch die Verarbeitung und Darstellung langer Linien eine Rolle spielt.
-
----
-
-## Rendering-Culling
-
-Das Screen-Culling funktioniert besser als vorher, ist aber noch nicht perfekt.
-
-### Noch bestehendes Problem
-
-Bei starkem Zoom-in werden teilweise zu viele Predictor-Punkte entfernt. Dadurch können Planetenorbits oder enge Bahnabschnitte weniger detailliert erscheinen, als es der verfügbare Bildschirmplatz eigentlich erlauben würde.
-
-Das deutet darauf hin, dass die Culling- oder Sampling-Skalierung noch nicht vollständig korrekt an den Kamerazoom angepasst ist.
-
----
-
-# Spielstatus
-
-Das Spiel ist inzwischen grundsätzlich spielbar. Abgesehen von klaren Performance-Problemen sind Planeten-Transfers und Flybys möglich.
-
-Das Hierarchien-System erlaubt es, eigene Systeme zu erstellen oder vorhandene Werte zu verändern. Die Datei `solar_system.json` zeigt bereits, wie solche Systeme aufgebaut werden können.
-
-## Startanleitung
-
-### Voraussetzungen
-
-```bash
-pip install pyopengl pyopengl_accelerate pygame astropy poliastro numba
-```
-
-### Start
-
-```bash
-python test.py
-```
-
-## Spielstatus-Checkliste
-
-- [x] Spiel kann gestartet werden
-- [x] Schiff kann beschleunigt und gesteuert werden
-- [x] Reference Bodies können visuell genutzt werden
-- [x] Velocity- und Thrust-Vektoren unterstützen die Orientierung
-- [x] Transfers und Flybys sind grundsätzlich möglich
-- [ ] Performance bei sehr langen Predictor-Linien ist noch nicht vollständig stabil
-- [ ] Integration in komplexeren Systemen muss weiter geprüft werden
+Planeten und Monde extrapolieren ihre eigene Kepler-Position jetzt **analytisch für jeden beliebigen Zeitpunkt**, ohne den Simulationszustand zu verändern. Der Epoch-Bookmark (`_kepler_ref_time`, `_kepler_ref_theta`) wird nach jedem Weltschritt gesetzt, sodass die Extrapolation immer vom aktuell bestätigten Bahnzustand ausgeht.
 
 > [!NOTE]
-> Der aktuelle Stand ist spielbar, aber weiterhin ein Entwicklungsstand. Die wichtigsten Systeme funktionieren grundsätzlich, benötigen jedoch weitere Optimierung und genauere Tests.
+> Diese Änderung betrifft ausschließlich die Präzision der Schiffsbewegung über längere Zeiträume. Die Planetenbahnen selbst bleiben unverändert skriptgesteuert.
+
+### Auswirkung
+
+| Szenario | Vorher | Jetzt |
+|---|---|---|
+| Kurzmanöver (Sekunden) | kein sichtbarer Unterschied | kein sichtbarer Unterschied |
+| Langer Transfer (Stunden–Tage) | Planetenpositionen statisch eingefroren | Gravitationsfeld korrekt zeitabhängig |
+| Flyby an schnell bewegtem Körper | Kraftrichtung leicht falsch | Kraftrichtung zur korrekten Körperposition |
+
+---
+
+## Adaptive Präzision im Predictor
+
+### Schrittweite gekoppelt an den Abtastabstand
+
+Der Predictor berechnet eine Flugbahn bis weit in die Zukunft. Nahe Punkte (wenige Minuten) brauchen hohe Genauigkeit; Punkte, die Stunden oder Tage entfernt liegen, werden mit einem viel gröberen Zeitraster abgetastet.
+
+Bisher war die Integratorschrittweite unabhängig von diesem Abtastraster. Das Ergebnis: Der Integrator arbeitete auf weit entfernten Abschnitten genauso fein wie nahe am Schiff — die Arbeit wurde geleistet, die Punkte aber trotzdem zu selten gespeichert.
+
+Jetzt gilt: Ist das effektive Abtastintervall gröber als die Basispräzision, darf der Integrator **proportional größere Schritte mit proportional gelockerter Toleranz** nehmen.
+
+```
+Abtastintervall ≤ Basispräzision
+  → Identisches Verhalten wie zuvor (kein Unterschied)
+
+Abtastintervall > Basispräzision
+  → max_dt ↑ proportional zum Verhältnis
+  → Toleranz ↑ skaliert mit Verhältnis^8
+  → Schrittzahl ~ Punktzahl statt ~ Bogenlänge
+```
+
+> [!NOTE]
+> Nahe Vorbeiflüge an Planeten erzeugen lokal hohe Beschleunigungsgradienten. Dort übersteigt der tatsächliche Fehler auch die gelockerte Toleranz, und der Integrator unterteilt weiterhin bis zur Mindestschrittweite — die Sicherheit bei kritischen Passagen bleibt erhalten.
+
+---
+
+## Darstellung weit entfernter Körper
+
+### Icon-Swap bei kleinem Bildschirmradius
+
+Beim Herauszoomen schrumpfen Körper auf dem Bildschirm. Unterhalb einer Schwelle von **4 Pixeln echtem Bildschirmradius** wird der vollständige Körper (Scheibe, Atmosphäre, Glow) nicht mehr gezeichnet. Stattdessen erscheint ein **Positions-Icon konstanter Bildschirmgröße**.
+
+```
+true_radius_px ≥ 4 px  →  voller Körper (Scheibe + Glow + Atmosphäre)
+true_radius_px  < 4 px  →  Positions-Icon (4 px, konstant, kein weiteres Schrumpfen)
+```
+
+Wichtig: Die Schwelle und der Icon-Radius sind identisch. Der Übergang ist deshalb nahtlos — kein leerer Frame, keine Doppelzeichnung.
+
+Körper, die vollständig außerhalb des Bildschirms liegen, werden darüber hinaus **komplett übersprungen** (Off-screen-Culling), ohne dass Shader oder Geometrie aufgerufen werden.
+
+### Auswirkung im Überblick
+
+| Zoom-Stufe | Darstellung |
+|---|---|
+| Nah (echter Radius ≥ 4 px) | Vollständiger Körper mit Atmosphäre und Glow |
+| Mittel (Übergang bei ~4 px) | Nahtloser Wechsel zum Icon |
+| Weit (Icon-Modus) | Konstant 4 px großes Positionsmarker-Icon |
+| Vollständig off-screen | Kein Render-Aufruf |
+
+---
+
+## Orbit-Spur-Culling
+
+Wenn eine Orbit- oder Referenzspur beim aktuellen Zoom einen Bildschirmbereich von weniger als **2 Pixeln** abdeckt, wird sie vollständig übersprungen. Eine sub-pixel-große Spur ist für das Auge ohnehin nicht wahrnehmbar; die Position des Körpers ist durch sein Icon repräsentiert.
+
+```
+Bounding-Box der Spur auf dem Bildschirm < 2 px  →  Spur wird nicht gezeichnet
+```
+
+---
+
+## Rendering-Pipeline der Vorhersagelinie
+
+### Reihenfolge: RDP vor Densify
+
+> [!NOTE]
+**RDP (Ramer-Douglas-Peucker)** ist ein Algorithmus zur Linienvereinfachung. Er nimmt eine Folge von Punkten, die eine Kurve beschreiben, und entfernt alle Punkte, die geometrisch nicht notwendig sind — also Punkte, die so nah an der Verbindungslinie ihrer Nachbarn liegen, dass sie auf dem Bildschirm keinen sichtbaren Unterschied machen. Das Ergebnis ist eine geometrisch nahezu identische Kurve mit deutlich weniger Punkten.
+
+```
+Eingabe:  ● ● ● ● ● ● ● ● ● ● ● ●   (viele dichte Punkte)
+Ausgabe:  ●         ●     ●     ●     (nur geometrisch wichtige Punkte)
+```
+
+Die Pipeline zur Vorbereitung der Predictor-Linie lief bisher in dieser Reihenfolge:
+
+```
+Rohpunkte (z. B. 3 000)
+  → Densify  (Lücken auffüllen → bis zu 75 000+ Punkte)
+  → RDP      (Punkte reduzieren — arbeitet auf dem riesigen Array)
+```
+
+Das Densify-Schritt füllte geometrische Lücken zwischen dünn abgetasteten Punkten auf. Dazu wurden viele lineare Zwischenpunkte eingefügt. RDP musste anschließend auf diesem aufgeblähten Array arbeiten, obwohl die neuen Punkte keinerlei zusätzliche Information trugen.
+
+Jetzt:
+
+```
+Rohpunkte (z. B. 3 000)
+  → RDP      (arbeitet auf dem kleinen, informativen Array)
+  → Densify  (füllt nur noch die RDP-Ergebnispunkte auf)
+```
+
+RDP behält ausschließlich geometrisch signifikante Punkte. Densify läuft anschließend nur auf diesem kompakten Ergebnis.
+
+> [!NOTE]
+> Der Liang-Barsky-Clipping-Algorithmus, der für jedes einzelne Liniensegment jeder Spur, Orbit- und Vorhersagelinie aufgerufen wird, wurde zusätzlich von einer generischen Schleife zu ausgerollten skalaren Operationen umgeschrieben.
+
+---
+
+## Weitere Performance-Verbesserungen
+
+<details>
+<summary>FXAA Uniform-Location-Caching</summary>
+
+GLSL-Shader-Uniform-Locations (`u_texture`, `u_resolution`) werden einmalig beim Linken des Shader-Programms abgefragt und gecacht. Bisher wurde `glGetUniformLocation()` bei jedem Frame aufgerufen.
+
+</details>
+
+<details>
+<summary>HUD-Memoization</summary>
+
+Das Heads-Up-Display wird als persistente GPU-Textur gehalten. Solange sich die angezeigten Textzeilen nicht ändern, findet kein erneutes Rastern und kein CPU→GPU-Upload statt. Die Textur wird nur bei tatsächlicher Inhaltsänderung oder Fenstergrößenänderung neu erzeugt.
+
+</details>
+
+---
+
+## Gesamtbild
+
+```
+Physik            Gravitationsfeld des Schiffs ist jetzt zeitabhängig korrekt
+Predictor         Rechenaufwand skaliert mit dem Abtastraster, nicht mit der Bogenlänge
+Darstellung       Körper wechseln nahtlos zu Positions-Icons; off-screen entfällt komplett
+Rendering         RDP-vor-Densify beseitigt quadratischen Aufwand bei langen Vorhersagen
+Performance       GPU-Overhead (FXAA, HUD) durch Caching dauerhaft reduziert
+```
+
+### Status-Checkliste (31.05.2026)
+
+- [x] Zeitgenaue Planetenpositionen in der Schiffsintegration
+- [x] Intervall-gekoppelte Schrittweite im Predictor
+- [x] Nahtloser Icon-Swap für weit entfernte Körper
+- [x] Off-screen-Culling für Körper
+- [x] Orbit-Spur-Culling bei sub-pixel-Ausdehnung
+- [x] RDP-vor-Densify in der Predictor-Rendering-Pipeline
+- [x] FXAA Uniform-Caching
+- [x] HUD-Memoization
