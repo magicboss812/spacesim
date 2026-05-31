@@ -13,19 +13,11 @@ from dataclasses import dataclass
 import math
 from typing import Callable, Sequence
 
-import numpy as np
-from astropy import units as u
-from astropy.coordinates import CartesianRepresentation
-from astropy.coordinates.matrix_utilities import rotation_matrix
-from poliastro.twobody.propagation import kepler as poliastro_kepler
-
 from vec import Vec2, G as NEWTONIAN_G
 
 
 BODY_CENTRED_NON_ROTATING = 6000
 BODY_CENTRED_BODY_DIRECTION = 6002
-_M_TO_KM = 1e-3
-_KM_TO_M = 1e3
 
 
 @dataclass(frozen=True)
@@ -44,14 +36,13 @@ class KeplerScriptedOrbit:
     argument_of_periapsis_rad: float
 
     def radius_m(self, true_anomaly_rad: float) -> float:
-        a_q = float(self.semi_major_axis_m) * u.m
+        a = float(self.semi_major_axis_m)
         e = float(self.eccentricity)
         nu = float(true_anomaly_rad)
         denom = 1.0 + e * math.cos(nu)
         if abs(denom) < 1e-12:
             denom = 1e-12 if denom >= 0.0 else -1e-12
-        r_q = a_q * (1.0 - e * e) / denom
-        return float(r_q.to_value(u.m))
+        return a * (1.0 - e * e) / denom
 
     def perifocal_xy(self, true_anomaly_rad: float) -> tuple[float, float]:
         nu = float(true_anomaly_rad)
@@ -60,21 +51,13 @@ class KeplerScriptedOrbit:
 
     def inertial_xy(self, true_anomaly_rad: float) -> tuple[float, float]:
         x_p, y_p = self.perifocal_xy(true_anomaly_rad)
-        # astropy rotation_matrix() mit axis='z' folgt einer left-hand-rule konvention;
-        # nutze -arg_periapsis um die in-plane +arg_periapsis-rotation unserer
-        # scripted-orbit-gleichungen abzugleichen.
-        return _rotate_xy_with_astropy(x_p, y_p, -float(self.argument_of_periapsis_rad))
+        return _rotate_xy(x_p, y_p, -float(self.argument_of_periapsis_rad))
 
 
-def _cartesian_xy_m(x_m: float, y_m: float) -> CartesianRepresentation:
-    return CartesianRepresentation(float(x_m) * u.m, float(y_m) * u.m, 0.0 * u.m)
-
-
-def _rotate_xy_with_astropy(x_m: float, y_m: float, angle_rad: float) -> tuple[float, float]:
-    rep = _cartesian_xy_m(x_m, y_m)
-    rot = rotation_matrix(float(angle_rad), "z", unit=u.rad)
-    transformed = rep.transform(rot)
-    return float(transformed.x.to_value(u.m)), float(transformed.y.to_value(u.m))
+def _rotate_xy(x_m: float, y_m: float, angle_rad: float) -> tuple[float, float]:
+    c = math.cos(angle_rad)
+    s = math.sin(angle_rad)
+    return c * x_m + s * y_m, -s * x_m + c * y_m
 
 
 def _world_to_frame_xy(
@@ -86,13 +69,13 @@ def _world_to_frame_xy(
 ) -> tuple[float, float]:
     rel_x = float(world_x) - float(origin_x)
     rel_y = float(world_y) - float(origin_y)
-    return _rotate_xy_with_astropy(rel_x, rel_y, float(frame_x_axis_angle_rad))
+    return _rotate_xy(rel_x, rel_y, float(frame_x_axis_angle_rad))
 
 
 def _heading_world_to_frame(theta_world: float, frame_x_axis_angle_rad: float) -> float:
     hx = math.cos(float(theta_world))
     hy = math.sin(float(theta_world))
-    fx, fy = _rotate_xy_with_astropy(hx, hy, float(frame_x_axis_angle_rad))
+    fx, fy = _rotate_xy(hx, hy, float(frame_x_axis_angle_rad))
     return math.atan2(fy, fx)
 
 
@@ -128,6 +111,45 @@ def _body_arg_periapsis(body) -> float:
     return 0.0
 
 
+def _solve_eccentric_anomaly(M: float, e: float) -> float:
+    E = M
+    for _ in range(50):
+        dE = (M - E + e * math.sin(E)) / (1.0 - e * math.cos(E))
+        E += dE
+        if abs(dE) < 1e-10:
+            break
+    return E
+
+
+def _kepler_true_anomaly_from_mean(M: float, e: float) -> float:
+    E = _solve_eccentric_anomaly(M, e)
+    return math.atan2(math.sqrt(max(0.0, 1.0 - e * e)) * math.sin(E), math.cos(E) - e)
+
+
+def _mean_anomaly_from_true(nu: float, e: float) -> float:
+    cos_nu = math.cos(nu)
+    cos_E = (e + cos_nu) / (1.0 + e * cos_nu)
+    cos_E = max(-1.0, min(1.0, cos_E))
+    sin_E = math.sqrt(max(0.0, 1.0 - cos_E * cos_E)) * (1.0 if math.sin(nu) >= 0.0 else -1.0)
+    E = math.atan2(sin_E, cos_E)
+    return E - e * math.sin(E)
+
+
+def _build_kepler_elements(body, mu: float) -> dict | None:
+    try:
+        a_m = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
+        e = float(getattr(body, "eccentricity", 0.0) or 0.0)
+        if a_m <= 0.0 or e < 0.0 or e >= 1.0:
+            return None
+        nu0 = _body_true_anomaly(body)
+        arg = _body_arg_periapsis(body)
+        n = math.sqrt(float(mu) / (a_m ** 3))
+        M0 = _mean_anomaly_from_true(nu0, e)
+        return {"a": a_m, "e": e, "arg": arg, "n": n, "M0": M0}
+    except Exception:
+        return None
+
+
 def _orbit_model_from_body(body) -> KeplerScriptedOrbit | None:
     try:
         a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
@@ -148,6 +170,12 @@ class ReferenceFrame:
     label = "Barycentric"
 
     def set_epoch_time(self, time_s: float) -> None:
+        return
+
+    def set_origin_interp_window(self, t0: float, t1: float, sample_count: int = 0) -> None:
+        # No-op auf dem basis-frame (Identity ist ohnehin O(1)). Bewegte
+        # origin-frames überschreiben dies, um die origin-position über das
+        # zeitfenster zu interpolieren statt pro punkt zu propagieren.
         return
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
@@ -182,13 +210,25 @@ class _BodyEphemerisMixin:
     # glatt zu halten und teure pro-punkt-propagationsaufrufe zu vermeiden.
     frame_time_quantization_s = 0
 
+    # Max. anzahl exakter origin-stützstellen (knots) pro render, zwischen denen
+    # die origin-position linear interpoliert wird. Begrenzt teure propagations-
+    # aufrufe bei bewegten origin-körpern (z.B. Erde) auf O(knots) statt
+    # O(predictor-punkte). Nur aktiv, wenn der renderer ein zeitfenster mit mehr
+    # punkten als knots setzt — sonst exakt → nie langsamer als zuvor.
+    frame_origin_interp_max_knots = 256
+
     def _init_ephemeris(self) -> None:
         self._epoch_time_s = 0.0
         self._epoch_initialized = False
         self._position_cache = {}
         self._relative_state_cache = {}
+        self._angle_cache = {}
+        self._virtual_pos_cache = {}
         self.debug_ephemeris = False
         self._debug_ephemeris_counter = 0
+        # origin-interpolation: q<=0 bedeutet "exakt" (deaktiviert).
+        self._origin_interp_q = 0.0
+        self._origin_interp_t0 = 0.0
 
     def set_epoch_time(self, time_s: float) -> None:
         try:
@@ -203,6 +243,26 @@ class _BodyEphemerisMixin:
         self._epoch_initialized = True
         self._position_cache = {}
         self._relative_state_cache = {}
+        self._angle_cache = {}
+        self._virtual_pos_cache = {}
+
+    def set_origin_interp_window(self, t0: float, t1: float, sample_count: int = 0) -> None:
+        # Aktiviert lineare interpolation der origin-position zwischen gleichmäßig
+        # über [t0, t1] verteilten knots — aber nur, wenn mehr punkte als knots
+        # projiziert werden (sonst wäre exakt günstiger). q<=0 => exakt.
+        try:
+            a = float(t0)
+            b = float(t1)
+        except Exception:
+            self._origin_interp_q = 0.0
+            return
+        span = b - a
+        knots = max(1, int(self.frame_origin_interp_max_knots))
+        if (not math.isfinite(span)) or span <= 0.0 or int(sample_count) <= knots:
+            self._origin_interp_q = 0.0
+            return
+        self._origin_interp_t0 = a
+        self._origin_interp_q = span / knots
 
     def _quantized_time(self, time_s: float) -> float:
         try:
@@ -216,6 +276,27 @@ class _BodyEphemerisMixin:
         return round(t / quantum) * quantum
 
     def _body_world_position_at_time(self, body, time_s: float, stack: set[int] | None = None) -> tuple[float, float]:
+        # Interpolierender wrapper: bei aktivem zeitfenster (q>0) wird die origin-
+        # position zwischen zwei exakten knots linear interpoliert statt pro punkt
+        # propagiert. stack gesetzt => rekursiver elternaufruf, der exakt bleiben
+        # muss. q<=0 => exakt (identisches verhalten wie zuvor, nie langsamer).
+        q = self._origin_interp_q
+        if q <= 0.0 or body is None or stack is not None:
+            return self._body_world_position_exact(body, time_s, stack)
+        t = float(time_s)
+        n = math.floor((t - self._origin_interp_t0) / q)
+        klo = self._origin_interp_t0 + n * q
+        khi = klo + q
+        xlo, ylo = self._body_world_position_exact(body, klo, None)
+        xhi, yhi = self._body_world_position_exact(body, khi, None)
+        frac = (t - klo) / q
+        if frac <= 0.0:
+            return xlo, ylo
+        if frac >= 1.0:
+            return xhi, yhi
+        return (xlo + (xhi - xlo) * frac, ylo + (yhi - ylo) * frac)
+
+    def _body_world_position_exact(self, body, time_s: float, stack: set[int] | None = None) -> tuple[float, float]:
         if body is None:
             return 0.0, 0.0
 
@@ -261,7 +342,7 @@ class _BodyEphemerisMixin:
                 wx = px
                 wy = py
         else:
-            parent_x, parent_y = self._body_world_position_at_time(parent, qt, stack)
+            parent_x, parent_y = self._body_world_position_exact(parent, qt, stack)
             rel_x, rel_y = self._relative_position_to_parent_at_time(body, parent, dt)
             wx = parent_x + rel_x
             wy = parent_y + rel_y
@@ -365,13 +446,18 @@ class _BodyEphemerisMixin:
 
         if state["use_kepler"]:
             try:
-                r_km, _ = poliastro_kepler(
-                    state["k_km3_s2"],
-                    state["r0_km"],
-                    state["v0_km_s"],
-                    float(dt_s),
-                )
-                return float(r_km[0]) * _KM_TO_M, float(r_km[1]) * _KM_TO_M
+                kep = state["kepler_elements"]
+                M = kep["M0"] + kep["n"] * float(dt_s)
+                nu = _kepler_true_anomaly_from_mean(M, kep["e"])
+                p = kep["a"] * (1.0 - kep["e"] * kep["e"])
+                denom = 1.0 + kep["e"] * math.cos(nu)
+                if abs(denom) > 1e-12 and p > 0.0:
+                    r = p / denom
+                    c = math.cos(kep["arg"])
+                    s = math.sin(kep["arg"])
+                    x_orb = r * math.cos(nu)
+                    y_orb = r * math.sin(nu)
+                    return x_orb * c - y_orb * s, x_orb * s + y_orb * c
             except Exception:
                 pass
 
@@ -397,24 +483,21 @@ class _BodyEphemerisMixin:
             "rel0_m": (rel0_x, rel0_y),
             "relv_m_s": (relv_x, relv_y),
             "use_kepler": False,
-            "k_km3_s2": 0.0,
-            "r0_km": np.array([rel0_x * _M_TO_KM, rel0_y * _M_TO_KM, 0.0], dtype=np.float64),
-            "v0_km_s": np.array([relv_x * _M_TO_KM, relv_y * _M_TO_KM, 0.0], dtype=np.float64),
+            "kepler_elements": None,
         }
 
         scripted_state = self._scripted_relative_state_from_elements(body, parent)
         if scripted_state is not None:
             s_rel_x, s_rel_y, s_rel_vx, s_rel_vy, mu = scripted_state
-            k_km3_s2 = float(mu) * 1e-9
-            if k_km3_s2 > 0.0:
-                state = {
-                    "rel0_m": (s_rel_x, s_rel_y),
-                    "relv_m_s": (s_rel_vx, s_rel_vy),
-                    "use_kepler": True,
-                    "k_km3_s2": k_km3_s2,
-                    "r0_km": np.array([s_rel_x * _M_TO_KM, s_rel_y * _M_TO_KM, 0.0], dtype=np.float64),
-                    "v0_km_s": np.array([s_rel_vx * _M_TO_KM, s_rel_vy * _M_TO_KM, 0.0], dtype=np.float64),
-                }
+            if float(mu) > 0.0:
+                kep = _build_kepler_elements(body, float(mu))
+                if kep is not None:
+                    state = {
+                        "rel0_m": (s_rel_x, s_rel_y),
+                        "relv_m_s": (s_rel_vx, s_rel_vy),
+                        "use_kepler": True,
+                        "kepler_elements": kep,
+                    }
 
         self._relative_state_cache[state_key] = state
         return state
@@ -500,19 +583,16 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
         self.label = f"Virtual-swap ({getattr(primary_body, 'name', '?')} <- {getattr(child_body, 'name', '?')})"
 
     def _virtual_primary_pos(self, time_s: float):
-        try:
-            if getattr(self, "_cache_vp_time", None) == float(time_s):
-                return Vec2(self._cache_vp_x, self._cache_vp_y)
-        except Exception:
-            pass
+        t = float(time_s)
+        cached = self._virtual_pos_cache.get(t)
+        if cached is not None:
+            return cached
 
         orbit = _orbit_model_from_body(self.child_body)
         if orbit is None:
             p_x, p_y = self._body_world_position_at_time(self.primary_body, time_s)
             vp = Vec2(float(p_x), float(p_y))
-            self._cache_vp_time = float(time_s)
-            self._cache_vp_x = float(vp.x)
-            self._cache_vp_y = float(vp.y)
+            self._virtual_pos_cache[t] = vp
             return vp
 
         theta_child = _body_true_anomaly(self.child_body)
@@ -531,9 +611,7 @@ class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, Reference
         rel_x, rel_y = orbit.inertial_xy(theta_child + math.pi)
         child_x, child_y = self._body_world_position_at_time(self.child_body, time_s)
         vp = Vec2(float(child_x) + rel_x, float(child_y) + rel_y)
-        self._cache_vp_time = float(time_s)
-        self._cache_vp_x = float(vp.x)
-        self._cache_vp_y = float(vp.y)
+        self._virtual_pos_cache[t] = vp
         return vp
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
@@ -560,11 +638,11 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
 
     def _prepare_cache(self, time_s: float) -> None:
         cache_time = self._quantized_time(time_s)
-        try:
-            if getattr(self, "_cache_time", None) == cache_time:
-                return
-        except Exception:
-            pass
+        entry = self._angle_cache.get(cache_time)
+        if entry is not None:
+            self._cache_cos, self._cache_sin, self._cache_origin_x, self._cache_origin_y = entry
+            self._cache_time = cache_time
+            return
         angle = self._x_axis_angle(cache_time)
         origin_x, origin_y = self._body_world_position_at_time(self.primary_body, cache_time)
         self._cache_cos = math.cos(angle)
@@ -572,6 +650,7 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
         self._cache_origin_x = origin_x
         self._cache_origin_y = origin_y
         self._cache_time = cache_time
+        self._angle_cache[cache_time] = (self._cache_cos, self._cache_sin, origin_x, origin_y)
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
         self._prepare_cache(time_s)
@@ -619,11 +698,11 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
 
     def _prepare_cache(self, time_s: float) -> None:
         cache_time = self._quantized_time(time_s)
-        try:
-            if getattr(self, "_cache_time", None) == cache_time:
-                return
-        except Exception:
-            pass
+        entry = self._angle_cache.get(cache_time)
+        if entry is not None:
+            self._cache_cos, self._cache_sin, self._cache_origin_x, self._cache_origin_y = entry
+            self._cache_time = cache_time
+            return
         angle = self._x_axis_angle(cache_time)
         origin_x, origin_y = self._body_world_position_at_time(self.target_body, cache_time)
         self._cache_cos = math.cos(angle)
@@ -631,6 +710,7 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         self._cache_origin_x = origin_x
         self._cache_origin_y = origin_y
         self._cache_time = cache_time
+        self._angle_cache[cache_time] = (self._cache_cos, self._cache_sin, origin_x, origin_y)
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
         self._prepare_cache(time_s)

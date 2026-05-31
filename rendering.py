@@ -31,7 +31,11 @@ class Renderer:
         self.fxaa_program = None
         self.fxaa_vertex_shader = None
         self.fxaa_fragment_shader = None
-        
+        # gecachte uniform-locations: einmalig nach dem linken abgefragt statt
+        # pro frame (analog zur line-/body-pipeline). -1 = noch nicht gesetzt.
+        self._fxaa_u_texture = -1
+        self._fxaa_u_resolution = -1
+
         # OpenGL initialisieren
         self._init_opengl()
         
@@ -48,6 +52,8 @@ class Renderer:
         self.debug_info = {
             'shader_error': None,
             'bodies_rendered': 0,
+            'bodies_culled': 0,
+            'bodies_as_icon': 0,
             'prediction_points_in': 0,
             'prediction_points_drawn': 0,
         }
@@ -84,6 +90,19 @@ class Renderer:
         self._current_body_index_by_id = {}
         self.current_reference_body = None
         self.ship_velocity_vector_length_px = 70.0
+
+        # Körper-icon-schwelle (bildschirm-pixel). Sobald der ECHTE bildschirm-
+        # radius eines (nicht-schiff-)körpers unter diesen wert fällt, wird der
+        # volle körper (disc + glow + atmosphäre) de-rendert und stattdessen ein
+        # positions-icon konstanter bildschirmgröße gezeichnet. Dieser eine wert
+        # ist zugleich swap-schwelle UND icon-radius -> der körper schrumpft exakt
+        # bis zu dieser größe und das icon übernimmt nahtlos bei identischer größe
+        # (kein leerer frame, keine doppelzeichnung). Beim weiteren herauszoomen
+        # bleibt das icon konstant groß (skaliert nicht mehr mit der zoom-stufe).
+        self.body_icon_radius_px = 4.0
+        # Bildschirm-bounding-box kleiner als dieser wert (px) => referenz-spur
+        # wird nicht gezeichnet (sub-pixel, ohnehin unsichtbar).
+        self.reference_traj_min_screen_px = 2.0
 
         # frame-status (principia-ähnlich): physik bleibt absolut, rendering
         # wendet den aktuell ausgewählten plotting-frame plus optionales target-
@@ -132,6 +151,10 @@ class Renderer:
         self._label_texture_cache = {}
         self._hud_texture = None
         self._hud_texture_size = (0, 0)
+        # HUD-memoization: solange die formatierten textzeilen identisch sind,
+        # bleibt die persistente HUD-textur gültig und muss weder neu gerastert
+        # (font.render/Surface/tostring) noch hochgeladen werden.
+        self._hud_cache_key = None
         # Initialize GPU helpers (VBOs, caches)
         try:
             self._init_gpu_helpers()
@@ -341,7 +364,11 @@ class Renderer:
             print(f"FXAA Program Link Error: {log}")
             self.enable_fxaa = False
             return
-        
+
+        # Uniform-locations einmalig cachen (statt pro frame in _apply_fxaa).
+        self._fxaa_u_texture = glGetUniformLocation(self.fxaa_program, 'u_texture')
+        self._fxaa_u_resolution = glGetUniformLocation(self.fxaa_program, 'u_resolution')
+
         # Shader aufräumen
         glDeleteShader(self.fxaa_vertex_shader)
         glDeleteShader(self.fxaa_fragment_shader)
@@ -372,10 +399,9 @@ class Renderer:
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.fbo_texture)
         
-        # Uniforms setzen
-        glUniform1i(glGetUniformLocation(self.fxaa_program, 'u_texture'), 0)
-        glUniform2f(glGetUniformLocation(self.fxaa_program, 'u_resolution'), 
-                    float(self.width), float(self.height))
+        # Uniforms setzen (locations beim linken gecacht, nicht pro frame).
+        glUniform1i(self._fxaa_u_texture, 0)
+        glUniform2f(self._fxaa_u_resolution, float(self.width), float(self.height))
         
         # Vollbild-Quad rendern
         glBegin(GL_QUADS)
@@ -757,30 +783,85 @@ class Renderer:
         dx = x1 - x0
         dy = y1 - y0
 
-        p = [-dx, dx, -dy, dy]
-        q = [x0 - left, right - x0, y0 - top, bottom - y0]
-
         u1 = 0.0
         u2 = 1.0
 
-        for pi, qi in zip(p, q):
-            if pi == 0.0:
-                if qi < 0.0:
-                    return None
-                continue
+        # Liang-Barsky gegen die vier kanten. Bewusst ohne zwischen-listen/zip:
+        # diese funktion läuft pro segment jeder spur-, orbit- und vorhersage-
+        # linie und ist damit der meistaufgerufene pro-frame-pfad. die (pi, qi)-
+        # paare sind exakt wie zuvor (links, rechts, oben, unten), nur skalar.
 
+        # links: pi = -dx, qi = x0 - left
+        pi = -dx
+        qi = x0 - left
+        if pi == 0.0:
+            if qi < 0.0:
+                return None
+        else:
             t = qi / pi
-
             if pi < 0.0:
                 if t > u2:
                     return None
                 if t > u1:
                     u1 = t
-            else:
-                if t < u1:
+            elif t < u1:
+                return None
+            elif t < u2:
+                u2 = t
+
+        # rechts: pi = dx, qi = right - x0
+        pi = dx
+        qi = right - x0
+        if pi == 0.0:
+            if qi < 0.0:
+                return None
+        else:
+            t = qi / pi
+            if pi < 0.0:
+                if t > u2:
                     return None
-                if t < u2:
-                    u2 = t
+                if t > u1:
+                    u1 = t
+            elif t < u1:
+                return None
+            elif t < u2:
+                u2 = t
+
+        # oben: pi = -dy, qi = y0 - top
+        pi = -dy
+        qi = y0 - top
+        if pi == 0.0:
+            if qi < 0.0:
+                return None
+        else:
+            t = qi / pi
+            if pi < 0.0:
+                if t > u2:
+                    return None
+                if t > u1:
+                    u1 = t
+            elif t < u1:
+                return None
+            elif t < u2:
+                u2 = t
+
+        # unten: pi = dy, qi = bottom - y0
+        pi = dy
+        qi = bottom - y0
+        if pi == 0.0:
+            if qi < 0.0:
+                return None
+        else:
+            t = qi / pi
+            if pi < 0.0:
+                if t > u2:
+                    return None
+                if t > u1:
+                    u1 = t
+            elif t < u1:
+                return None
+            elif t < u2:
+                u2 = t
 
         return (
             x0 + u1 * dx,
@@ -914,6 +995,29 @@ class Renderer:
             glVertex2f(px, py)
         glEnd()
 
+    def _draw_body_icon(self, x, y, radius, r, g, b):
+        """Positions-icon eines körpers: flache scheibe konstanter bildschirmgröße.
+
+        `radius` ist sowohl die swap-schwelle als auch der icon-radius
+        (`body_icon_radius_px`). Wird gezeichnet, sobald der echte bildschirm-
+        radius des körpers unter die schwelle fällt.
+
+        WICHTIG: das icon MUSS über denselben GLSL-körper-shader laufen wie der
+        volle körper. Der vertex-shader (body.vert) erwartet top-down-screen-
+        koordinaten und spiegelt y intern (`ndc.y = 1 - 2*y/h`), während
+        immediate-mode `glVertex2f` unter `gluOrtho2D(0,w,0,h)` bottom-up ist.
+        Würde das icon per immediate-mode gezeichnet, läge es vertikal gespiegelt
+        und schiene unabhängig vom körper zu driften. Mit glow/atmosphäre = 0
+        ergibt der shader (core_radius_norm == 1.0) eine flache scheibe in
+        körperfarbe -- positionsgenau und am übergang nahtlos zum körper.
+        """
+        if self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0):
+            return
+        # Fallback nur, wenn der GLSL-pfad nicht verfügbar ist: immediate-mode
+        # wie _draw_body_legacy -- bleibt damit konsistent zum körper-fallback
+        # im selben (degradierten) modus.
+        self._draw_body_legacy(x, y, float(radius), r, g, b)
+
     def _get_label_texture(self, text, font):
         key = (text, font.get_height())
         entry = self._label_texture_cache.get(key)
@@ -1036,10 +1140,23 @@ class Renderer:
             cb = min(1.0, max(0.0, base[2] / 255.0))
 
             screen_points = []
+            min_sx = min_sy = float('inf')
+            max_sx = max_sy = float('-inf')
             for fx, fy in trail:
                 sx = half_w + (fx - camera_frame_xy[0]) * scale
                 sy = half_h - (fy - camera_frame_xy[1]) * scale
                 screen_points.append((sx, sy))
+                if sx < min_sx: min_sx = sx
+                if sx > max_sx: max_sx = sx
+                if sy < min_sy: min_sy = sy
+                if sy > max_sy: max_sy = sy
+
+            # Größen-schwelle: kollabiert die ganze spur auf eine sub-pixel-fläche
+            # (z. B. weit herausgezoomt), ist sie ohnehin unsichtbar -> nicht
+            # zeichnen. Die position des körpers zeigt dann sein icon.
+            min_px = float(self.reference_traj_min_screen_px)
+            if (max_sx - min_sx) < min_px and (max_sy - min_sy) < min_px:
+                continue
 
             runs = self._visible_window_runs(screen_points, margin_px=self.prediction_visibility_margin_px)
             for run in runs:
@@ -1119,6 +1236,8 @@ class Renderer:
                     pass
 
         self.debug_info['bodies_rendered'] = 0
+        self.debug_info['bodies_culled'] = 0
+        self.debug_info['bodies_as_icon'] = 0
         self.debug_info['prediction_points_in'] = 0
         self.debug_info['prediction_points_drawn'] = 0
         self._last_prediction_render_stats = {
@@ -1362,16 +1481,12 @@ class Renderer:
             camera_frame_xy=camera_frame_xy,
         )
         screen_pos = (x, y)
-        # Gleitkomma-Radius in Pixeln für Label-Anker beibehalten, um
-        # 1-Pixel-Flackern zu vermeiden, wenn sich der Radius beim Zoomen leicht ändert.
-        radius_px = max(3.0, float(body.radius) * float(camera.scale))
-        radius = max(3, int(round(radius_px)))  # integer radius for geometry
-        
-        self.debug_info['bodies_rendered'] += 1
         r, g, b = body.color[0] / 255.0, body.color[1] / 255.0, body.color[2] / 255.0
         x, y = float(screen_pos[0]), float(screen_pos[1])
 
         if body.is_ship:
+            # Schiff: feste bildschirmgröße (pfeil), nie gecullt, nie als icon.
+            self.debug_info['bodies_rendered'] += 1
             theta_frame = float(getattr(body, 'theta', 0.0))
             try:
                 theta_frame = self._active_frame().transform_heading(self._frame_time_s, theta_frame)
@@ -1422,6 +1537,40 @@ class Renderer:
                 except Exception:
                     pass
             return
+
+        # --- Nicht-Schiff-Körper: off-screen-cull + größen-schwelle (icon-swap) ---
+        # Echter, UNgeklemmter bildschirmradius. Statt den körper (alt) auf
+        # min. 3px zu klemmen und dauerhaft als winzige scheibe zu zeichnen,
+        # lassen wir ihn unter die schwelle schrumpfen und tauschen ihn dann
+        # nahtlos gegen ein positions-icon konstanter größe.
+        icon_radius_px = float(self.body_icon_radius_px)
+        true_radius_px = float(body.radius) * float(camera.scale)
+        as_icon = true_radius_px < icon_radius_px
+
+        # Off-screen-cull (NUR rendering, physik unberührt): die marge deckt für
+        # sichtbare körper den glow (~2.5x radius) ab, damit randständige große
+        # körper nicht fälschlich verschwinden. Vollständig off-screen-körper
+        # werden gar nicht erst gezeichnet (kein shader-/icon-aufruf).
+        cull_margin_px = (icon_radius_px if as_icon else true_radius_px * 2.5) + 8.0
+        if not self._is_on_screen(x, y, cull_margin_px):
+            self.debug_info['bodies_culled'] = self.debug_info.get('bodies_culled', 0) + 1
+            return
+
+        self.debug_info['bodies_rendered'] += 1
+
+        if as_icon:
+            # Körper komplett de-rendern; nur das positions-icon zeichnen.
+            # icon-größe == swap-schwelle => exakt nahtloser tausch (keine lücke,
+            # keine doppelzeichnung), konstante bildschirmgröße beim herauszoomen.
+            self.debug_info['bodies_as_icon'] = self.debug_info.get('bodies_as_icon', 0) + 1
+            self._draw_body_icon(x, y, icon_radius_px, r, g, b)
+            return
+
+        # --- Voller körper (disc + glow + atmosphäre) bei echter größe ---
+        # Gleitkomma-Radius für Label-Anker beibehalten, um 1-Pixel-Flackern beim
+        # Zoomen zu vermeiden. radius_px >= icon_radius_px ist hier garantiert.
+        radius_px = true_radius_px
+        radius = max(3, int(round(radius_px)))  # integer radius for geometry
 
         if hasattr(body, 'atmosphere_color'):
             r1, g1, b1 = body.atmosphere_color[0] / 255.0, body.atmosphere_color[1] / 255.0, body.atmosphere_color[2] / 255.0
@@ -2042,18 +2191,38 @@ class Renderer:
             stats['prepare_ms'] = (time.perf_counter() - prepare_t0) * 1000.0
             stats['cache_hit'] = True
         else:
-            sampled_runs = self._adaptive_prediction_screen_points(
-                path_points,
-                camera,
-                tolerance_px=effective_tolerance,
-                min_step_px=effective_min_step,
-                max_segment_px=effective_max_segment,
-                max_points=max_draw_points,
-                margin_px=self.prediction_visibility_margin_px,
-                anchor_world=anchor_world,
-                stats=stats,
-                camera_frame_xy=camera_frame_xy,
-            )
+            # Bewegte origin-frames (z.B. Erde): origin-position über das
+            # predictor-zeitfenster interpolieren statt pro punkt propagieren.
+            # Auf das aktive frame begrenzt und danach wieder gelöscht, damit
+            # körper/spuren (aktuelle zeit) exakt transformiert bleiben.
+            active_frame = self._active_frame()
+            interp_window_set = False
+            try:
+                try:
+                    p_first = path_points[0]
+                    p_last = path_points[input_count - 1]
+                    t_first = float(p_first[2]) if hasattr(p_first, '__len__') and len(p_first) >= 3 else None
+                    t_last = float(p_last[2]) if hasattr(p_last, '__len__') and len(p_last) >= 3 else None
+                except Exception:
+                    t_first = t_last = None
+                if t_first is not None and t_last is not None and t_last > t_first:
+                    active_frame.set_origin_interp_window(t_first, t_last, int(input_count))
+                    interp_window_set = True
+                sampled_runs = self._adaptive_prediction_screen_points(
+                    path_points,
+                    camera,
+                    tolerance_px=effective_tolerance,
+                    min_step_px=effective_min_step,
+                    max_segment_px=effective_max_segment,
+                    max_points=max_draw_points,
+                    margin_px=self.prediction_visibility_margin_px,
+                    anchor_world=anchor_world,
+                    stats=stats,
+                    camera_frame_xy=camera_frame_xy,
+                )
+            finally:
+                if interp_window_set:
+                    active_frame.set_origin_interp_window(0.0, 0.0, 0)
             stats['prepare_ms'] = (time.perf_counter() - prepare_t0) * 1000.0
 
         self.debug_info['prediction_points_in'] = input_count
@@ -2255,8 +2424,6 @@ class Renderer:
         sampled_runs = []
 
         for run in runs:
-            run = self._densify_screen_run(run, max_segment_px)
-
             run_starts_at_path_origin = (
                 abs(run[0][0] - screen_points[0][0]) < 1e-9 and
                 abs(run[0][1] - screen_points[0][1]) < 1e-9
@@ -2318,6 +2485,12 @@ class Renderer:
             else:
                 sampled = compact
 
+            # Densify only the RDP-kept points, not the raw scan.
+            # Pre-RDP densification of sparse predictors could expand 3000 samples
+            # to 75 000+ linearly-interpolated dummies that RDP discards anyway,
+            # making _rdp_indices O(N²) on a huge but information-free array.
+            sampled = self._densify_screen_run(sampled, max_segment_px)
+
             if len(sampled) >= 2:
                 sampled_runs.append(sampled)
 
@@ -2359,9 +2532,28 @@ class Renderer:
         label_y = screen_pos[1] - 8
         self._blit_cached_text(name, label_x, label_y, self.font_small)
     
+    def _draw_hud_quad(self, x, y, width, height):
+        """Zeichnet die persistente HUD-textur als quad (ohne re-upload)."""
+        if self._hud_texture is None:
+            return
+        glBindTexture(GL_TEXTURE_2D, self._hud_texture)
+        glEnable(GL_TEXTURE_2D)
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(x, y)
+        glTexCoord2f(1, 0); glVertex2f(x + width, y)
+        glTexCoord2f(1, 1); glVertex2f(x + width, y + height)
+        glTexCoord2f(0, 1); glVertex2f(x, y + height)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
+
     def _blit_pygame_surface(self, surface, x, y):
-        """Rendert eine pygame Surface an der angegebenen Position."""
-        # Persistent HUD texture: reuse gl texture and update via glTexSubImage2D
+        """Lädt eine pygame Surface in die persistente HUD-textur und zeichnet sie.
+
+        Der upload (tostring + glTex(Sub)Image2D) ist der teure teil. Aufrufer,
+        deren inhalt sich gegenüber dem vorframe nicht geändert hat, überspringen
+        diese methode und rufen direkt _draw_hud_quad.
+        """
         texture_data = pygame.image.tostring(surface, 'RGBA', True)
         width, height = surface.get_size()
 
@@ -2397,16 +2589,8 @@ class Renderer:
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
 
         # Textur rendern
-        glEnable(GL_TEXTURE_2D)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex2f(x, y)
-        glTexCoord2f(1, 0); glVertex2f(x + width, y)
-        glTexCoord2f(1, 1); glVertex2f(x + width, y + height)
-        glTexCoord2f(0, 1); glVertex2f(x, y + height)
-        glEnd()
-        glDisable(GL_TEXTURE_2D)
-    
+        self._draw_hud_quad(x, y, width, height)
+
     def _render_hud(self, camera, predictor=None):
         # HUD-Texte vorbereiten
         def _fmt_dist(n):
@@ -2459,14 +2643,26 @@ class Renderer:
         line_height = 16
         hud_width = 560
         hud_height = max(40, len(texts) * line_height + 8)
+        origin_x = 10
+        origin_y = self.height - hud_height - 10
+
+        # Bei unverändertem text bleibt die persistente HUD-textur gültig:
+        # font.render (~1 pro zeile), Surface-allokation, tostring und der
+        # textur-upload entfallen, es genügt ein redraw der bestehenden textur.
+        cache_key = (tuple(texts), int(self.width), int(self.height))
+        if cache_key == self._hud_cache_key and self._hud_texture is not None:
+            self._draw_hud_quad(origin_x, origin_y, *self._hud_texture_size)
+            return
+
         hud_surface = pygame.Surface((hud_width, hud_height), pygame.SRCALPHA)
-        
+
         for i, text in enumerate(texts):
             text_surface = self.font_medium.render(text, True, (255, 255, 255))
             hud_surface.blit(text_surface, (0, i * line_height))
-        
+
         # HUD in OpenGL rendern
-        self._blit_pygame_surface(hud_surface, 10, self.height - hud_height - 10)
+        self._blit_pygame_surface(hud_surface, origin_x, origin_y)
+        self._hud_cache_key = cache_key
     
     def resize(self, width, height):
 
@@ -2510,6 +2706,8 @@ class Renderer:
                 pass
             self._hud_texture = None
             self._hud_texture_size = (0, 0)
+        # HUD-memoization invalidieren: textur und viewport haben sich geändert.
+        self._hud_cache_key = None
         # Delete poly VBO so it can be recreated for the new context/size
         try:
             if getattr(self, '_poly_vbo', None):

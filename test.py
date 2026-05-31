@@ -339,7 +339,7 @@ def main():
 
         # kamera mit echtem frame-delta für interaktives panning aktualisieren
         camera.update(frame_dt)
-        
+
         # orbit-prognose berechnen (für das Schiff oder einen Körper)
         points = []
 
@@ -353,8 +353,6 @@ def main():
 
         points = predictor.get_points()
         # Rendern
-
-        
         renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time, reference_body=reference_body)
         frame_count += 1
         if max_frames > 0 and frame_count >= max_frames:

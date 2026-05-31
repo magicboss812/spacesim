@@ -1819,6 +1819,15 @@ class Predictor:
         self.rkn_min_factor = float(rkn_min_factor)
         self.rkn_max_factor = float(rkn_max_factor)
         self.rkn_max_rejects = int(rkn_max_rejects)
+        # Intervall-gekoppelte schrittweite (Option A): wird das abtast-
+        # intervall (effektive precision) gröber als base_precision, darf der
+        # integrator proportional größere schritte mit proportional lockererer
+        # toleranz nehmen, sodass die schrittzahl ~an die punktzahl statt an die
+        # bogenlänge gekoppelt ist. kosten bleiben ~konstant über das intervall;
+        # drift wächst bewusst mit dem intervall. nahe vorbeiflügen bleibt die
+        # adaptive kontrolle wirksam. bei/unter base_precision: exakte identität.
+        self.rkn_interval_coupling = True
+        self.rkn_interval_tol_exponent = 8.0
         self.rkn_last_accepted_steps = 0
         self.rkn_last_rejected_steps = 0
         self.rkn_last_min_dt = 0.0
@@ -2874,6 +2883,9 @@ class Predictor:
             "rkn_min_factor": float(self.rkn_min_factor),
             "rkn_max_factor": float(self.rkn_max_factor),
             "rkn_max_rejects": int(self.rkn_max_rejects),
+            "base_precision": float(self.base_precision),
+            "rkn_interval_coupling": bool(self.rkn_interval_coupling),
+            "rkn_interval_tol_exponent": float(self.rkn_interval_tol_exponent),
             "strict_snapshot_matching": bool(self.strict_snapshot_matching),
             "use_time_dependent_bodies": bool(self.use_time_dependent_bodies),
             "use_reference_acceleration_correction": False,
@@ -2955,6 +2967,42 @@ class Predictor:
                 max_factor = max(min_factor, 5.0)
             if max_rejects < 0:
                 max_rejects = 0
+
+            # --- Option A: intervall-gekoppelte schrittweite + toleranz -------
+            # Koppelt die schrittzahl an die punktzahl statt an die bogenlänge.
+            # Die max_dt-decke begrenzt schritte auf ~ein abtast-intervall pro
+            # schritt (kosten-obergrenze ~ num_points auf glatten bögen); die
+            # toleranz-lockerung sorgt dafür, dass diese decke auf glatten bögen
+            # tatsächlich bindet, statt unnötig fein zu unterteilen. Nahe
+            # vorbeiflügen übersteigt der fehler auch die gelockerte toleranz
+            # weiterhin → unterteilung bis min_dt bleibt erhalten (sicherheit).
+            # base_precision >= effektive precision → coarsen==1 → identität.
+            if bool(snapshot.get("rkn_interval_coupling", False)):
+                base_precision = float(snapshot.get("base_precision", 0.0))
+                precision_val = float(snapshot.get("precision", 0.0))
+                if base_precision > 0.0 and precision_val > base_precision:
+                    coarsen = precision_val / base_precision
+                    speed = math.hypot(
+                        float(snapshot.get("ship_vx", 0.0)),
+                        float(snapshot.get("ship_vy", 0.0)),
+                    )
+                    # zielschrittweite: ~ein abtast-intervall arc pro schritt
+                    if speed > 1e-9:
+                        dt_target = precision_val / speed
+                    else:
+                        dt_target = max_dt * coarsen
+                    # decke nur anheben, nie senken; gegen absurde werte kappen
+                    eff_max_dt = max(max_dt, min(dt_target, max_dt * coarsen))
+                    if math.isfinite(eff_max_dt) and eff_max_dt > max_dt:
+                        max_dt = eff_max_dt
+                        base_dt = max_dt
+                    # toleranz mit der vergröberung lockern (RKN4: fehler ~ dt^p)
+                    exponent = float(snapshot.get("rkn_interval_tol_exponent", 4.0))
+                    tol_scale = coarsen ** exponent
+                    if math.isfinite(tol_scale) and tol_scale > 1.0:
+                        rtol = rtol * tol_scale
+                        atol_pos = atol_pos * tol_scale
+                        atol_vel = atol_vel * tol_scale
 
             body_scripted = snapshot.get("body_scripted", None)
             body_a = snapshot.get("body_a", None)
