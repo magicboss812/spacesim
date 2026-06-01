@@ -1,0 +1,1 @@
+Zuerst kam in den Sinn ein Simulationsspiel für die Seminararbeit zu fertigen. Grundlegende 
