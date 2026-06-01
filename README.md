@@ -1,3 +1,4 @@
+
 # Stand bis 31.05.2026
 
 > [!IMPORTANT]
@@ -7,24 +8,23 @@
 
 ## Inhaltsverzeichnis
 
-- [Inhaltsverzeichnis](#inhaltsverzeichnis)
-- [Physik der Schiffsintegration](#physik-der-schiffsintegration)
-  - [Gravitationsquellen bewegen sich mit der Zeit](#gravitationsquellen-bewegen-sich-mit-der-zeit)
-  - [Auswirkung](#auswirkung)
-- [Adaptive Präzision im Predictor](#adaptive-präzision-im-predictor)
-  - [Schrittweite gekoppelt an den Abtastabstand](#schrittweite-gekoppelt-an-den-abtastabstand)
-- [Darstellung weit entfernter Körper](#darstellung-weit-entfernter-körper)
-  - [Icon-Swap bei kleinem Bildschirmradius](#icon-swap-bei-kleinem-bildschirmradius)
-  - [Auswirkung im Überblick](#auswirkung-im-überblick)
-- [Orbit-Spur-Culling](#orbit-spur-culling)
-- [Rendering-Pipeline der Vorhersagelinie](#rendering-pipeline-der-vorhersagelinie)
-  - [Reihenfolge: RDP vor Densify](#reihenfolge-rdp-vor-densify)
-- [Weitere Performance-Verbesserungen](#weitere-performance-verbesserungen)
-- [Gesamtbild](#gesamtbild)
-  - [Status-Checkliste (31.05.2026)](#status-checkliste-31052026)
+1. [Ausführung](#ausführung)
+2. [Physik der Schiffsintegration](#physik-der-schiffsintegration)
+3. [Adaptive Präzision im Predictor](#adaptive-präzision-im-predictor)
+4. [Darstellung weit entfernter Körper](#darstellung-weit-entfernter-körper)
+5. [Orbit-Spur-Culling](#orbit-spur-culling)
+6. [Rendering-Pipeline der Vorhersagelinie](#rendering-pipeline-der-vorhersagelinie)
+7. [Weitere Performance-Verbesserungen](#weitere-performance-verbesserungen)
+8. [Gesamtbild](#gesamtbild)
 
 ---
+## Ausführung
+### Requirements:
+`pip install pygame pyopengl pyopengl-accelerate numba numpy`
+### Starten:
+`python test.py`
 
+---
 ## Physik der Schiffsintegration
 
 ### Gravitationsquellen bewegen sich mit der Zeit
