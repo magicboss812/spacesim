@@ -104,7 +104,3 @@ class schiffcontrol:
             direction = direction * -1.0
         self.apply_directional_thrust(direction, amount, real_dt)
 
-    def handle_input(self, keys, sim_dt, real_dt, frame=None, time_s=0.0):
-        """Abwärtskompatibler Helfer: rotation (real_dt) und schub (einmal pro frame) anwenden."""
-        self.handle_rotation(keys, real_dt, frame=frame, time_s=time_s)
-        self.apply_thrust(keys, real_dt)

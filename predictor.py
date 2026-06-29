@@ -2660,12 +2660,6 @@ class Predictor:
             effective = min(effective, max(self.min_precision, zoom_precision))
         return effective
 
-    def _serialize_bodies(self, world):
-        lst = []
-        for b in world.body:
-            lst.append((b.position.x, b.position.y, b.mass, getattr(b, "fixed", True)))
-        return lst
-
     def _serialize_bodies_numba(self, world):
         count = len(world.body)
         body_x = np.empty(count, dtype=np.float64)
@@ -2722,104 +2716,6 @@ class Predictor:
             body_parent[i] = int(parent_index)
 
         return body_scripted, body_a, body_e, body_theta, body_arg, body_parent
-
-    def _compute_acc(self, position, bodies, G):
-        total = Vec2(0.0, 0.0)
-        for bx, by, mass, fixed in bodies:
-            if not fixed:
-                continue
-            dirv = Vec2(bx, by) - position
-            dist2 = dirv.magnitude_squared()
-            if dist2 < 1e-12:
-                continue
-            invd = 1.0 / math.sqrt(dist2)
-            fdir = dirv * invd
-            accm = G * mass / dist2
-            total += fdir * accm
-        return total
-
-    def _rk4_step(self, p, v, bodies, G):
-        dt = self.dt
-
-        k1_a = self._compute_acc(p, bodies, G)
-        k1_v = v
-
-        p2 = p + k1_v * (dt / 2)
-        v2 = v + k1_a * (dt / 2)
-        k2_a = self._compute_acc(p2, bodies, G)
-        k2_v = v2
-
-        p3 = p + k2_v * (dt / 2)
-        v3 = v + k2_a * (dt / 2)
-        k3_a = self._compute_acc(p3, bodies, G)
-        k3_v = v3
-
-        p4 = p + k3_v * dt
-        v4 = v + k3_a * dt
-        k4_a = self._compute_acc(p4, bodies, G)
-        k4_v = v4
-
-        new_p = p + (k1_v + 2 * k2_v + 2 * k3_v + k4_v) * (dt / 6)
-        new_v = v + (k1_a + 2 * k2_a + 2 * k3_a + k4_a) * (dt / 6)
-
-        return new_p, new_v
-
-    def _compute_full_python(self, ship, world, max_points):
-        bodies = self._serialize_bodies(world)
-        G = world.G
-
-        pos = ship.position.copy()
-        vel = ship.velocity.copy()
-        pts = [pos.copy()]
-
-        accumulated = 0.0
-
-        safety_iters = max(100000, max_points * 100)
-        iters = 0
-
-        while len(pts) < max_points and iters < safety_iters:
-            iters += 1
-            next_pos, next_vel = self._rk4_step(pos, vel, bodies, G)
-
-            seg_vec = next_pos - pos
-            seg_len = seg_vec.magnitude()
-
-            if seg_len <= 0:
-                pos = next_pos
-                vel = next_vel
-                continue
-
-            local_pos = pos
-            local_vel = vel
-            remaining_vec = seg_vec
-            remaining_len = seg_len
-
-            while remaining_len + accumulated >= self.precision and len(pts) < max_points:
-                if remaining_len <= 0:
-                    break
-
-                distance_to_place = self.precision - accumulated
-                fraction = distance_to_place / remaining_len
-
-                sample_point = local_pos + remaining_vec * fraction
-                sample_vel = local_vel + (next_vel - local_vel) * fraction
-
-                pts.append(sample_point.copy())
-
-                local_pos = sample_point
-                local_vel = sample_vel
-
-                remaining_vec = next_pos - local_pos
-                remaining_len = remaining_vec.magnitude()
-                accumulated = 0.0
-
-            if remaining_len + accumulated < self.precision:
-                accumulated += remaining_len
-
-            pos = next_pos
-            vel = next_vel
-
-        return pts
 
     def _cancel_pending_job(self):
     # alle wartenden futures abbrechen (unterstützt multi-worker-modus).

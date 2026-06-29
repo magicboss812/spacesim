@@ -37,7 +37,7 @@ class Vec2:
             return self
         return NotImplemented
     
-    def __isub(self, other):
+    def __isub__(self, other):
         """in-place vektor-subtraktion."""
         if isinstance(other, Vec2):
             self.x -= other.x

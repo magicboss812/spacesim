@@ -4,7 +4,7 @@ import pygame
 from pygame.locals import *
 from OpenGL.GL import *
 from loader import SystemLoader
-from vec import Vec2, G, vec
+from vec import G
 from bodies import body
 from world import world
 from camera import Camera

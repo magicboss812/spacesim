@@ -60,25 +60,6 @@ def _rotate_xy(x_m: float, y_m: float, angle_rad: float) -> tuple[float, float]:
     return c * x_m + s * y_m, -s * x_m + c * y_m
 
 
-def _world_to_frame_xy(
-    world_x: float,
-    world_y: float,
-    origin_x: float,
-    origin_y: float,
-    frame_x_axis_angle_rad: float,
-) -> tuple[float, float]:
-    rel_x = float(world_x) - float(origin_x)
-    rel_y = float(world_y) - float(origin_y)
-    return _rotate_xy(rel_x, rel_y, float(frame_x_axis_angle_rad))
-
-
-def _heading_world_to_frame(theta_world: float, frame_x_axis_angle_rad: float) -> float:
-    hx = math.cos(float(theta_world))
-    hy = math.sin(float(theta_world))
-    fx, fy = _rotate_xy(hx, hy, float(frame_x_axis_angle_rad))
-    return math.atan2(fy, fx)
-
-
 def _has_scripted_orbit_data(body) -> bool:
     try:
         a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
@@ -753,29 +734,6 @@ def _fallback_secondary_index(primary_index: int, bodies: Sequence[object]) -> i
         if idx != int(primary_index):
             return idx
     return int(primary_index)
-
-
-def _find_virtual_swap_child(primary_body, bodies: Sequence[object]):
-    """Gibt das scripted-kind zurück, das für einen rein visuellen orbit-swap verwendet wird, oder None."""
-    try:
-        has_orbit = getattr(primary_body, 'semi_major_axis', None) is not None and float(getattr(primary_body, 'semi_major_axis', 0.0)) > 0.0
-    except Exception:
-        has_orbit = False
-
-    if has_orbit or (not getattr(primary_body, 'fixed', False)):
-        return None
-
-    candidate = None
-    for child in bodies:
-        if getattr(child, 'is_moon_of', None) is primary_body and (getattr(child, 'scripted_orbit', False) or _has_scripted_orbit_data(child)):
-            try:
-                if float(getattr(child, 'semi_major_axis', 0.0) or 0.0) > 0.0:
-                    return child
-            except Exception:
-                pass
-            if candidate is None:
-                candidate = child
-    return candidate
 
 
 def resolve_plotting_camera_target_index(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> int:

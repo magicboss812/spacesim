@@ -149,6 +149,19 @@ class Renderer:
         self._body_quad_vbo = None
 
         self._label_texture_cache = {}
+        # obergrenze für gecachte label-texturen: ständig wechselnde texte
+        # (z. B. das schiffs-speed-label, das sich fast jeden frame ändert)
+        # würden sonst unbegrenzt GL-texturen anhäufen (vram-leak).
+        self._label_texture_cache_max = 256
+        # pro-frame-memo der kamera-position im aktiven frame: dieselbe
+        # transformation wird sonst von _draw_body (pro körper!), trails und
+        # prediction mehrfach pro frame berechnet.
+        self._camera_frame_xy_key = None
+        self._camera_frame_xy_value = (0.0, 0.0)
+        # cache der pro-zeile gerenderten HUD-surfaces: ändert sich nur eine
+        # zeile (z. B. kamera-position), müssen die übrigen nicht erneut durch
+        # font.render laufen.
+        self._hud_line_surface_cache = {}
         self._hud_texture = None
         self._hud_texture_size = (0, 0)
         # HUD-memoization: solange die formatierten textzeilen identisch sind,
@@ -475,7 +488,17 @@ class Renderer:
             return float(x), float(y)
 
     def _frame_camera_xy(self, camera):
-        return self._frame_transform_xy(float(camera.position.x), float(camera.position.y))
+        # memoisiert: ergebnis hängt nur von aktivem frame, frame-zeit und
+        # kamera-position ab — alles konstant innerhalb eines render-frames.
+        cam_x = float(camera.position.x)
+        cam_y = float(camera.position.y)
+        key = (id(self._active_frame()), self._frame_time_s, cam_x, cam_y)
+        if key == self._camera_frame_xy_key:
+            return self._camera_frame_xy_value
+        value = self._frame_transform_xy(cam_x, cam_y)
+        self._camera_frame_xy_key = key
+        self._camera_frame_xy_value = value
+        return value
 
     def _world_to_screen_xy(self, world_x, world_y, camera, camera_frame_xy=None):
         if camera_frame_xy is None:
@@ -560,6 +583,8 @@ class Renderer:
     def _reset_reference_trajectories(self):
         self._reference_traj_points = {}
         self._reference_traj_last_sample_time = None
+        # frame-wechsel: gecachte kamera-frame-position ist nicht mehr gültig.
+        self._camera_frame_xy_key = None
 
     def _init_gpu_helpers(self):
         """Erstellt wiederverwendbare puffer und GLSL-programme für kritische render-pfade."""
@@ -1032,6 +1057,17 @@ class Renderer:
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            # cache deckeln (FIFO): ständig wechselnde texte (speed-label)
+            # würden sonst unbegrenzt GL-texturen anhäufen. Stabile labels
+            # (körpernamen) werden nach einer eviction einfach neu erzeugt.
+            if len(self._label_texture_cache) >= self._label_texture_cache_max:
+                evict_n = max(1, self._label_texture_cache_max // 4)
+                for old_key in list(self._label_texture_cache.keys())[:evict_n]:
+                    old_texid = self._label_texture_cache.pop(old_key)[0]
+                    try:
+                        glDeleteTextures(1, [old_texid])
+                    except Exception:
+                        pass
             self._label_texture_cache[key] = (texid, w, h)
             return (texid, w, h)
         except Exception:
@@ -1134,22 +1170,13 @@ class Renderer:
             if trail is None or len(trail) < 2:
                 continue
 
-            base = getattr(body, 'color', (200, 200, 200))
-            cr = min(1.0, max(0.0, base[0] / 255.0))
-            cg = min(1.0, max(0.0, base[1] / 255.0))
-            cb = min(1.0, max(0.0, base[2] / 255.0))
-
-            screen_points = []
-            min_sx = min_sy = float('inf')
-            max_sx = max_sy = float('-inf')
-            for fx, fy in trail:
-                sx = half_w + (fx - camera_frame_xy[0]) * scale
-                sy = half_h - (fy - camera_frame_xy[1]) * scale
-                screen_points.append((sx, sy))
-                if sx < min_sx: min_sx = sx
-                if sx > max_sx: max_sx = sx
-                if sy < min_sy: min_sy = sy
-                if sy > max_sy: max_sy = sy
+            # Vektorisiert statt python-schleife: spuren haben bis zu
+            # reference_trajectories_max_points punkte pro körper und frame.
+            arr = np.asarray(trail, dtype=np.float64)
+            sxs = half_w + (arr[:, 0] - camera_frame_xy[0]) * scale
+            sys_ = half_h - (arr[:, 1] - camera_frame_xy[1]) * scale
+            min_sx = float(sxs.min()); max_sx = float(sxs.max())
+            min_sy = float(sys_.min()); max_sy = float(sys_.max())
 
             # Größen-schwelle: kollabiert die ganze spur auf eine sub-pixel-fläche
             # (z. B. weit herausgezoomt), ist sie ohnehin unsichtbar -> nicht
@@ -1158,7 +1185,27 @@ class Renderer:
             if (max_sx - min_sx) < min_px and (max_sy - min_sy) < min_px:
                 continue
 
-            runs = self._visible_window_runs(screen_points, margin_px=self.prediction_visibility_margin_px)
+            # Komplett off-screen liegende spur: weder punkte-liste bauen noch
+            # pro segment clippen.
+            margin = float(self.prediction_visibility_margin_px)
+            right = self.width + margin
+            bottom = self.height + margin
+            if max_sx < -margin or min_sx > right or max_sy < -margin or min_sy > bottom:
+                continue
+
+            base = getattr(body, 'color', (200, 200, 200))
+            cr = min(1.0, max(0.0, base[0] / 255.0))
+            cg = min(1.0, max(0.0, base[1] / 255.0))
+            cb = min(1.0, max(0.0, base[2] / 255.0))
+
+            screen_points = list(zip(sxs.tolist(), sys_.tolist()))
+
+            if min_sx >= -margin and max_sx <= right and min_sy >= -margin and max_sy <= bottom:
+                # Spur liegt vollständig im sichtfenster: Liang-Barsky wäre für
+                # jedes segment ein no-op und lieferte exakt einen run.
+                runs = (screen_points,)
+            else:
+                runs = self._visible_window_runs(screen_points, margin_px=margin)
             for run in runs:
                 if len(run) < 2:
                     continue
@@ -1821,62 +1868,6 @@ class Renderer:
         return (-margin_px <= sx <= self.width + margin_px and
                 -margin_px <= sy <= self.height + margin_px)
 
-    def _segment_intersects_rect(self, x0, y0, x1, y1, xmin, xmax, ymin, ymax):
-        left = 1
-        right = 2
-        bottom = 4
-        top = 8
-
-        def outcode(x, y):
-            code = 0
-            if x < xmin:
-                code |= left
-            elif x > xmax:
-                code |= right
-            if y < ymin:
-                code |= bottom
-            elif y > ymax:
-                code |= top
-            return code
-
-        c0 = outcode(x0, y0)
-        c1 = outcode(x1, y1)
-
-        while True:
-            if (c0 | c1) == 0:
-                return True
-            if (c0 & c1) != 0:
-                return False
-
-            out = c0 if c0 != 0 else c1
-            if out & top:
-                if y1 == y0:
-                    return False
-                x = x0 + (x1 - x0) * (ymax - y0) / (y1 - y0)
-                y = ymax
-            elif out & bottom:
-                if y1 == y0:
-                    return False
-                x = x0 + (x1 - x0) * (ymin - y0) / (y1 - y0)
-                y = ymin
-            elif out & right:
-                if x1 == x0:
-                    return False
-                y = y0 + (y1 - y0) * (xmax - x0) / (x1 - x0)
-                x = xmax
-            else:
-                if x1 == x0:
-                    return False
-                y = y0 + (y1 - y0) * (xmin - x0) / (x1 - x0)
-                x = xmin
-
-            if out == c0:
-                x0, y0 = x, y
-                c0 = outcode(x0, y0)
-            else:
-                x1, y1 = x, y
-                c1 = outcode(x1, y1)
-
     def _visible_window_runs(self, screen_points, margin_px):
         return self._build_clipped_polyline_runs(screen_points, margin_px)
 
@@ -2505,12 +2496,6 @@ class Renderer:
         stats['runs'] = len(sampled_runs)
         return sampled_runs
 
-    def _is_visible(self, screen_pos, radius):
-        x, y = screen_pos
-        margin = radius + 100
-        return (-margin < x < self.width + margin and 
-                -margin < y < self.height + margin)
-    
     def _draw_body_label(self, name, screen_pos, radius):
         # Label mit gecachten GL-Texturen zeichnen, um pro-Frame GL-Allocationen zu vermeiden.
         # Label horizontal zentrieren und über dem Körper platzieren, um
@@ -2656,9 +2641,18 @@ class Renderer:
 
         hud_surface = pygame.Surface((hud_width, hud_height), pygame.SRCALPHA)
 
+        # Zeilen-surfaces cachen: ändert sich nur eine zeile (z. B. kamera-
+        # position beim verfolgen), durchlaufen die übrigen kein font.render.
+        # Der cache wird pro frame auf die aktuellen texte reduziert und kann
+        # daher nicht wachsen.
+        new_line_cache = {}
         for i, text in enumerate(texts):
-            text_surface = self.font_medium.render(text, True, (255, 255, 255))
+            text_surface = self._hud_line_surface_cache.get(text)
+            if text_surface is None:
+                text_surface = self.font_medium.render(text, True, (255, 255, 255))
+            new_line_cache[text] = text_surface
             hud_surface.blit(text_surface, (0, i * line_height))
+        self._hud_line_surface_cache = new_line_cache
 
         # HUD in OpenGL rendern
         self._blit_pygame_surface(hud_surface, origin_x, origin_y)
