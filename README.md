@@ -1,4 +1,3 @@
-
 # Stand bis 31.05.2026
 
 > [!IMPORTANT]
@@ -8,14 +7,25 @@
 
 ## Inhaltsverzeichnis
 
-1. [Ausführung](#ausführung)
-2. [Physik der Schiffsintegration](#physik-der-schiffsintegration)
-3. [Adaptive Präzision im Predictor](#adaptive-präzision-im-predictor)
-4. [Darstellung weit entfernter Körper](#darstellung-weit-entfernter-körper)
-5. [Orbit-Spur-Culling](#orbit-spur-culling)
-6. [Rendering-Pipeline der Vorhersagelinie](#rendering-pipeline-der-vorhersagelinie)
-7. [Weitere Performance-Verbesserungen](#weitere-performance-verbesserungen)
-8. [Gesamtbild](#gesamtbild)
+- [Stand bis 31.05.2026](#stand-bis-31052026)
+  - [Inhaltsverzeichnis](#inhaltsverzeichnis)
+  - [Ausführung](#ausführung)
+    - [Requirements:](#requirements)
+    - [Starten:](#starten)
+  - [Physik der Schiffsintegration](#physik-der-schiffsintegration)
+    - [Gravitationsquellen bewegen sich mit der Zeit](#gravitationsquellen-bewegen-sich-mit-der-zeit)
+    - [Auswirkung](#auswirkung)
+  - [Adaptive Präzision im Predictor](#adaptive-präzision-im-predictor)
+    - [Schrittweite gekoppelt an den Abtastabstand](#schrittweite-gekoppelt-an-den-abtastabstand)
+  - [Darstellung weit entfernter Körper](#darstellung-weit-entfernter-körper)
+    - [Icon-Swap bei kleinem Bildschirmradius](#icon-swap-bei-kleinem-bildschirmradius)
+    - [Auswirkung im Überblick](#auswirkung-im-überblick)
+  - [Orbit-Spur-Culling](#orbit-spur-culling)
+  - [Rendering-Pipeline der Vorhersagelinie](#rendering-pipeline-der-vorhersagelinie)
+    - [Reihenfolge: RDP vor Densify](#reihenfolge-rdp-vor-densify)
+  - [Weitere Performance-Verbesserungen](#weitere-performance-verbesserungen)
+  - [Gesamtbild](#gesamtbild)
+    - [Status-Checkliste (31.05.2026)](#status-checkliste-31052026)
 
 ---
 ## Ausführung
