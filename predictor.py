@@ -1228,6 +1228,149 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True, nogil=True, fastmath=True)
+    def _find_apsis_markers_numba(
+        pts,
+        base_sim_time,
+        ref_index,
+        body_x,
+        body_y,
+        body_m,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        use_time_dependent_bodies,
+        max_markers,
+    ):
+        # sucht lokale extrema des abstands schiff<->referenzkörper entlang der
+        # predictor-punkte (pts: (n,3) mit x, y, absoluter sim-zeit). marker
+        # liegen exakt auf vorhandenen punkten, es wird nicht interpoliert.
+        # rückgabe: (out, count); out-zeilen: x, y, t_abs, kind, r wobei
+        # kind 0.0 = periapsis (lokales minimum), 1.0 = apoapsis (maximum).
+        out = np.empty((max_markers, 5), dtype=np.float64)
+        count = 0
+        n = pts.shape[0]
+        if n < 3 or ref_index < 0 or ref_index >= body_x.shape[0]:
+            return out, count
+
+        # pass 1: quadrat-abstand zum referenzkörper pro punkt. der teure
+        # kepler-solve (scripted refs) läuft nur an stützstellen, dazwischen
+        # wird die ref-position linear über die zeit interpoliert: fehler
+        # ~0.5*a_ref*(window/2)^2 (erde/mond: zehner meter), weit unter dem
+        # punktabstand und der integrator-toleranz — die extremum-wahl
+        # zwischen nachbarpunkten bleibt davon unberührt.
+        d2_arr = np.empty(n, dtype=np.float64)
+        if use_time_dependent_bodies != 0:
+            stride_max = 64
+            time_window = 240.0
+            ia = 0
+            rax, ray = _body_position_at_time_numba(
+                ref_index, pts[0, 2] - base_sim_time,
+                body_x, body_y, body_m, body_scripted,
+                body_a, body_e, body_theta, body_arg, body_parent, G,
+            )
+            while ia < n - 1:
+                ib = ia + stride_max
+                if ib > n - 1:
+                    ib = n - 1
+                # zeitfenster einhalten (punktzeiten sind monoton)
+                while ib > ia + 1 and pts[ib, 2] - pts[ia, 2] > time_window:
+                    ib = ia + (ib - ia) // 2
+                rbx, rby = _body_position_at_time_numba(
+                    ref_index, pts[ib, 2] - base_sim_time,
+                    body_x, body_y, body_m, body_scripted,
+                    body_a, body_e, body_theta, body_arg, body_parent, G,
+                )
+                ta = pts[ia, 2]
+                span = pts[ib, 2] - ta
+                inv_span = 1.0 / span if span > 0.0 else 0.0
+                for i in range(ia, ib):
+                    s = (pts[i, 2] - ta) * inv_span
+                    rx = rax + (rbx - rax) * s
+                    ry = ray + (rby - ray) * s
+                    dx = pts[i, 0] - rx
+                    dy = pts[i, 1] - ry
+                    d2_arr[i] = dx * dx + dy * dy
+                ia = ib
+                rax = rbx
+                ray = rby
+            dx = pts[n - 1, 0] - rax
+            dy = pts[n - 1, 1] - ray
+            d2_arr[n - 1] = dx * dx + dy * dy
+        else:
+            rx = body_x[ref_index]
+            ry = body_y[ref_index]
+            for i in range(n):
+                dx = pts[i, 0] - rx
+                dy = pts[i, 1] - ry
+                d2_arr[i] = dx * dx + dy * dy
+
+        # pass 2: trend-scan über den abstandsverlauf
+        best_d2 = d2_arr[0]
+        best_idx = 0
+        trend = 0  # 0 unbestimmt, 1 steigend, -1 fallend
+
+        for i in range(1, n):
+            if count >= max_markers:
+                break
+            d2 = d2_arr[i]
+            if not math.isfinite(d2):
+                continue
+
+            # relative hysterese: richtungswechsel erst ab signifikanter
+            # abstandsänderung werten, sonst erzeugen interpolations-wobble
+            # und quasi-kreisbahnen serienweise schein-extrema.
+            hyst = 1e-4 * best_d2
+
+            if trend == 0:
+                if d2 > best_d2 + hyst:
+                    trend = 1
+                    best_d2 = d2
+                    best_idx = i
+                elif d2 < best_d2 - hyst:
+                    trend = -1
+                    best_d2 = d2
+                    best_idx = i
+            elif trend == 1:
+                if d2 >= best_d2:
+                    best_d2 = d2
+                    best_idx = i
+                elif d2 < best_d2 - hyst:
+                    # trend kippt nach unten: verfolgtes maximum = apoapsis.
+                    # best_idx == 0 (schiffsposition) wird unterdrückt.
+                    if best_idx > 0:
+                        out[count, 0] = pts[best_idx, 0]
+                        out[count, 1] = pts[best_idx, 1]
+                        out[count, 2] = pts[best_idx, 2]
+                        out[count, 3] = 1.0
+                        out[count, 4] = math.sqrt(best_d2)
+                        count += 1
+                    trend = -1
+                    best_d2 = d2
+                    best_idx = i
+            else:
+                if d2 <= best_d2:
+                    best_d2 = d2
+                    best_idx = i
+                elif d2 > best_d2 + hyst:
+                    if best_idx > 0:
+                        out[count, 0] = pts[best_idx, 0]
+                        out[count, 1] = pts[best_idx, 1]
+                        out[count, 2] = pts[best_idx, 2]
+                        out[count, 3] = 0.0
+                        out[count, 4] = math.sqrt(best_d2)
+                        count += 1
+                    trend = 1
+                    best_d2 = d2
+                    best_idx = i
+
+        return out, count
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
     def _leapfrog_step_numba(
         px,
         py,
@@ -1930,6 +2073,14 @@ class Predictor:
         self.reference_body_index = None
         self._rolling_rkn_warning_printed = False
 
+        # apoapsis/periapsis-marker entlang der prädiktionslinie (relativ zum
+        # referenzkörper). lazy berechnet in get_apsis_markers() und über die
+        # punkte-identität gecacht, damit pro trajektorie nur ein O(n)-scan läuft.
+        self.apsis_markers_enabled = True
+        self.apsis_max_markers = 16
+        self._apsis_markers = self._empty_apsis_array()
+        self._apsis_cache_key = None
+
         if self.async_compute and not self.rolling_mode:
             self._ensure_executor()
             self._pending_futures = []
@@ -2098,6 +2249,7 @@ class Predictor:
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
+        self._clear_apsis_markers()
 
     def set_reference_body_index(self, index: int | None):
         if index is None:
@@ -2278,10 +2430,18 @@ class Predictor:
     def _empty_points_array(self):
         return np.empty((0, 3), dtype=np.float64) if np is not None else []
 
+    def _empty_apsis_array(self):
+        return np.empty((0, 5), dtype=np.float64) if np is not None else []
+
+    def _clear_apsis_markers(self):
+        self._apsis_markers = self._empty_apsis_array()
+        self._apsis_cache_key = None
+
     def _clear_prediction_points(self):
         self.points = self._empty_points_array()
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
+        self._clear_apsis_markers()
 
     def _allowed_velocity_delta(self, speed):
         try:
@@ -3799,6 +3959,61 @@ class Predictor:
 
     def get_points(self):
         return self.points
+
+    def get_apsis_markers(self):
+        """Apoapsis/Periapsis-Marker der aktuellen Prädiktionslinie.
+
+        Rückgabe: ndarray (m, 5) mit spalten x, y, t_abs, kind, r —
+        kind 0.0 = periapsis, 1.0 = apoapsis; r = abstand zum referenz-
+        körper in metern. x/y sind absolute (baryzentrische) weltkoords
+        des zugehörigen predictor-punkts, t_abs die absolute sim-zeit,
+        damit der renderer zeitabhängig frame-transformieren kann.
+        Leer wenn kein referenzkörper gewählt ist. Ergebnis wird über die
+        identität des punkte-arrays gecacht: der O(n)-scan läuft nur wenn
+        eine neue trajektorie geswappt (oder geschnitten) wurde.
+        """
+        if not self.apsis_markers_enabled:
+            return self._empty_apsis_array()
+        pts = self.points
+        if np is None or not isinstance(pts, np.ndarray) or pts.shape[0] < 3:
+            return self._empty_apsis_array()
+        snapshot = self._last_swapped_snapshot
+        if snapshot is None:
+            return self._empty_apsis_array()
+        try:
+            ref_index = int(snapshot.get("reference_body_index", -1))
+        except Exception:
+            ref_index = -1
+        if ref_index < 0:
+            return self._empty_apsis_array()
+
+        cache_key = (id(pts), int(pts.shape[0]), ref_index)
+        if cache_key == self._apsis_cache_key:
+            return self._apsis_markers
+
+        try:
+            markers, count = _find_apsis_markers_numba(
+                pts,
+                float(snapshot.get("sim_time", 0.0)),
+                ref_index,
+                snapshot["body_x"],
+                snapshot["body_y"],
+                snapshot["body_m"],
+                snapshot["body_scripted"],
+                snapshot["body_a"],
+                snapshot["body_e"],
+                snapshot["body_theta"],
+                snapshot["body_arg"],
+                snapshot["body_parent"],
+                float(snapshot["G"]),
+                1 if bool(snapshot.get("use_time_dependent_bodies", True)) else 0,
+                int(self.apsis_max_markers),
+            )
+            self._apsis_markers = markers[:int(count)].copy()
+        except Exception:
+            self._apsis_markers = self._empty_apsis_array()
+        self._apsis_cache_key = cache_key
+        return self._apsis_markers
 
     def get_precision_factor(self):
         if self.base_precision <= 0.0:

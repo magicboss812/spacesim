@@ -60,6 +60,131 @@ def _rotate_xy(x_m: float, y_m: float, angle_rad: float) -> tuple[float, float]:
     return c * x_m + s * y_m, -s * x_m + c * y_m
 
 
+def _unit_or_none(x: float, y: float):
+    mag = math.hypot(x, y)
+    if mag <= 1e-12:
+        return None
+    return Vec2(x / mag, y / mag)
+
+
+def _prograde_from_line(frame, points):
+    """Frame-space tangent of the *actual* predictor polyline at its start.
+
+    ``points`` are absolute (barycentric) world samples ``[x, y, t_abs]`` — the
+    same array the renderer draws. Each sample is transformed to frame space at
+    its own time (exactly as the drawn line is), and the first non-degenerate
+    chord gives the on-screen tangent. Returns a unit ``Vec2`` in FRAME space,
+    or ``None`` when unavailable/degenerate.
+    """
+    if points is None:
+        return None
+    try:
+        n = len(points)
+    except Exception:
+        return None
+    if n < 2:
+        return None
+
+    p0 = points[0]
+    try:
+        x0 = float(p0[0])
+        y0 = float(p0[1])
+        t0 = float(p0[2]) if len(p0) >= 3 else 0.0
+        fx0, fy0 = frame.to_this_frame_xy(t0, x0, y0)
+    except Exception:
+        return None
+
+    # Scan forward for the first sample that yields a non-degenerate chord in
+    # frame space (early samples can be sub-epsilon apart when densely spaced).
+    for i in range(1, min(n, 16)):
+        pi = points[i]
+        try:
+            xi = float(pi[0])
+            yi = float(pi[1])
+            ti = float(pi[2]) if len(pi) >= 3 else t0
+            fxi, fyi = frame.to_this_frame_xy(ti, xi, yi)
+        except Exception:
+            continue
+        d = _unit_or_none(fxi - fx0, fyi - fy0)
+        if d is not None:
+            return d
+    return None
+
+
+def apparent_orbital_directions(frame, time_s, ship_pos, ship_vel, ref_pos=None,
+                                dt_s: float = 1.0, points=None):
+    """Orbital orientation targets as they *appear* in the given plotting frame.
+
+    Tied to the predictor line, not to a body. When ``points`` (the predictor's
+    absolute world polyline ``[x, y, t_abs]``) is supplied, prograde is the
+    tangent of that *actual drawn line* in frame space — so the directions track
+    the line as it changes shape (thrust, frame rotation, precession). When no
+    line is available, it falls back to a short straight-coast finite difference
+    of the ship's state, which still captures frame rotation but not gravity
+    curvature.
+
+    All returned directions are unit ``Vec2`` in FRAME space, or ``None`` when
+    degenerate:
+
+    - prograde        : tangent of the apparent trajectory
+    - retrograde      : -prograde
+    - normal_in       : perpendicular to prograde, toward the reference body
+                        (its frame position, or the frame origin when absent)
+    - antinormal_out  : -normal_in
+    """
+    t0 = float(time_s)
+    x0 = float(ship_pos.x)
+    y0 = float(ship_pos.y)
+
+    # Anchor: ship position in frame (only fixes the sign of normal_in).
+    try:
+        fx0, fy0 = frame.to_this_frame_xy(t0, x0, y0)
+    except Exception:
+        fx0, fy0 = x0, y0
+
+    # Prograde: prefer the real predictor line; else a straight-coast tangent.
+    prograde = _prograde_from_line(frame, points)
+    if prograde is None:
+        dt = max(1e-3, float(dt_s))
+        vx = float(ship_vel.x)
+        vy = float(ship_vel.y)
+        try:
+            cx0, cy0 = frame.to_this_frame_xy(t0, x0, y0)
+            cx1, cy1 = frame.to_this_frame_xy(t0 + dt, x0 + vx * dt, y0 + vy * dt)
+        except Exception:
+            cx0, cy0 = x0, y0
+            cx1, cy1 = x0 + vx * dt, y0 + vy * dt
+        prograde = _unit_or_none(cx1 - cx0, cy1 - cy0)
+
+    result = {"prograde": prograde, "retrograde": None, "normal_in": None, "antinormal_out": None}
+    if prograde is None:
+        return result
+
+    result["retrograde"] = Vec2(-prograde.x, -prograde.y)
+
+    perp_a = Vec2(-prograde.y, prograde.x)
+    perp_b = Vec2(prograde.y, -prograde.x)
+
+    if ref_pos is not None:
+        try:
+            rfx, rfy = frame.to_this_frame_xy(t0, float(ref_pos.x), float(ref_pos.y))
+        except Exception:
+            rfx, rfy = 0.0, 0.0
+    else:
+        rfx, rfy = 0.0, 0.0
+
+    inward = _unit_or_none(rfx - fx0, rfy - fy0)
+    if inward is not None:
+        dot_a = perp_a.x * inward.x + perp_a.y * inward.y
+        normal_in = perp_a if dot_a >= 0.0 else perp_b
+    else:
+        normal_in = perp_a
+
+    result["normal_in"] = normal_in
+    result["antinormal_out"] = Vec2(-normal_in.x, -normal_in.y)
+    return result
+
+
 def _has_scripted_orbit_data(body) -> bool:
     try:
         a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)

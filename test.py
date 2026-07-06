@@ -1,4 +1,3 @@
-import time
 import math
 import pygame
 from pygame.locals import *
@@ -199,7 +198,6 @@ def main():
 
     # Hauptschleife
     frame_count = 0
-    last_burn_ref_debug_t = -1.0e30
     while running:
         frame_dt = clock.tick(FPS) / 1000.0
 
@@ -251,6 +249,20 @@ def main():
                         target_overlay_enabled = not target_overlay_enabled
                         apply_frame_selection()
 
+                # I/K/J/L: orientierungs-snap (rastender autopilot) umschalten.
+                # Tippen rastet ein, erneutes Tippen löst; render() hält die Nase
+                # smooth an den gezeichneten orbital-vektoren im aktiven Frame.
+                elif event.key in (pygame.K_i, pygame.K_k, pygame.K_j, pygame.K_l):
+                    if ship_control is not None:
+                        snap_mode = {
+                            pygame.K_i: 'prograde',
+                            pygame.K_k: 'retrograde',
+                            pygame.K_j: 'normal_in',
+                            pygame.K_l: 'antinormal_out',
+                        }[event.key]
+                        ship_control.toggle_snap(snap_mode)
+                        print(f"SNAP: {ship_control.snap_mode or 'off'}")
+
                 # predictor länge/präzision steuerung: '+' / '-' länge anpassen, '9' / '0' abstand anpassen
                 ch = event.unicode
                 if ch == '+' or event.key == pygame.K_KP_PLUS:
@@ -293,32 +305,6 @@ def main():
             if ship is not None:
                 old_v = ship.velocity.copy()
                 ship_control.apply_thrust(keys, frame_dt)
-                burn_acc = ship_control.thrust_acc
-                directional_burn_pressed = (
-                    keys[pygame.K_i] or
-                    keys[pygame.K_k] or
-                    keys[pygame.K_l] or
-                    keys[pygame.K_j]
-                )
-                if reference_body is not None:
-                    if keys[pygame.K_i]:
-                        ship_control.apply_prograde_thrust(reference_body, burn_acc, frame_dt)
-                    if keys[pygame.K_k]:
-                        ship_control.apply_retrograde_thrust(reference_body, burn_acc, frame_dt)
-                    if keys[pygame.K_l]:
-                        ship_control.apply_radial_out_thrust(reference_body, burn_acc, frame_dt)
-                    if keys[pygame.K_j]:
-                        ship_control.apply_radial_in_thrust(reference_body, burn_acc, frame_dt)
-                if directional_burn_pressed and (time.perf_counter() - last_burn_ref_debug_t) >= 0.5:
-                    rel_v = ship_control.relative_velocity_to(reference_body)
-                    rel_p = ship_control.relative_position_to(reference_body)
-                    ref_name = reference_body.name if reference_body is not None else 'None'
-                    print(
-                        f"BURN_REF: ref={ref_name} "
-                        f"rel_v=({rel_v.x:.3e},{rel_v.y:.3e}) "
-                        f"rel_p=({rel_p.x:.3e},{rel_p.y:.3e})"
-                    )
-                    last_burn_ref_debug_t = time.perf_counter()
                 dv = ship.velocity - old_v
                 if dv.x != 0.0 or dv.y != 0.0:
                     mag = math.hypot(dv.x, dv.y)
@@ -352,8 +338,16 @@ def main():
                 predictor.update(target, w)
 
         points = predictor.get_points()
-        # Rendern
-        renderer.render(w.body, camera, points, predictor=predictor, sim_time=w.time, reference_body=reference_body)
+
+        # Rendern. Der Orientierungs-snap wird INNERHALB von render() angewendet,
+        # unmittelbar bevor der Schiffspfeil gezeichnet wird, mit demselben Frame
+        # und derselben Frame-Zeit wie die gezeichneten prograde/normal-Vektoren
+        # — so ist die Nase exakt an diese Vektoren gebunden. ship_control und
+        # frame_dt werden dafür durchgereicht.
+        renderer.render(
+            w.body, camera, points, predictor=predictor, sim_time=w.time,
+            reference_body=reference_body, ship_control=ship_control, real_dt=frame_dt,
+        )
         frame_count += 1
         if max_frames > 0 and frame_count >= max_frames:
             running = False

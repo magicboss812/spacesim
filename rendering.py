@@ -15,7 +15,7 @@ import time
 
 import numpy as np
 
-from reference_frames import IdentityReferenceFrame
+from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
 
 
 class Renderer:
@@ -83,6 +83,10 @@ class Renderer:
         self.prediction_render_max_draw_points = 1000
         self.prediction_render_max_world_length = None
         self.prediction_render_max_screen_length_px = None
+        # apoapsis/periapsis-marker auf der prädiktionslinie (vom predictor
+        # geliefert, hier nur gezeichnet).
+        self.show_apsis_markers = True
+        self.apsis_marker_radius_px = 5.0
         self._prediction_line_cache_key_value = None
         self._prediction_line_cache_points = None
         self._prediction_line_cache_stats = {}
@@ -1242,7 +1246,7 @@ class Renderer:
         except Exception:
             pass
 
-    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None, reference_body=None):
+    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None, reference_body=None, ship_control=None, real_dt=0.0):
         frame_t0 = time.perf_counter()
         timings = {
             'bodies_ms': 0.0,
@@ -1255,6 +1259,7 @@ class Renderer:
         if sim_time is not None:
             self.set_frame_time(sim_time)
         self.current_reference_body = reference_body
+        self._dbg_ship_control = ship_control
         try:
             self._current_body_index_by_id = {id(body): idx for idx, body in enumerate(bodies)}
         except Exception:
@@ -1365,9 +1370,20 @@ class Renderer:
         # genau mit dem Prädiktor-Startpunkt übereinstimmt.
         if ship_body is not None:
             bodies_t0 = time.perf_counter()
+            # Orientierungs-snap ANWENDEN bevor der pfeil gezeichnet wird, mit
+            # demselben frame + _frame_time_s wie die vektoren/der pfeil — so
+            # ist die nase exakt an die gezeichneten prograde/normal-vektoren
+            # gebunden (keine zeit-/konventionsdrift).
+            self._apply_orientation_snap(
+                ship_body, ship_control, reference_body, prediction_points, real_dt
+            )
             self._draw_body(ship_body, camera)
             self.draw_ship_velocity_vector(ship_body, camera, reference_body=reference_body)
             self.draw_ship_thrust_vector(ship_body, camera)
+            self.draw_ship_orientation_debug_vectors(
+                ship_body, camera, reference_body=reference_body,
+                prediction_points=prediction_points,
+            )
             timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
         hud_t0 = time.perf_counter()
@@ -1453,6 +1469,170 @@ class Renderer:
             self._draw_polyline([(sx, sy), (ex, ey)], color=(1.0, 0.5, 0.1, 0.95), width=2.0)
         except Exception:
             return
+
+    def active_plotting_frame(self):
+        """Public accessor for the frame the ship control uses to hold a snap."""
+        return self._active_frame()
+
+    def orbital_frame_directions(self, ship, reference_body=None, prediction_points=None):
+        """The frame-space orbital directions used to draw the overlay vectors.
+
+        Single source of truth for both the debug vectors and the orientation
+        snap: prograde/normal_in are the tangent/inward of the *drawn* predictor
+        line in the active plotting frame; retrograde/antinormal are their
+        opposites. Evaluated at the renderer's current ``_frame_time_s`` — the
+        same instant the ship arrow is drawn.
+        """
+        frame = self._active_frame()
+        if reference_body is None:
+            reference_body = getattr(self, "current_reference_body", None)
+        ref_pos = getattr(reference_body, "position", None)
+        return frame, apparent_orbital_directions(
+            frame, self._frame_time_s, ship.position, ship.velocity, ref_pos,
+            points=prediction_points,
+        )
+
+    def _apply_orientation_snap(self, ship, ship_control, reference_body,
+                                prediction_points, real_dt):
+        """Tie the ship nose to the drawn orbital vector for the latched snap.
+
+        Computes the world heading whose *drawn* arrow coincides with the
+        frame-space snap vector, using ``heading_from_this_frame`` at the SAME
+        ``_frame_time_s`` that ``_draw_body`` uses to draw the arrow. This makes
+        the nose lock onto the on-screen prograde/normal vector exactly, with no
+        dependence on sim_dt or frame rotation rate. The ship's stored ``theta``
+        stays in world space (physics remains absolute); only the render-time
+        transform is inverted here.
+        """
+        if ship is None or ship_control is None:
+            return
+        mode = getattr(ship_control, "snap_mode", None)
+        if not mode:
+            return
+        try:
+            frame, directions = self.orbital_frame_directions(
+                ship, reference_body, prediction_points
+            )
+            d = directions.get(mode)
+            if d is None:
+                return
+            # The orbital vectors render top-down (line shader, y flipped in
+            # line.vert) while the ship arrow renders bottom-up (fixed-function
+            # gluOrtho2D). So the arrow's on-screen heading is the vertical
+            # MIRROR of the vector for the same frame-space direction: for a
+            # target frame-heading a, the drawn arrow lands on the vector only
+            # when a is measured with d.y negated. Without the shader both paths
+            # are bottom-up and no flip is needed. This is what ties the snapped
+            # nose to the *drawn* prograde/normal vector (not its mirror).
+            dy_sign = -1.0 if getattr(self, "_line_program", None) else 1.0
+            ang_frame = math.atan2(dy_sign * float(d.y), float(d.x))
+            try:
+                theta_target = frame.heading_from_this_frame(self._frame_time_s, ang_frame)
+            except Exception:
+                theta_target = ang_frame
+            ship_control.orient_towards_angle(theta_target, real_dt)
+        except Exception:
+            return
+
+    def draw_ship_orientation_debug_vectors(self, ship, camera, reference_body=None,
+                                            prediction_points=None):
+        """Debug overlay: always draws prograde (green) + normal-inward (magenta).
+
+        Directions come from ``apparent_orbital_directions`` fed the actual
+        predictor polyline (``prediction_points``) — i.e. the tangent of the
+        drawn line as it appears in the active plotting frame — so they already
+        live in frame space and only need the screen y-flip, exactly like the
+        drawn trajectory. This keeps them glued to the predictor line as it
+        changes shape, including in rotating/translating frames.
+        """
+        if ship is None:
+            return
+
+        try:
+            frame, directions = self.orbital_frame_directions(
+                ship, reference_body, prediction_points
+            )
+
+            sx, sy = self._world_to_screen_xy(float(ship.position.x), float(ship.position.y), camera)
+            length_px = 55.0
+
+            for key, color in (
+                ("prograde", (0.2, 1.0, 0.35, 0.95)),
+                ("normal_in", (0.9, 0.3, 1.0, 0.95)),
+            ):
+                d = directions.get(key)
+                if d is None:
+                    continue
+                ex = sx + float(d.x) * length_px
+                ey = sy - float(d.y) * length_px
+                # Stash the ACTUAL drawn pixel direction of each vector so the
+                # diagnostic can compare raw screen geometry (non-derived).
+                if key == "normal_in":
+                    self._last_normal_screen_dir = (ex - sx, ey - sy)
+                elif key == "prograde":
+                    self._last_prograde_screen_dir = (ex - sx, ey - sy)
+                self._draw_polyline([(sx, sy), (ex, ey)], color=color, width=2.0)
+
+            self._debug_orientation_angles(ship, camera, frame, directions, sx, sy)
+        except Exception:
+            return
+
+    def _debug_orientation_angles(self, ship, camera, frame, directions, sx, sy):
+        """Env-guarded (SPACESIM_DEBUG_ORIENT=1) screen-space angle report.
+
+        Prints, in one common screen convention, the heading of: the actual
+        predictor orbit line, my green prograde, the blue velocity vector, and
+        the ship nose. Whichever one disagrees is the culprit for the reported
+        45 deg offset. Behavior-neutral: only prints, throttled.
+        """
+        if os.environ.get("SPACESIM_DEBUG_ORIENT", "0").strip().lower() in ("0", "", "false", "off", "no"):
+            return
+        self._debug_orient_counter = getattr(self, "_debug_orient_counter", 0) + 1
+        if self._debug_orient_counter % 30 != 1:
+            return
+
+        def sdeg(dx, dy):
+            # Screen-space heading: vectors are drawn as (dx, -dy), so the
+            # on-screen angle of a frame-space direction is atan2(-dy, dx).
+            return math.degrees(math.atan2(-dy, dx))
+
+        parts = []
+
+        # RAW drawn pixel angles (from the actual vertices, y-down screen space).
+        def rawdeg(v):
+            if v is None:
+                return None
+            return math.degrees(math.atan2(v[1], v[0]))
+
+        norm_v = getattr(self, "_last_normal_screen_dir", None)
+        arrow_v = getattr(self, "_last_arrow_screen_dir", None)
+        norm_deg = rawdeg(norm_v)
+        # DISPLAYED arrow angle: the arrow renders under gluOrtho2D bottom-up
+        # while vectors render via the line shader top-down, so the arrow's
+        # on-screen y is the negation of its input y.
+        arrow_deg = None if arrow_v is None else math.degrees(math.atan2(-arrow_v[1], arrow_v[0]))
+
+        if norm_deg is not None:
+            parts.append(f"magenta_raw={norm_deg:8.3f}")
+        if arrow_deg is not None:
+            parts.append(f"arrow_raw={arrow_deg:8.3f}")
+
+        # Per-sample rotation of each, so co-rotation vs counter-rotation is
+        # directly visible (this is the user's actual complaint).
+        prev = getattr(self, "_dbg_prev_raw", None)
+        if prev is not None and norm_deg is not None and arrow_deg is not None:
+            dmag = (norm_deg - prev[0] + 180.0) % 360.0 - 180.0
+            darr = (arrow_deg - prev[1] + 180.0) % 360.0 - 180.0
+            sense = "SAME" if (dmag * darr) >= 0 else "OPPOSITE"
+            parts.append(f"d_mag={dmag:+7.3f} d_arrow={darr:+7.3f} [{sense}]")
+        if norm_deg is not None and arrow_deg is not None:
+            self._dbg_prev_raw = (norm_deg, arrow_deg)
+            gap = (arrow_deg - norm_deg + 180.0) % 360.0 - 180.0
+            parts.append(f"gap={gap:+7.3f}")
+
+        mode = getattr(getattr(self, "_dbg_ship_control", None), "snap_mode", None)
+        frame_label = getattr(frame, "label", frame.__class__.__name__)
+        print(f"ORIENT_DBG: snap={mode} " + "  ".join(parts) + f"  frame='{frame_label}'")
 
     def _ship_relative_speed_m_s(self, ship, reference_body=None):
         if ship is None:
@@ -1679,6 +1859,9 @@ class Renderer:
         hy = -math.sin(theta)
         nx = -hy
         ny = hx
+        # Stash the ACTUAL drawn nose screen-direction so diagnostics can compare
+        # the real arrow pixels against the drawn vectors (non-circular check).
+        self._last_arrow_screen_dir = (hx, hy)
 
         # ursprung anpassen damit der dreiecks-schwerpunkt an (x, y) liegt.
         # der schwerpunkt des dreiecks aus nase und schwanz-ecken liegt
@@ -2252,12 +2435,96 @@ class Renderer:
             if len(run) < 2:
                 continue
             self._draw_polyline(run, color=(1.0, 1.0, 1.0, 0.6), width=2.0)
+        self._draw_apsis_markers(predictor, camera, camera_frame_xy)
         stats['draw_ms'] = (time.perf_counter() - draw_t0) * 1000.0
         stats['drawn'] = sum(len(run) for run in sampled_runs)
         stats['draw_points'] = int(stats['drawn'])
         stats['runs'] = len(sampled_runs)
         self.debug_info['prediction_points_drawn'] = int(stats['drawn'])
         self._last_prediction_render_stats = stats
+
+    def _format_apsis_distance(self, r):
+        if r >= 1e9:
+            return f"{r / 1e9:.2f}Gm"
+        if r >= 1e6:
+            return f"{r / 1e6:.2f}Mm"
+        if r >= 1e3:
+            return f"{r / 1e3:.1f}km"
+        return f"{r:.0f}m"
+
+    def _draw_apsis_markers(self, predictor, camera, camera_frame_xy=None):
+        """Zeichnet apoapsis/periapsis-marker des predictors auf die linie.
+
+        Marker kommen als (m, 5)-array (x, y, t_abs, kind, r) aus
+        predictor.get_apsis_markers(); die transformation nutzt die
+        zeitabhängige frame-transformation, damit die marker in bewegten
+        plot-frames auf der gezeichneten linie bleiben.
+        """
+        if predictor is None or not self.show_apsis_markers:
+            return
+        get_markers = getattr(predictor, 'get_apsis_markers', None)
+        if get_markers is None:
+            return
+        try:
+            markers = get_markers()
+        except Exception:
+            return
+        count = self._points_count(markers)
+        if count == 0:
+            return
+
+        r_px = float(self.apsis_marker_radius_px)
+        for i in range(count):
+            try:
+                m = markers[i]
+                wx = float(m[0])
+                wy = float(m[1])
+                t_abs = float(m[2])
+                is_apo = float(m[3]) >= 0.5
+                dist = float(m[4])
+            except Exception:
+                continue
+            sx, sy = self._world_to_screen_xy_at_time(wx, wy, camera, t_abs, camera_frame_xy)
+            if not (math.isfinite(sx) and math.isfinite(sy)):
+                continue
+            if not self._is_on_screen(sx, sy, 32.0):
+                continue
+
+            if is_apo:
+                color = (0.45, 0.75, 1.0, 0.95)
+                label = "Ap"
+            else:
+                color = (1.0, 0.62, 0.25, 0.95)
+                label = "Pe"
+
+            run = [
+                (sx, sy - r_px),
+                (sx + r_px, sy),
+                (sx, sy + r_px),
+                (sx - r_px, sy),
+                (sx, sy - r_px),
+            ]
+            self._draw_polyline(run, color=color, width=2.0)
+
+            text = f"{label} {self._format_apsis_distance(dist)}"
+            try:
+                # Diamant + linie werden über den line-shader in Y-nach-unten-
+                # bildschirmkoordinaten gezeichnet (sy wächst nach unten). Text
+                # dagegen läuft über die fixed-function-ortho aus render()
+                # (gluOrtho2D(0, w, 0, h), Y-nach-oben) mit vertikal geflippter
+                # textur. Ohne umrechnung landet das label an der über die
+                # bildschirmmitte gespiegelten position — bei markern fernab der
+                # mitte weit neben ihrem diamant. Daher sy -> ortho-Y flippen.
+                entry = self._get_label_texture(text, self.font_small)
+                th = float(entry[2]) if entry else float(self.font_small.get_height())
+                tw = float(entry[1]) if entry else 0.0
+                # oberkante des labels knapp unter die untere diamant-spitze
+                # (bildschirm-abwärts = kleineres ortho-Y): ortho_top = H - (sy + r + 4)
+                label_x = sx - tw / 2.0
+                label_y = float(self.height) - (sy + r_px + 4.0) - th
+                self._blit_cached_text(text, label_x, label_y, self.font_small)
+            except Exception:
+                pass
 
     def _squared_point_line_distance(self, px, py, ax, ay, bx, by):
         abx = bx - ax
