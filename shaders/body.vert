@@ -1,11 +1,11 @@
-#version 120
+#version 330
 
-attribute vec2 a_corner;
+in vec2 a_corner;
 uniform vec2 u_center_px;
 uniform float u_outer_radius_px;
 uniform vec2 u_viewport;
 
-varying vec2 v_local;
+out vec2 v_local;
 
 void main() {
     v_local = a_corner;

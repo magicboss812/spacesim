@@ -1,6 +1,6 @@
-#version 120
+#version 330
 
-varying vec2 v_local;
+in vec2 v_local;
 
 uniform vec3 u_base_color;
 uniform vec3 u_atmos_color;
@@ -8,6 +8,8 @@ uniform float u_core_radius_norm;
 uniform float u_atmos_radius_norm;
 uniform float u_atmos_alpha;
 uniform float u_glow_alpha;
+
+out vec4 fragColor;
 
 void main() {
     float r = length(v_local);
@@ -43,5 +45,5 @@ void main() {
         color /= alpha;
     }
 
-    gl_FragColor = vec4(color, alpha);
+    fragColor = vec4(color, alpha);
 }

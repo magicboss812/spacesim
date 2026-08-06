@@ -1,7 +1,7 @@
 import math
 import pygame
 from pygame.locals import *
-from OpenGL.GL import *
+import moderngl
 from loader import SystemLoader
 from vec import G
 from bodies import body
@@ -20,6 +20,7 @@ from reference_frames import (
 
 def main():
     import os
+    import time
     # VSync über Umgebungsvariable aktivieren
     os.environ['SDL_VIDEO_VSYNC'] = '1'
     try:
@@ -32,9 +33,11 @@ def main():
     pygame.init()
     WIDTH, HEIGHT = 1920, 1000
 
-    # OpenGL-Flag für pygame Display
+    # OpenGL-Flag für pygame Display; moderngl hängt sich an den von
+    # pygame/SDL erstellten GL-context (ein wrapper, geteilt mit dem Renderer)
     screen = pygame.display.set_mode((WIDTH, HEIGHT), DOUBLEBUF | OPENGL, vsync=1)
-    print(glGetString(GL_VENDOR), glGetString(GL_RENDERER), glGetString(GL_VERSION))
+    gl_ctx = moderngl.create_context()
+    print(gl_ctx.info['GL_VENDOR'], gl_ctx.info['GL_RENDERER'], gl_ctx.info['GL_VERSION'])
     pygame.display.set_caption("Orbital Mechanics - OpenGL Renderer")
     clock = pygame.time.Clock()
     FPS = 60
@@ -72,6 +75,7 @@ def main():
         recompute_every_update=True,
         async_compute=predictor_async,
         rolling_mode=False,
+        debug=False,  # per-frame PRED_DBG_* diagnostics off from construction (also silences PRED_DBG_THREAD)
     )  # 1M Meter pro Punkt
     # diagnostik: synchrone neuberechnung bei veralteten asynchronen snapshots erzwingen
     predictor.force_sync_on_stale = False
@@ -79,7 +83,12 @@ def main():
     predictor.use_time_dependent_bodies = True
     predictor.use_reference_acceleration_correction = False
     predictor.set_integrator_quality("balanced")
-    predictor.debug_moving_sources = True  # Use "rk4" to compare against the old fixed-step predictor.
+    # Look-ahead horizon (length) is the cost knob; point spacing (precision) is
+    # cosmetic. Pin the horizon from startup so changing spacing ('9'/'0') no
+    # longer moves the horizon (and thus no longer changes compute cost).
+    # Default = num_points * base precision, so initial output is unchanged.
+    predictor.set_length(predictor.num_points * predictor.precision)
+    predictor.debug_moving_sources = False  # per-frame PRED_SOURCE_DBG / PRED_ENERGY_DBG spam off; use "rk4" quality to compare against the old fixed-step predictor.
     print(f"PREDICTOR DEBUG: async_compute = {predictor.async_compute}")
     print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
 
@@ -87,8 +96,8 @@ def main():
     ship = next((b for b in w.body if b.is_ship), None)
     ship_control = schiffcontrol(ship) if ship else None
 
-    # OpenGL Renderer initialisieren
-    renderer = Renderer(WIDTH, HEIGHT, enable_fxaa=True)
+    # OpenGL Renderer initialisieren (moderngl, geteilter context)
+    renderer = Renderer(WIDTH, HEIGHT, enable_fxaa=True, ctx=gl_ctx)
     renderer.reference_trajectories_enabled = True
     renderer.reference_trajectories_max_points = 300
     renderer.reference_trajectories_sample_step_s = 300.0
@@ -200,6 +209,7 @@ def main():
     frame_count = 0
     while running:
         frame_dt = clock.tick(FPS) / 1000.0
+        loop_t0 = time.perf_counter()
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -263,7 +273,12 @@ def main():
                         ship_control.toggle_snap(snap_mode)
                         print(f"SNAP: {ship_control.snap_mode or 'off'}")
 
-                # predictor länge/präzision steuerung: '+' / '-' länge anpassen, '9' / '0' abstand anpassen
+                # predictor-steuerung (zwei entkoppelte regler):
+                #   '+' / '-' -> look-ahead HORIZONT (predictor.length). Das ist
+                #               der kosten-regler: kosten ~ integrierter bogen ~ horizont.
+                #   '9' / '0' -> punkt-ABSTAND (predictor.precision). Rein kosmetisch:
+                #               mehr/weniger gezeichnete punkte im festen horizont,
+                #               gleiche rechenzeit und gleiche genauigkeit.
                 ch = event.unicode
                 if ch == '+' or event.key == pygame.K_KP_PLUS:
                     # länge verdoppeln (oder initialisieren falls None)
@@ -301,16 +316,7 @@ def main():
             # rotation: in echtzeit sanft
             ship_control.handle_rotation(keys, frame_dt)
             # schub: einmal pro echtem frame festen delta-v anwenden (unabhängig von sim_dt)
-            # geschwindigkeit vor dem schub erfassen um nur schub-verursachte änderung zu melden
-            if ship is not None:
-                old_v = ship.velocity.copy()
-                ship_control.apply_thrust(keys, frame_dt)
-                dv = ship.velocity - old_v
-                if dv.x != 0.0 or dv.y != 0.0:
-                    mag = math.hypot(dv.x, dv.y)
-                    print(f"THRUST_DELTA: dx={dv.x:.6e}, dy={dv.y:.6e}, |dv|={mag:.6e}")
-            else:
-                ship_control.apply_thrust(keys, frame_dt)
+            ship_control.apply_thrust(keys, frame_dt)
 
         # Simulation aktualisieren (nur für dynamik in unterschritte aufteilen)
         total_sim = camera.sim_dt
@@ -348,6 +354,25 @@ def main():
             w.body, camera, points, predictor=predictor, sim_time=w.time,
             reference_body=reference_body, ship_control=ship_control, real_dt=frame_dt,
         )
+
+        # Per-frame timing debug line. Splits the frame into predictor line
+        # calculation vs. drawing, and the render pipeline into CPU calculation
+        # vs. present-on-screen (swap/flip; includes the VSync wait).
+        rt = getattr(renderer, 'last_frame_timings', {}) or {}
+        ps = getattr(renderer, '_last_prediction_render_stats', {}) or {}
+        rend_total = float(rt.get('frame_ms', 0.0))
+        rend_draw = float(rt.get('swap_or_present_ms', 0.0))
+        rend_calc = rend_total - rend_draw
+        pred_calc = float(getattr(predictor, 'last_compute_ms', 0.0))
+        pred_draw = float(ps.get('prepare_ms', 0.0)) + float(ps.get('draw_ms', 0.0))
+        frame_ms = (time.perf_counter() - loop_t0) * 1000.0
+        print(
+            f"TIMING: pred_calc={pred_calc:.1f}ms pred_draw={pred_draw:.1f}ms "
+            f"rend_calc={rend_calc:.1f}ms rend_draw={rend_draw:.1f}ms "
+            f"frame={frame_ms:.1f}ms",
+            flush=True,
+        )
+
         frame_count += 1
         if max_frames > 0 and frame_count >= max_frames:
             running = False

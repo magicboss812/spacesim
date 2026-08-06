@@ -1,16 +1,14 @@
 """
 OpenGL-Renderer für die Weltraumsimulation.
-Verwendet pygame für Fensterverwaltung und HUD, OpenGL für Rendering.
+Verwendet pygame für Fensterverwaltung und HUD, moderngl (OpenGL) für Rendering.
 """
 
 import pygame
 from pygame.locals import *
-from OpenGL.GL import *
-from OpenGL.GLU import *
+import moderngl
 import math
 import os
 from collections import deque
-import ctypes
 import time
 
 import numpy as np
@@ -19,26 +17,43 @@ from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
 
 
 class Renderer:
-    def __init__(self, width, height, enable_fxaa=True):
+    def __init__(self, width, height, enable_fxaa=True, ctx=None):
 
         self.width = width
         self.height = height
         self.enable_fxaa = enable_fxaa
-        
-        # FXAA Framebuffer und Textur
+
+        # moderngl-context: hängt sich an den von pygame/SDL erstellten
+        # GL-context. Aufrufer (test.py) können ihren bereits erstellten
+        # wrapper übergeben, damit nicht zwei moderngl-contexte denselben
+        # GL-state verwalten.
+        self.ctx = ctx if ctx is not None else moderngl.create_context()
+
+        # gpu-helpers: wiederverwendbare VBOs, programme und VAOs (erstellt in
+        # _init_gpu_helpers). _quad_vbo (statisches einheits-quad) wird auch
+        # vom FXAA-pfad genutzt und muss deshalb schon vor _init_fxaa
+        # deklariert sein (lazy erstellt via _ensure_quad_vbo).
+        self._poly_vbo = None
+        self._poly_vbo_size = 0
+        self._quad_vbo = None
+        self._line_program = None
+        self._line_vao = None
+        self._ortho_program = None
+        self._ortho_vao = None
+        self._body_program = None
+        self._body_vao = None
+        self._texquad_program = None
+        self._texquad_vao = None
+
+        # FXAA framebuffer, textur, shader-programm und VAO
         self.fbo = None
         self.fbo_texture = None
         self.fxaa_program = None
-        self.fxaa_vertex_shader = None
-        self.fxaa_fragment_shader = None
-        # gecachte uniform-locations: einmalig nach dem linken abgefragt statt
-        # pro frame (analog zur line-/body-pipeline). -1 = noch nicht gesetzt.
-        self._fxaa_u_texture = -1
-        self._fxaa_u_resolution = -1
+        self._fxaa_vao = None
 
         # OpenGL initialisieren
         self._init_opengl()
-        
+
         # FXAA initialisieren wenn aktiviert
         if self.enable_fxaa:
             self._init_fxaa()
@@ -61,6 +76,10 @@ class Renderer:
         self.render_benchmark_every_n_frames = 60
         self._render_benchmark_frame = 0
         self._last_prediction_render_stats = {}
+        # per-phase timings of the most recent render() call (frame_ms,
+        # bodies_ms, swap_or_present_ms, ...). Read by the per-frame TIMING
+        # line in test.py to split render calc vs. present cost.
+        self.last_frame_timings = {}
 
         # optionales predictor-debug: wenn True druckt kleine beispiele der predictor-
         # punkte (bildschirm und rekonstruierte welt-koords) in die konsole.
@@ -132,26 +151,6 @@ class Renderer:
         self._reference_traj_points = {}
         self._shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
 
-        # gpu-helpers: wiederverwendbare VBO- und texture-caches
-        self._poly_vbo = None
-        self._poly_vbo_size = 0
-        self._line_program = None
-        self._line_a_pos = -1
-        self._line_u_viewport = -1
-        self._line_u_color = -1
-        self._body_program = None
-        self._body_a_corner = -1
-        self._body_u_center_px = -1
-        self._body_u_outer_radius_px = -1
-        self._body_u_viewport = -1
-        self._body_u_base_color = -1
-        self._body_u_atmos_color = -1
-        self._body_u_core_radius_norm = -1
-        self._body_u_atmos_radius_norm = -1
-        self._body_u_atmos_alpha = -1
-        self._body_u_glow_alpha = -1
-        self._body_quad_vbo = None
-
         self._label_texture_cache = {}
         # obergrenze für gecachte label-texturen: ständig wechselnde texte
         # (z. B. das schiffs-speed-label, das sich fast jeden frame ändert)
@@ -172,275 +171,175 @@ class Renderer:
         # bleibt die persistente HUD-textur gültig und muss weder neu gerastert
         # (font.render/Surface/tostring) noch hochgeladen werden.
         self._hud_cache_key = None
-        # Initialize GPU helpers (VBOs, caches)
-        try:
-            self._init_gpu_helpers()
-        except Exception:
-            pass
+        # GPU-helpers initialisieren (VBOs, programme, VAOs). Kein blanket-
+        # try/except mehr: ohne diese pipelines gibt es keinen fixed-function-
+        # fallback, ein fehler hier soll sofort sichtbar sein. Einzelne
+        # pipelines degradieren weiterhin kontrolliert (programm = None).
+        self._init_gpu_helpers()
     
     def _init_opengl(self):
-        """Initialisiert OpenGL-Einstellungen."""
-        glViewport(0, 0, self.width, self.height)
-        
-        # Orthogonale Projektion (2D)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, self.width, 0, self.height)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        
-        # Blending aktivieren
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        
-        # Depth Test deaktivieren (2D)
-        glDisable(GL_DEPTH_TEST)
-        
+        """Initialisiert OpenGL-Einstellungen (moderngl-state)."""
+        self.ctx.viewport = (0, 0, self.width, self.height)
+
+        # Blending aktivieren; depth test wird nie aktiviert (2D)
+        self.ctx.enable(moderngl.BLEND)
+        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+
         # Hintergrundfarbe (dunkelblau)
-        glClearColor(0.0, 0.0, 0.05, 1.0)
-        
-        # VSync aktivieren (falls verfügbar)
-        try:
-            # Versuche verschiedene OpenGL-Funktionen für VSync
-            import ctypes
-            try:
-                # Windows
-                wgl = ctypes.windll.opengl32
-                wgl.wglSwapIntervalEXT(1)
-            except (AttributeError, OSError):
+        self._clear_color = (0.0, 0.0, 0.05, 1.0)
+
+        # VSync kommt vom fenster-swap: pygame.display.set_mode(..., vsync=1)
+        # bzw. SDL_VIDEO_VSYNC in test.py. Der alte wgl/glX-hack entfällt.
+
+    def _create_fxaa_targets(self):
+        """Erstellt FBO-textur und framebuffer in aktueller fenstergröße."""
+        self.fbo_texture = self.ctx.texture((self.width, self.height), 4)
+        self.fbo_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.fbo_texture.repeat_x = False  # CLAMP_TO_EDGE
+        self.fbo_texture.repeat_y = False
+        self.fbo = self.ctx.framebuffer(color_attachments=[self.fbo_texture])
+
+    def _release_fxaa_targets(self):
+        for name in ('fbo', 'fbo_texture'):
+            obj = getattr(self, name, None)
+            if obj is not None:
                 try:
-                    # Linux/Mac
-                    glX = ctypes.CDLL('libGL.so.1')
-                    glX.glXSwapIntervalMESA(1)
-                except (AttributeError, OSError):
-                    # Versuche PyOpenGL
-                    from OpenGL import GL
-                    if hasattr(GL, 'glSwapIntervalEXT'):
-                        GL.glSwapIntervalEXT(1)
-                    elif hasattr(GL, 'glXSwapIntervalMESA'):
-                        GL.glXSwapIntervalMESA(1)
-        except Exception:
-            pass  # VSync nicht verfügbar
-    
+                    obj.release()
+                except Exception:
+                    pass
+            setattr(self, name, None)
+
     def _init_fxaa(self):
         """Initialisiert FXAA Framebuffer und Shader."""
         try:
-            # Framebuffer erstellen
-            self.fbo = glGenFramebuffers(1)
-            glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
-            
-            # Textur für Framebuffer erstellen
-            self.fbo_texture = glGenTextures(1)
-            glBindTexture(GL_TEXTURE_2D, self.fbo_texture)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self.width, self.height, 
-                        0, GL_RGBA, GL_UNSIGNED_BYTE, None)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-            
-            # Textur an Framebuffer anhängen
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, 
-                                   GL_TEXTURE_2D, self.fbo_texture, 0)
-            
-            # Framebuffer-Status prüfen
-            status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
-            if status != GL_FRAMEBUFFER_COMPLETE:
-                print(f"FXAA Framebuffer error: {status}")
-                self.enable_fxaa = False
-                return
-            
-            # Zurück zum Standard-Framebuffer
-            glBindFramebuffer(GL_FRAMEBUFFER, 0)
-            
+            self._create_fxaa_targets()
+
             # FXAA Shader laden
             self._load_fxaa_shaders()
-            
+
             print("FXAA initialized successfully")
         except Exception as e:
             print(f"FXAA initialization failed: {e}")
+            self._release_fxaa_targets()
             self.enable_fxaa = False
     
     def _load_fxaa_shaders(self):
         fxaa_vertex_source = """
-        #version 120
-        varying vec2 v_texcoord;
+        #version 330
+        in vec2 a_pos;
+        out vec2 v_texcoord;
         void main() {
-            v_texcoord = gl_Vertex.xy * 0.5 + 0.5;
-            gl_Position = gl_Vertex;
+            v_texcoord = a_pos * 0.5 + 0.5;
+            gl_Position = vec4(a_pos, 0.0, 1.0);
         }
         """
-        
+
         fxaa_fragment_source = """
-        #version 120
+        #version 330
         uniform sampler2D u_texture;
         uniform vec2 u_resolution;
-        varying vec2 v_texcoord;
-        
+        in vec2 v_texcoord;
+        out vec4 fragColor;
+
         float luminance(vec3 c) {
             return dot(c, vec3(0.299, 0.587, 0.114));
         }
-        
+
         void main() {
             vec2 texel_size = 1.0 / u_resolution;
             vec2 uv = v_texcoord;
-            
-            vec3 center = texture2D(u_texture, uv).rgb;
+
+            vec3 center = texture(u_texture, uv).rgb;
             float center_luma = luminance(center);
-            
-            vec3 nw = texture2D(u_texture, uv + vec2(-1.0, -1.0) * texel_size).rgb;
-            vec3 ne = texture2D(u_texture, uv + vec2(1.0, -1.0) * texel_size).rgb;
-            vec3 sw = texture2D(u_texture, uv + vec2(-1.0, 1.0) * texel_size).rgb;
-            vec3 se = texture2D(u_texture, uv + vec2(1.0, 1.0) * texel_size).rgb;
-            
+
+            vec3 nw = texture(u_texture, uv + vec2(-1.0, -1.0) * texel_size).rgb;
+            vec3 ne = texture(u_texture, uv + vec2(1.0, -1.0) * texel_size).rgb;
+            vec3 sw = texture(u_texture, uv + vec2(-1.0, 1.0) * texel_size).rgb;
+            vec3 se = texture(u_texture, uv + vec2(1.0, 1.0) * texel_size).rgb;
+
             float luma_nw = luminance(nw);
             float luma_ne = luminance(ne);
             float luma_sw = luminance(sw);
             float luma_se = luminance(se);
-            
+
             float luma_min = min(center_luma, min(min(luma_nw, luma_ne), min(luma_sw, luma_se)));
             float luma_max = max(center_luma, max(max(luma_nw, luma_ne), max(luma_sw, luma_se)));
             float luma_range = luma_max - luma_min;
-            
+
             if (luma_range < 0.0312) {
-                gl_FragColor = vec4(center, 1.0);
+                fragColor = vec4(center, 1.0);
                 return;
             }
-            
+
             float gradient_nw_se = abs(luma_nw - luma_se);
             float gradient_ne_sw = abs(luma_ne - luma_sw);
             float contrast = max(gradient_nw_se, gradient_ne_sw);
-            
+
             if (contrast < 0.0625) {
-                gl_FragColor = vec4(center, 1.0);
+                fragColor = vec4(center, 1.0);
                 return;
             }
-            
+
             vec2 dir;
             dir.x = -((luma_nw + luma_ne) - (luma_sw + luma_se));
             dir.y = ((luma_nw + luma_sw) - (luma_ne + luma_se));
-            
+
             float dir_reduce = max((luma_nw + luma_ne + luma_sw + luma_se) * 0.25, 0.125);
             float rcp_dir_min = 1.0 / (min(abs(dir.x), abs(dir.y)) + dir_reduce);
-            
+
             dir = min(vec2(8.0), max(vec2(-8.0), dir * rcp_dir_min)) * texel_size;
-            
+
             vec3 result_a = 0.5 * (
-                texture2D(u_texture, uv + dir * (1.0/3.0 - 0.5)).rgb +
-                texture2D(u_texture, uv + dir * (2.0/3.0 - 0.5)).rgb
+                texture(u_texture, uv + dir * (1.0/3.0 - 0.5)).rgb +
+                texture(u_texture, uv + dir * (2.0/3.0 - 0.5)).rgb
             );
             vec3 result_b = result_a * 0.5 + 0.25 * (
-                texture2D(u_texture, uv + dir * -0.5).rgb +
-                texture2D(u_texture, uv + dir * 0.5).rgb
+                texture(u_texture, uv + dir * -0.5).rgb +
+                texture(u_texture, uv + dir * 0.5).rgb
             );
-            
+
             float luma_b = luminance(result_b);
-            
+
             if (luma_b < luma_min || luma_b > luma_max) {
-                gl_FragColor = vec4(result_a, 1.0);
+                fragColor = vec4(result_a, 1.0);
             } else {
-                gl_FragColor = vec4(result_b, 1.0);
+                fragColor = vec4(result_b, 1.0);
             }
         }
         """
-        
-        # Vertex Shader kompilieren
-        self.fxaa_vertex_shader = glCreateShader(GL_VERTEX_SHADER)
-        glShaderSource(self.fxaa_vertex_shader, fxaa_vertex_source)
-        glCompileShader(self.fxaa_vertex_shader)
-        
-        # Prüfen ob Vertex Shader kompiliert wurde
-        if not glGetShaderiv(self.fxaa_vertex_shader, GL_COMPILE_STATUS):
-            log = glGetShaderInfoLog(self.fxaa_vertex_shader).decode('utf-8')
-            print(f"FXAA Vertex Shader Error: {log}")
-            self.enable_fxaa = False
-            return
-        
-        # Fragment Shader kompilieren
-        self.fxaa_fragment_shader = glCreateShader(GL_FRAGMENT_SHADER)
-        glShaderSource(self.fxaa_fragment_shader, fxaa_fragment_source)
-        glCompileShader(self.fxaa_fragment_shader)
-        
-        # Prüfen ob Fragment Shader kompiliert wurde
-        if not glGetShaderiv(self.fxaa_fragment_shader, GL_COMPILE_STATUS):
-            log = glGetShaderInfoLog(self.fxaa_fragment_shader).decode('utf-8')
-            print(f"FXAA Fragment Shader Error: {log}")
-            self.enable_fxaa = False
-            return
-        
-        # Programm erstellen
-        self.fxaa_program = glCreateProgram()
-        glAttachShader(self.fxaa_program, self.fxaa_vertex_shader)
-        glAttachShader(self.fxaa_program, self.fxaa_fragment_shader)
-        glLinkProgram(self.fxaa_program)
-        
-        # Prüfen ob Programm gelinkt wurde
-        if not glGetProgramiv(self.fxaa_program, GL_LINK_STATUS):
-            log = glGetProgramInfoLog(self.fxaa_program).decode('utf-8')
-            print(f"FXAA Program Link Error: {log}")
-            self.enable_fxaa = False
-            return
 
-        # Uniform-locations einmalig cachen (statt pro frame in _apply_fxaa).
-        self._fxaa_u_texture = glGetUniformLocation(self.fxaa_program, 'u_texture')
-        self._fxaa_u_resolution = glGetUniformLocation(self.fxaa_program, 'u_resolution')
+        # moderngl kompiliert und linkt in einem schritt; compile-/link-fehler
+        # werfen und werden vom aufrufer (_init_fxaa) behandelt.
+        self.fxaa_program = self.ctx.program(
+            vertex_shader=fxaa_vertex_source,
+            fragment_shader=fxaa_fragment_source,
+        )
 
-        # Shader aufräumen
-        glDeleteShader(self.fxaa_vertex_shader)
-        glDeleteShader(self.fxaa_fragment_shader)
-        
+        # Uniforms einmalig setzen (textur-unit 0; auflösung bei resize
+        # aktualisiert) statt pro frame in _apply_fxaa.
+        self.fxaa_program['u_texture'].value = 0
+        self.fxaa_program['u_resolution'].value = (float(self.width), float(self.height))
+
+        # Vollbild-quad (TRIANGLE_STRIP über das geteilte einheits-quad)
+        self._fxaa_vao = self.ctx.vertex_array(
+            self.fxaa_program, [(self._ensure_quad_vbo(), '2f', 'a_pos')]
+        )
+
         print("FXAA Shader loaded successfully")
-    
+
     def _apply_fxaa(self):
-        """Wendet FXAA Post-Processing an."""
-        if not self.enable_fxaa or not self.fbo_texture or not self.fxaa_program:
+        """Wendet FXAA Post-Processing an.
+
+        Erwartet, dass der ziel-framebuffer (screen) bereits gebunden ist.
+        Das vollbild-quad überschreibt jeden pixel, daher ohne blending.
+        """
+        if not self.enable_fxaa or self.fbo_texture is None or self._fxaa_vao is None:
             return
-        
-        # OpenGL Status zurücksetzen
-        glUseProgram(0)
-        glDisable(GL_BLEND)
-        
-        # Projektion für Vollbild-Quad zurücksetzen
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        glOrtho(-1.0, 1.0, -1.0, 1.0, -1.0, 1.0)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        
-        # FXAA Shader aktivieren
-        glUseProgram(self.fxaa_program)
-        
-        # Textur binden
-        glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, self.fbo_texture)
-        
-        # Uniforms setzen (locations beim linken gecacht, nicht pro frame).
-        glUniform1i(self._fxaa_u_texture, 0)
-        glUniform2f(self._fxaa_u_resolution, float(self.width), float(self.height))
-        
-        # Vollbild-Quad rendern
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex2f(-1, -1)
-        glTexCoord2f(1, 0); glVertex2f(1, -1)
-        glTexCoord2f(1, 1); glVertex2f(1, 1)
-        glTexCoord2f(0, 1); glVertex2f(-1, 1)
-        glEnd()
-        
-        # Shader deaktivieren
-        glUseProgram(0)
-        
-        # Blending wieder aktivieren
-        glEnable(GL_BLEND)
-        
-        # Projektion zurücksetzen
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, self.width, 0, self.height)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+
+        self.ctx.disable(moderngl.BLEND)
+        self.fbo_texture.use(location=0)
+        self._fxaa_vao.render(moderngl.TRIANGLE_STRIP)
+        self.ctx.enable(moderngl.BLEND)
 
     def set_plotting_frame(self, frame, label=None):
         self._plotting_frame = frame if frame is not None else IdentityReferenceFrame()
@@ -591,217 +490,214 @@ class Renderer:
         self._camera_frame_xy_key = None
 
     def _init_gpu_helpers(self):
-        """Erstellt wiederverwendbare puffer und GLSL-programme für kritische render-pfade."""
+        """Erstellt wiederverwendbare puffer, programme und VAOs für kritische render-pfade."""
         self._ensure_poly_vbo()
+        self._ensure_quad_vbo()
         self._init_line_pipeline()
+        self._init_ortho_pipeline()
         self._init_body_pipeline()
+        self._init_texquad_pipeline()
 
     def _load_shader_source(self, filename):
         path = os.path.join(self._shader_dir, filename)
         with open(path, 'r', encoding='utf-8') as shader_file:
             return shader_file.read()
 
-    def _decode_gl_log(self, value):
-        if isinstance(value, bytes):
-            return value.decode('utf-8', errors='replace')
-        return str(value)
-
     def _compile_shader_program(self, vertex_filename, fragment_filename, label):
-        vertex_shader = None
-        fragment_shader = None
-        program = None
+        """Lädt und linkt ein GLSL-programm; None bei fehler (pipeline degradiert)."""
         try:
             vertex_source = self._load_shader_source(vertex_filename)
             fragment_source = self._load_shader_source(fragment_filename)
-
-            vertex_shader = glCreateShader(GL_VERTEX_SHADER)
-            glShaderSource(vertex_shader, vertex_source)
-            glCompileShader(vertex_shader)
-            if not glGetShaderiv(vertex_shader, GL_COMPILE_STATUS):
-                log = self._decode_gl_log(glGetShaderInfoLog(vertex_shader))
-                raise RuntimeError(f"vertex compile failed: {log}")
-
-            fragment_shader = glCreateShader(GL_FRAGMENT_SHADER)
-            glShaderSource(fragment_shader, fragment_source)
-            glCompileShader(fragment_shader)
-            if not glGetShaderiv(fragment_shader, GL_COMPILE_STATUS):
-                log = self._decode_gl_log(glGetShaderInfoLog(fragment_shader))
-                raise RuntimeError(f"fragment compile failed: {log}")
-
-            program = glCreateProgram()
-            glAttachShader(program, vertex_shader)
-            glAttachShader(program, fragment_shader)
-            glLinkProgram(program)
-            if not glGetProgramiv(program, GL_LINK_STATUS):
-                log = self._decode_gl_log(glGetProgramInfoLog(program))
-                raise RuntimeError(f"program link failed: {log}")
-
-            return program
+            return self.ctx.program(
+                vertex_shader=vertex_source,
+                fragment_shader=fragment_source,
+            )
         except Exception as exc:
             self.debug_info['shader_error'] = f"{label}: {exc}"
             print(f"Shader pipeline fallback ({label}): {exc}")
-            if program is not None:
-                try:
-                    glDeleteProgram(program)
-                except Exception:
-                    pass
             return None
-        finally:
-            if vertex_shader is not None:
-                try:
-                    glDeleteShader(vertex_shader)
-                except Exception:
-                    pass
-            if fragment_shader is not None:
-                try:
-                    glDeleteShader(fragment_shader)
-                except Exception:
-                    pass
 
     def _init_line_pipeline(self):
+        """Linien in top-down-bildschirmkoordinaten (y-flip in line.vert)."""
         program = self._compile_shader_program('line.vert', 'line.frag', 'line')
         if program is None:
             self._line_program = None
+            self._line_vao = None
             return
 
         try:
-            a_pos = glGetAttribLocation(program, 'a_pos')
-            u_viewport = glGetUniformLocation(program, 'u_viewport')
-            u_color = glGetUniformLocation(program, 'u_color')
-            if a_pos < 0 or u_viewport < 0 or u_color < 0:
-                raise RuntimeError('missing line shader attribute/uniform')
-
+            self._line_vao = self.ctx.vertex_array(
+                program, [(self._poly_vbo, '2f', 'a_pos')]
+            )
             self._line_program = program
-            self._line_a_pos = a_pos
-            self._line_u_viewport = u_viewport
-            self._line_u_color = u_color
         except Exception as exc:
             self.debug_info['shader_error'] = f"line: {exc}"
             print(f"Shader pipeline fallback (line): {exc}")
             try:
-                glDeleteProgram(program)
+                program.release()
             except Exception:
                 pass
             self._line_program = None
+            self._line_vao = None
+
+    def _init_ortho_pipeline(self):
+        """Geometrie in der alten fixed-function-ortho-konvention (y nach oben).
+
+        Ersetzt die früheren immediate-mode-pfade unter gluOrtho2D(0, w, 0, h)
+        (schiffspfeil, debug-kreuze): exakt dieselbe pixel-abbildung, nur via
+        shader (ortho.vert, OHNE den y-flip von line.vert). Der konventions-
+        unterschied zwischen line- und ortho-pfad ist absichtlich und
+        dokumentiert (CLAUDE.md, render-convention caveat).
+        """
+        program = self._compile_shader_program('ortho.vert', 'line.frag', 'ortho')
+        if program is None:
+            self._ortho_program = None
+            self._ortho_vao = None
+            return
+
+        try:
+            self._ortho_vao = self.ctx.vertex_array(
+                program, [(self._poly_vbo, '2f', 'a_pos')]
+            )
+            self._ortho_program = program
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"ortho: {exc}"
+            print(f"Shader pipeline fallback (ortho): {exc}")
+            try:
+                program.release()
+            except Exception:
+                pass
+            self._ortho_program = None
+            self._ortho_vao = None
 
     def _init_body_pipeline(self):
         program = self._compile_shader_program('body.vert', 'body.frag', 'body')
         if program is None:
             self._body_program = None
+            self._body_vao = None
             return
 
         try:
-            a_corner = glGetAttribLocation(program, 'a_corner')
-            u_center_px = glGetUniformLocation(program, 'u_center_px')
-            u_outer_radius_px = glGetUniformLocation(program, 'u_outer_radius_px')
-            u_viewport = glGetUniformLocation(program, 'u_viewport')
-            u_base_color = glGetUniformLocation(program, 'u_base_color')
-            u_atmos_color = glGetUniformLocation(program, 'u_atmos_color')
-            u_core_radius_norm = glGetUniformLocation(program, 'u_core_radius_norm')
-            u_atmos_radius_norm = glGetUniformLocation(program, 'u_atmos_radius_norm')
-            u_atmos_alpha = glGetUniformLocation(program, 'u_atmos_alpha')
-            u_glow_alpha = glGetUniformLocation(program, 'u_glow_alpha')
-
-            if (a_corner < 0 or u_center_px < 0 or u_outer_radius_px < 0 or
-                    u_viewport < 0 or u_base_color < 0 or u_atmos_color < 0 or
-                    u_core_radius_norm < 0 or u_atmos_radius_norm < 0 or
-                    u_atmos_alpha < 0 or u_glow_alpha < 0):
-                raise RuntimeError('missing body shader attribute/uniform')
-
+            self._body_vao = self.ctx.vertex_array(
+                program, [(self._ensure_quad_vbo(), '2f', 'a_corner')]
+            )
             self._body_program = program
-            self._body_a_corner = a_corner
-            self._body_u_center_px = u_center_px
-            self._body_u_outer_radius_px = u_outer_radius_px
-            self._body_u_viewport = u_viewport
-            self._body_u_base_color = u_base_color
-            self._body_u_atmos_color = u_atmos_color
-            self._body_u_core_radius_norm = u_core_radius_norm
-            self._body_u_atmos_radius_norm = u_atmos_radius_norm
-            self._body_u_atmos_alpha = u_atmos_alpha
-            self._body_u_glow_alpha = u_glow_alpha
-
-            if self._body_quad_vbo is None:
-                quad_data = (ctypes.c_float * 8)(
-                    -1.0, -1.0,
-                    1.0, -1.0,
-                    -1.0, 1.0,
-                    1.0, 1.0,
-                )
-                self._body_quad_vbo = glGenBuffers(1)
-                glBindBuffer(GL_ARRAY_BUFFER, self._body_quad_vbo)
-                glBufferData(GL_ARRAY_BUFFER, ctypes.sizeof(quad_data), quad_data, GL_STATIC_DRAW)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
         except Exception as exc:
             self.debug_info['shader_error'] = f"body: {exc}"
             print(f"Shader pipeline fallback (body): {exc}")
             try:
-                glDeleteProgram(program)
+                program.release()
             except Exception:
                 pass
             self._body_program = None
+            self._body_vao = None
+
+    def _init_texquad_pipeline(self):
+        """Texturierte quads (labels, HUD) in der ortho-konvention (y nach oben)."""
+        program = self._compile_shader_program('texquad.vert', 'texquad.frag', 'texquad')
+        if program is None:
+            self._texquad_program = None
+            self._texquad_vao = None
+            return
+
+        try:
+            program['u_texture'].value = 0
+            self._texquad_vao = self.ctx.vertex_array(
+                program, [(self._ensure_quad_vbo(), '2f', 'a_corner')]
+            )
+            self._texquad_program = program
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"texquad: {exc}"
+            print(f"Shader pipeline fallback (texquad): {exc}")
+            try:
+                program.release()
+            except Exception:
+                pass
+            self._texquad_program = None
+            self._texquad_vao = None
 
     def _ensure_poly_vbo(self):
+        """Geteilter dynamischer vertex-puffer für polylines und ortho-geometrie."""
         if self._poly_vbo is None:
-            try:
-                self._poly_vbo = glGenBuffers(1)
-            except Exception:
-                self._poly_vbo = None
+            initial_size = 4096 * 8  # bytes; wächst bei bedarf via orphan()
+            self._poly_vbo = self.ctx.buffer(reserve=initial_size, dynamic=True)
+            self._poly_vbo_size = initial_size
+        return self._poly_vbo
+
+    def _ensure_quad_vbo(self):
+        """Statisches einheits-quad (-1..1, TRIANGLE_STRIP-reihenfolge).
+
+        Geteilt von body-, FXAA- und texquad-pipeline.
+        """
+        if self._quad_vbo is None:
+            quad = np.array(
+                [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0], dtype=np.float32
+            )
+            self._quad_vbo = self.ctx.buffer(quad.tobytes())
+        return self._quad_vbo
+
+    def _write_poly_vertices(self, arr):
+        """Lädt ein (N,2)-float32-array in den geteilten dynamischen VBO.
+
+        orphan() reallokiert bei bedarf nur den speicher und behält das
+        buffer-objekt — die VAOs der line-/ortho-pipeline bleiben gültig.
+        """
+        self._ensure_poly_vbo()
+        data_size = int(arr.nbytes)
+        if data_size > int(self._poly_vbo_size):
+            self._poly_vbo.orphan(data_size)
+            self._poly_vbo_size = data_size
+        self._poly_vbo.write(arr)
+        return int(arr.shape[0])
 
     def _draw_polyline(self, run, color=(1.0, 1.0, 1.0, 1.0), width=1.0):
-        """Zeichnet eine bildschirm-space polyline via GLSL+VBO mit legacy-fallback."""
+        """Zeichnet eine bildschirm-space polyline (top-down-konvention) via GLSL+VBO."""
         n = len(run)
-        if n < 2:
+        if n < 2 or self._line_vao is None:
             return
-        self._ensure_poly_vbo()
 
-        arr = None
         try:
             arr = np.asarray(run, dtype=np.float32)
             if arr.ndim != 2 or arr.shape[1] != 2:
                 arr = arr.reshape((-1, 2))
             if not arr.flags['C_CONTIGUOUS']:
                 arr = np.ascontiguousarray(arr, dtype=np.float32)
-            n = int(arr.shape[0])
         except Exception:
-            arr = None
+            return
 
-        glLineWidth(float(width))
+        n = self._write_poly_vertices(arr)
+        self.ctx.line_width = float(width)
+        self._line_program['u_viewport'].value = (float(self.width), float(self.height))
+        self._line_program['u_color'].value = (
+            float(color[0]), float(color[1]), float(color[2]), float(color[3])
+        )
+        self._line_vao.render(moderngl.LINE_STRIP, vertices=n)
+
+    def _draw_ortho_shape(self, points, color, mode, width=1.0):
+        """Zeichnet geometrie in der alten ortho-konvention (y nach oben).
+
+        Ersatz für die früheren immediate-mode-aufrufe unter
+        gluOrtho2D(0, w, 0, h): identische pixel-abbildung, nur via shader.
+        """
+        n = len(points)
+        if n < 2 or self._ortho_vao is None:
+            return
+
         try:
-            if self._line_program and self._poly_vbo and arr is not None:
-                glDisable(GL_TEXTURE_2D)
-                glUseProgram(self._line_program)
-                glUniform2f(self._line_u_viewport, float(self.width), float(self.height))
-                glUniform4f(self._line_u_color,
-                            float(color[0]), float(color[1]), float(color[2]), float(color[3]))
-
-                glBindBuffer(GL_ARRAY_BUFFER, self._poly_vbo)
-                data_size = int(arr.nbytes)
-                if data_size > int(self._poly_vbo_size):
-                    glBufferData(GL_ARRAY_BUFFER, data_size, arr, GL_DYNAMIC_DRAW)
-                    self._poly_vbo_size = int(data_size)
-                else:
-                    glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, arr)
-                glEnableVertexAttribArray(self._line_a_pos)
-                glVertexAttribPointer(self._line_a_pos, 2, GL_FLOAT, GL_FALSE, 0, None)
-                glDrawArrays(GL_LINE_STRIP, 0, n)
-                glDisableVertexAttribArray(self._line_a_pos)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
-                glUseProgram(0)
-                return
+            arr = np.asarray(points, dtype=np.float32).reshape((-1, 2))
+            if not arr.flags['C_CONTIGUOUS']:
+                arr = np.ascontiguousarray(arr, dtype=np.float32)
         except Exception:
-            try:
-                glUseProgram(0)
-            except Exception:
-                pass
+            return
 
-        # fallback auf immediate-mode wenn GLSL-pfad nicht verfügbar ist.
-        glColor4f(float(color[0]), float(color[1]), float(color[2]), float(color[3]))
-        glDisable(GL_TEXTURE_2D)
-        glLineWidth(float(width))
-        glBegin(GL_LINE_STRIP)
-        for sx, sy in run:
-            glVertex2f(float(sx), float(sy))
-        glEnd()
+        n = self._write_poly_vertices(arr)
+        if mode in (moderngl.LINES, moderngl.LINE_STRIP):
+            self.ctx.line_width = float(width)
+        self._ortho_program['u_viewport'].value = (float(self.width), float(self.height))
+        self._ortho_program['u_color'].value = (
+            float(color[0]), float(color[1]), float(color[2]), float(color[3])
+        )
+        self._ortho_vao.render(mode, vertices=n)
 
     def _clip_segment_to_rect(self, x0, y0, x1, y1, left, top, right, bottom):
         """
@@ -955,7 +851,7 @@ class Renderer:
 
     def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density, light_intensity):
         """Zeichnet einen körper als shader-gesteuertes quad (scheibe + optional atmosphäre + glow)."""
-        if self._body_program is None or self._body_quad_vbo is None:
+        if self._body_vao is None:
             return False
 
         radius_px = max(1.0, float(radius))
@@ -982,47 +878,25 @@ class Renderer:
             atmos_norm = core_norm
 
         try:
-            glDisable(GL_TEXTURE_2D)
-            glUseProgram(self._body_program)
+            prog = self._body_program
+            prog['u_center_px'].value = (float(x), float(y))
+            prog['u_outer_radius_px'].value = float(outer_radius)
+            prog['u_viewport'].value = (float(self.width), float(self.height))
+            prog['u_base_color'].value = (
+                float(base_color[0]), float(base_color[1]), float(base_color[2])
+            )
+            prog['u_atmos_color'].value = (
+                float(atmos_color[0]), float(atmos_color[1]), float(atmos_color[2])
+            )
+            prog['u_core_radius_norm'].value = float(core_norm)
+            prog['u_atmos_radius_norm'].value = float(atmos_norm)
+            prog['u_atmos_alpha'].value = float(atmos_alpha)
+            prog['u_glow_alpha'].value = float(glow_alpha)
 
-            glUniform2f(self._body_u_center_px, float(x), float(y))
-            glUniform1f(self._body_u_outer_radius_px, float(outer_radius))
-            glUniform2f(self._body_u_viewport, float(self.width), float(self.height))
-            glUniform3f(self._body_u_base_color,
-                        float(base_color[0]), float(base_color[1]), float(base_color[2]))
-            glUniform3f(self._body_u_atmos_color,
-                        float(atmos_color[0]), float(atmos_color[1]), float(atmos_color[2]))
-            glUniform1f(self._body_u_core_radius_norm, float(core_norm))
-            glUniform1f(self._body_u_atmos_radius_norm, float(atmos_norm))
-            glUniform1f(self._body_u_atmos_alpha, float(atmos_alpha))
-            glUniform1f(self._body_u_glow_alpha, float(glow_alpha))
-
-            glBindBuffer(GL_ARRAY_BUFFER, self._body_quad_vbo)
-            glEnableVertexAttribArray(self._body_a_corner)
-            glVertexAttribPointer(self._body_a_corner, 2, GL_FLOAT, GL_FALSE, 0, None)
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
-            glDisableVertexAttribArray(self._body_a_corner)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            glUseProgram(0)
+            self._body_vao.render(moderngl.TRIANGLE_STRIP)
             return True
         except Exception:
-            try:
-                glUseProgram(0)
-            except Exception:
-                pass
             return False
-
-    def _draw_body_legacy(self, x, y, radius, r, g, b):
-        glColor4f(r, g, b, 1.0)
-        glBegin(GL_TRIANGLE_FAN)
-        glVertex2f(x, y)
-        segments = max(16, min(64, int(radius * 2)))
-        for i in range(segments + 1):
-            angle = 2.0 * math.pi * i / segments
-            px = x + math.cos(angle) * radius
-            py = y + math.sin(angle) * radius
-            glVertex2f(px, py)
-        glEnd()
 
     def _draw_body_icon(self, x, y, radius, r, g, b):
         """Positions-icon eines körpers: flache scheibe konstanter bildschirmgröße.
@@ -1031,89 +905,75 @@ class Renderer:
         (`body_icon_radius_px`). Wird gezeichnet, sobald der echte bildschirm-
         radius des körpers unter die schwelle fällt.
 
-        WICHTIG: das icon MUSS über denselben GLSL-körper-shader laufen wie der
+        WICHTIG: das icon läuft über denselben GLSL-körper-shader wie der
         volle körper. Der vertex-shader (body.vert) erwartet top-down-screen-
-        koordinaten und spiegelt y intern (`ndc.y = 1 - 2*y/h`), während
-        immediate-mode `glVertex2f` unter `gluOrtho2D(0,w,0,h)` bottom-up ist.
-        Würde das icon per immediate-mode gezeichnet, läge es vertikal gespiegelt
-        und schiene unabhängig vom körper zu driften. Mit glow/atmosphäre = 0
-        ergibt der shader (core_radius_norm == 1.0) eine flache scheibe in
-        körperfarbe -- positionsgenau und am übergang nahtlos zum körper.
+        koordinaten und spiegelt y intern (`ndc.y = 1 - 2*y/h`) — dieselbe
+        konvention wie die körper-position. Mit glow/atmosphäre = 0 ergibt der
+        shader (core_radius_norm == 1.0) eine flache scheibe in körperfarbe --
+        positionsgenau und am übergang nahtlos zum körper.
         """
-        if self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0):
-            return
-        # Fallback nur, wenn der GLSL-pfad nicht verfügbar ist: immediate-mode
-        # wie _draw_body_legacy -- bleibt damit konsistent zum körper-fallback
-        # im selben (degradierten) modus.
-        self._draw_body_legacy(x, y, float(radius), r, g, b)
+        self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0)
 
     def _get_label_texture(self, text, font):
         key = (text, font.get_height())
         entry = self._label_texture_cache.get(key)
         if entry:
-            return entry  # (texid, w, h)
+            return entry  # (texture, w, h)
         try:
             surface = font.render(text, True, (255, 255, 255))
             texture_data = pygame.image.tostring(surface, 'RGBA', True)
             w, h = surface.get_size()
-            texid = glGenTextures(1)
-            glBindTexture(GL_TEXTURE_2D, texid)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            texture = self.ctx.texture((w, h), 4, texture_data)
+            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
             # cache deckeln (FIFO): ständig wechselnde texte (speed-label)
             # würden sonst unbegrenzt GL-texturen anhäufen. Stabile labels
             # (körpernamen) werden nach einer eviction einfach neu erzeugt.
             if len(self._label_texture_cache) >= self._label_texture_cache_max:
                 evict_n = max(1, self._label_texture_cache_max // 4)
                 for old_key in list(self._label_texture_cache.keys())[:evict_n]:
-                    old_texid = self._label_texture_cache.pop(old_key)[0]
+                    old_texture = self._label_texture_cache.pop(old_key)[0]
                     try:
-                        glDeleteTextures(1, [old_texid])
+                        old_texture.release()
                     except Exception:
                         pass
-            self._label_texture_cache[key] = (texid, w, h)
-            return (texid, w, h)
+            self._label_texture_cache[key] = (texture, w, h)
+            return (texture, w, h)
         except Exception:
             return None
+
+    def _draw_texture_ortho(self, texture, x, y, width, height):
+        """Zeichnet eine textur als quad in der ortho-konvention (y nach oben).
+
+        Ersatz für die früheren immediate-mode glTexCoord/glVertex-quads unter
+        gluOrtho2D(0, w, 0, h): (x, y) ist die untere linke ecke, texcoord
+        (0, 0) liegt ebendort (texturen werden vertikal geflippt hochgeladen).
+        """
+        if self._texquad_vao is None or texture is None:
+            return
+        self._texquad_program['u_rect'].value = (
+            float(x), float(y), float(width), float(height)
+        )
+        self._texquad_program['u_viewport'].value = (float(self.width), float(self.height))
+        texture.use(location=0)
+        self._texquad_vao.render(moderngl.TRIANGLE_STRIP)
 
     def _blit_cached_text(self, text, x, y, font):
         entry = self._get_label_texture(text, font)
         if not entry:
-            # fallback: immediate per-call blit
-            surface = font.render(text, True, (255,255,255))
-            texture_data = pygame.image.tostring(surface, 'RGBA', True)
-            w, h = surface.get_size()
-            tid = glGenTextures(1)
-            glBindTexture(GL_TEXTURE_2D, tid)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
-            glEnable(GL_TEXTURE_2D)
-            glColor4f(1.0, 1.0, 1.0, 1.0)
-            glBegin(GL_QUADS)
-            glTexCoord2f(0, 0); glVertex2f(x, y)
-            glTexCoord2f(1, 0); glVertex2f(x + w, y)
-            glTexCoord2f(1, 1); glVertex2f(x + w, y + h)
-            glTexCoord2f(0, 1); glVertex2f(x, y + h)
-            glEnd()
-            glDisable(GL_TEXTURE_2D)
+            # fallback: one-shot-textur ohne cache erzeugen, zeichnen, freigeben
             try:
-                glDeleteTextures(1, [tid])
+                surface = font.render(text, True, (255, 255, 255))
+                texture_data = pygame.image.tostring(surface, 'RGBA', True)
+                w, h = surface.get_size()
+                texture = self.ctx.texture((w, h), 4, texture_data)
+                texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                self._draw_texture_ortho(texture, x, y, w, h)
+                texture.release()
             except Exception:
                 pass
             return
-        texid, w, h = entry
-        glEnable(GL_TEXTURE_2D)
-        glBindTexture(GL_TEXTURE_2D, texid)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex2f(x, y)
-        glTexCoord2f(1, 0); glVertex2f(x + w, y)
-        glTexCoord2f(1, 1); glVertex2f(x + w, y + h)
-        glTexCoord2f(0, 1); glVertex2f(x, y + h)
-        glEnd()
-        glDisable(GL_TEXTURE_2D)
+        texture, w, h = entry
+        self._draw_texture_ortho(texture, x, y, w, h)
 
     def _record_reference_trajectories(self, bodies):
         if not self.reference_trajectories_enabled:
@@ -1163,8 +1023,6 @@ class Renderer:
         half_w = self.width * 0.5
         half_h = self.height * 0.5
         scale = float(camera.scale)
-
-        glDisable(GL_TEXTURE_2D)
 
         for body in bodies:
             if getattr(body, 'is_ship', False):
@@ -1311,10 +1169,11 @@ class Renderer:
         ship_body = next((b for b in bodies if getattr(b, 'is_ship', False)), None)
 
         if self.enable_fxaa and self.fbo:
-            glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
-            glViewport(0, 0, self.width, self.height)
-
-        glClear(GL_COLOR_BUFFER_BIT)
+            target_fbo = self.fbo
+        else:
+            target_fbo = self.ctx.screen
+        target_fbo.use()
+        target_fbo.clear(*self._clear_color)
 
         reference_t0 = time.perf_counter()
         self._draw_reference_trajectories(bodies, camera)
@@ -1333,36 +1192,20 @@ class Renderer:
         prediction_drawn = False
 
         if prediction_has_points and self.enable_fxaa and self.fbo and not self.prediction_bypass_fxaa:
-            glMatrixMode(GL_PROJECTION)
-            glLoadIdentity()
-            gluOrtho2D(0, self.width, 0, self.height)
-            glMatrixMode(GL_MODELVIEW)
-            glLoadIdentity()
-            glEnable(GL_BLEND)
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
             self.draw_prediction(prediction_points, camera, predictor=predictor)
             prediction_drawn = True
 
         if self.enable_fxaa and self.fbo:
             # Zurück zum Standard-Framebuffer and apply FXAA post-process
-            glBindFramebuffer(GL_FRAMEBUFFER, 0)
-            glViewport(0, 0, self.width, self.height)
+            self.ctx.screen.use()
             fxaa_t0 = time.perf_counter()
             self._apply_fxaa()
             timings['fxaa_ms'] += (time.perf_counter() - fxaa_t0) * 1000.0
-        
-        # Projektion-Matrix für Trajektorienwiedergabe wiederherstellen
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, self.width, 0, self.height)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        
-        # Blending für Trajektorien wieder aktivieren
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        
+
+        # Ab hier wird direkt in den haupt-framebuffer gezeichnet (predictor,
+        # schiff, HUD). Blending ist global aktiv (ctx.enable in _init_opengl,
+        # von _apply_fxaa wiederhergestellt); die alten projektions-resets der
+        # fixed-function-pipeline entfallen.
         if prediction_has_points and not prediction_drawn:
             self.draw_prediction(prediction_points, camera, predictor=predictor)
 
@@ -1393,6 +1236,7 @@ class Renderer:
         pygame.display.flip()
         timings['swap_or_present_ms'] = (time.perf_counter() - swap_t0) * 1000.0
         timings['frame_ms'] = (time.perf_counter() - frame_t0) * 1000.0
+        self.last_frame_timings = timings
         self._emit_render_benchmark(timings)
 
     def draw_ship_velocity_vector(self, ship, camera, reference_body=None):
@@ -1808,8 +1652,10 @@ class Renderer:
         atmos_density = float(getattr(body, 'atmos_density', 0.0)) if has_atmos else 0.0
         light_intensity = float(getattr(body, 'light_intensity', 0.0))
 
-        # Primärer Pfad: GLSL-Shader zeichnet Scheibe + Glow + Atmosphäre in einem Quad.
-        drawn_with_shader = self._draw_body_glsl(
+        # GLSL-Shader zeichnet Scheibe + Glow + Atmosphäre in einem Quad.
+        # (Kein immediate-mode-fallback mehr: ohne body-shader wird der körper
+        # nicht gezeichnet, der fehler steht in debug_info['shader_error'].)
+        self._draw_body_glsl(
             x,
             y,
             radius_px,
@@ -1819,14 +1665,6 @@ class Renderer:
             light_intensity,
         )
 
-        # Fallback path: preserve previous immediate-mode behavior.
-        if not drawn_with_shader:
-            if light_intensity > 0:
-                self._draw_glow(x, y, radius_px, r, g, b, light_intensity)
-            if has_atmos and atmos_density > 0:
-                self._draw_atmosphere(x, y, radius_px, r1, g1, b1, atmos_density)
-            self._draw_body_legacy(x, y, radius, r, g, b)
-        
         if radius > 5:
             # Label-Position mittels camera.world_to_screen berechnen, um
             # inkonsistente Koordinatensysteme zwischen FBO und Hauptpuffer zu vermeiden.
@@ -1882,12 +1720,11 @@ class Renderer:
         right_x = tail_x - nx * arrow_half_width
         right_y = tail_y - ny * arrow_half_width
 
-        glColor4f(r, g, b, 1.0)
-        glBegin(GL_TRIANGLES)
-        glVertex2f(nose_x, nose_y)
-        glVertex2f(left_x, left_y)
-        glVertex2f(right_x, right_y)
-        glEnd()
+        self._draw_ortho_shape(
+            [(nose_x, nose_y), (left_x, left_y), (right_x, right_y)],
+            color=(r, g, b, 1.0),
+            mode=moderngl.TRIANGLES,
+        )
         # debug: kleine marker zeichnen und einzeilige info ausgeben die
         # den dreiecks-schwerpunkt mit der übergebenen screen-position vergleicht.
         try:
@@ -1896,76 +1733,22 @@ class Renderer:
                 centroid_y = (nose_y + left_y + right_y) / 3.0
                 print(f"PRED_DBG_DRAW: centroid=({centroid_x:.6f},{centroid_y:.6f}) screen_pos=({x:.6f},{y:.6f})")
                 # magenta cross = centroid, cyan cross = passed screen pos
-                glColor4f(1.0, 0.0, 1.0, 1.0)
                 size = 3.0
-                glBegin(GL_LINES)
-                glVertex2f(centroid_x - size, centroid_y); glVertex2f(centroid_x + size, centroid_y)
-                glVertex2f(centroid_x, centroid_y - size); glVertex2f(centroid_x, centroid_y + size)
-                glEnd()
-                glColor4f(0.0, 1.0, 1.0, 1.0)
-                glBegin(GL_LINES)
-                glVertex2f(x - size, y); glVertex2f(x + size, y)
-                glVertex2f(x, y - size); glVertex2f(x, y + size)
-                glEnd()
+                self._draw_ortho_shape(
+                    [(centroid_x - size, centroid_y), (centroid_x + size, centroid_y),
+                     (centroid_x, centroid_y - size), (centroid_x, centroid_y + size)],
+                    color=(1.0, 0.0, 1.0, 1.0),
+                    mode=moderngl.LINES,
+                )
+                self._draw_ortho_shape(
+                    [(x - size, y), (x + size, y),
+                     (x, y - size), (x, y + size)],
+                    color=(0.0, 1.0, 1.0, 1.0),
+                    mode=moderngl.LINES,
+                )
         except Exception:
             pass
-    
-    def _draw_atmosphere(self, x, y, radius, r, g, b, density):
 
-        multiplier = 2.0
-        atmos_radius = radius * multiplier
-
-        radius_scale = max(0.5, min(2.0, radius / 50.0))
-
-        base_density = min(density / 100.0, 1.0)
-        density_factor = base_density * radius_scale  # 100 = gut sichtbar
-        
-        segments = max(16, min(64, int(atmos_radius * 2)))
-        
-        # Ring zeichnen: von radius bis atmos_radius
-        glBegin(GL_QUAD_STRIP)
-        for i in range(segments + 1):
-            angle = 2.0 * math.pi * i / segments
-            
-            # Innerer Punkt (am Planetenrand) - volle Sichtbarkeit
-            inner_x = x + math.cos(angle) * radius
-            inner_y = y + math.sin(angle) * radius
-            glColor4f(r, g, b, density_factor)
-            glVertex2f(inner_x, inner_y)
-            
-            # Äußerer Punkt (am Atmosphärenrand) - transparent
-            outer_x = x + math.cos(angle) * atmos_radius
-            outer_y = y + math.sin(angle) * atmos_radius
-            glColor4f(r, g, b, 0.0)
-            glVertex2f(outer_x, outer_y)
-        glEnd()
-    
-    def _draw_glow(self, x, y, radius, r, g, b, intensity):
-        glow_radius = radius * 2.5
-        
-        # Automatische Skalierung mit Radius: Kleinere Planeten bekommen relativ stärkeren Glow
-        radius_scale = max(0.5, min(2.0, radius / 50.0))
-        intensity_factor = min(intensity / 1000.0, 1.0) * 0.5 * radius_scale
-        
-        segments = max(16, min(64, int(glow_radius * 2)))
-        
-        # Glow als Ring rendern (nicht vom Zentrum)
-        glBegin(GL_QUAD_STRIP)
-        for i in range(segments + 1):
-            angle = 2.0 * math.pi * i / segments
-            
-            # Innerer Punkt (am Planetenrand)
-            inner_x = x + math.cos(angle) * radius
-            inner_y = y + math.sin(angle) * radius
-            glColor4f(r, g, b, intensity_factor * 0.8)
-            glVertex2f(inner_x, inner_y)
-            
-            # Äußerer Punkt (am Glow-Rand)
-            outer_x = x + math.cos(angle) * glow_radius
-            outer_y = y + math.sin(angle) * glow_radius
-            glColor4f(r, g, b, 0.0)
-            glVertex2f(outer_x, outer_y)
-        glEnd()
     def _draw_orbit(self, body, camera, segments=None, color=None, width=1.0):
         """Zeichnet eine vollständige Orbit-Ellipse für Körper mit scripted-Orbits.
         Verwendet `semi_major_axis` (a) und `eccentricity` (e). Wenn `is_moon_of`
@@ -2028,7 +1811,6 @@ class Renderer:
         else:
             cr, cg, cb = color
 
-        glDisable(GL_TEXTURE_2D)
         for run in runs:
             if len(run) < 2:
                 continue
@@ -2329,13 +2111,8 @@ class Renderer:
             self._last_prediction_render_stats = stats
             return
 
-        # Textur deaktivieren falls HUD sie aktiviert hat
-        glDisable(GL_TEXTURE_2D)
-        
-        # blend aktivieren
-        glEnable(GL_BLEND)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
+        # Blending ist global aktiv (ctx.enable in _init_opengl); die alten
+        # textur-/blend-state-resets der fixed-function-pipeline entfallen.
         prepare_t0 = time.perf_counter()
         half_w = self.width * 0.5
         half_h = self.height * 0.5
@@ -2788,21 +2565,12 @@ class Renderer:
         """Zeichnet die persistente HUD-textur als quad (ohne re-upload)."""
         if self._hud_texture is None:
             return
-        glBindTexture(GL_TEXTURE_2D, self._hud_texture)
-        glEnable(GL_TEXTURE_2D)
-        glColor4f(1.0, 1.0, 1.0, 1.0)
-        glBegin(GL_QUADS)
-        glTexCoord2f(0, 0); glVertex2f(x, y)
-        glTexCoord2f(1, 0); glVertex2f(x + width, y)
-        glTexCoord2f(1, 1); glVertex2f(x + width, y + height)
-        glTexCoord2f(0, 1); glVertex2f(x, y + height)
-        glEnd()
-        glDisable(GL_TEXTURE_2D)
+        self._draw_texture_ortho(self._hud_texture, x, y, width, height)
 
     def _blit_pygame_surface(self, surface, x, y):
         """Lädt eine pygame Surface in die persistente HUD-textur und zeichnet sie.
 
-        Der upload (tostring + glTex(Sub)Image2D) ist der teure teil. Aufrufer,
+        Der upload (tostring + texture.write) ist der teure teil. Aufrufer,
         deren inhalt sich gegenüber dem vorframe nicht geändert hat, überspringen
         diese methode und rufen direkt _draw_hud_quad.
         """
@@ -2813,32 +2581,14 @@ class Renderer:
         if self._hud_texture is None or self._hud_texture_size != (width, height):
             if self._hud_texture is not None:
                 try:
-                    glDeleteTextures(1, [self._hud_texture])
+                    self._hud_texture.release()
                 except Exception:
                     pass
-            try:
-                self._hud_texture = glGenTextures(1)
-                self._hud_texture_size = (width, height)
-                glBindTexture(GL_TEXTURE_2D, self._hud_texture)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
-            except Exception:
-                # Fallback: create one-shot texture
-                tex = glGenTextures(1)
-                glBindTexture(GL_TEXTURE_2D, tex)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
-                self._hud_texture = tex
-                self._hud_texture_size = (width, height)
+            self._hud_texture = self.ctx.texture((width, height), 4, texture_data)
+            self._hud_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            self._hud_texture_size = (width, height)
         else:
-            glBindTexture(GL_TEXTURE_2D, self._hud_texture)
-            try:
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
-            except Exception:
-                # Some drivers don't support TexSubImage with certain formats; fallback to TexImage
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, texture_data)
+            self._hud_texture.write(texture_data)
 
         # Textur rendern
         self._draw_hud_quad(x, y, width, height)
@@ -2929,32 +2679,31 @@ class Renderer:
 
         self.width = width
         self.height = height
-        glViewport(0, 0, width, height)
-        
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        gluOrtho2D(0, width, 0, height)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
-        
-        # Framebuffer neu erstellen wenn FXAA aktiviert
+        self.ctx.viewport = (0, 0, width, height)
+        try:
+            self.ctx.screen.viewport = (0, 0, width, height)
+        except Exception:
+            pass
+
+        # Framebuffer neu erstellen wenn FXAA aktiviert (programm + VAO
+        # bleiben; nur textur/FBO hängen von der fenstergröße ab).
         if self.enable_fxaa:
-            # Alten Framebuffer löschen
-            if self.fbo:
-                glDeleteFramebuffers(1, [self.fbo])
-            if self.fbo_texture:
-                glDeleteTextures(1, [self.fbo_texture])
-            
-            # Framebuffer neu erstellen
-            self._init_fxaa()
+            self._release_fxaa_targets()
+            try:
+                self._create_fxaa_targets()
+                if self.fxaa_program is not None:
+                    self.fxaa_program['u_resolution'].value = (float(width), float(height))
+            except Exception as e:
+                print(f"FXAA resize failed: {e}")
+                self._release_fxaa_targets()
+                self.enable_fxaa = False
         # Clear HUD and label texture caches (will be recreated lazily)
         try:
             for entry in list(self._label_texture_cache.values()):
-                texid = entry[0]
-                if texid:
+                texture = entry[0]
+                if texture:
                     try:
-                        glDeleteTextures(1, [texid])
+                        texture.release()
                     except Exception:
                         pass
         except Exception:
@@ -2962,21 +2711,11 @@ class Renderer:
         self._label_texture_cache = {}
         if getattr(self, '_hud_texture', None):
             try:
-                glDeleteTextures(1, [self._hud_texture])
+                self._hud_texture.release()
             except Exception:
                 pass
             self._hud_texture = None
             self._hud_texture_size = (0, 0)
         # HUD-memoization invalidieren: textur und viewport haben sich geändert.
         self._hud_cache_key = None
-        # Delete poly VBO so it can be recreated for the new context/size
-        try:
-            if getattr(self, '_poly_vbo', None):
-                try:
-                    glDeleteBuffers(1, [self._poly_vbo])
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        self._poly_vbo = None
-        self._poly_vbo_size = 0
+        # Der poly-VBO ist größen-unabhängig und bleibt (samt VAOs) bestehen.

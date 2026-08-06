@@ -30,7 +30,7 @@
 ---
 ## Ausführung
 ### Requirements:
-`pip install pygame pyopengl pyopengl-accelerate numba numpy`
+`pip install pygame moderngl numba numpy`
 ### Starten:
 `python test.py`
 

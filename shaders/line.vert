@@ -1,6 +1,6 @@
-#version 120
+#version 330
 
-attribute vec2 a_pos;
+in vec2 a_pos;
 uniform vec2 u_viewport;
 
 void main() {

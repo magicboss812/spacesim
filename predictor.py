@@ -1969,8 +1969,26 @@ class Predictor:
         # bogenlänge gekoppelt ist. kosten bleiben ~konstant über das intervall;
         # drift wächst bewusst mit dem intervall. nahe vorbeiflügen bleibt die
         # adaptive kontrolle wirksam. bei/unter base_precision: exakte identität.
-        self.rkn_interval_coupling = True
+        # Off by default: the look-ahead horizon is set by `length`, not by
+        # `precision` (see _get_target_point_cap / get_display_length). Interval
+        # coupling's premise ("coarser spacing => longer horizon => trade
+        # accuracy for cost") no longer holds once the two are decoupled, so
+        # coarsening `precision` must stay purely cosmetic — same cost, same
+        # accuracy. Re-enable only for a deliberate fast, low-accuracy preview.
+        self.rkn_interval_coupling = False
         self.rkn_interval_tol_exponent = 8.0
+        # Horizon-scaled far-field step size. A long look-ahead over a smooth arc
+        # is otherwise integrated at the fixed max_dt cap, costing ~arc/max_dt
+        # steps (e.g. ~240 ms at a ~240-day horizon). Scaling max_dt with the
+        # horizon to target a bounded step budget keeps long-horizon compute
+        # roughly constant. Tied to the HORIZON, not `precision`, so the spacing
+        # decouple is preserved; floored at the preset max_dt so short horizons
+        # stay fully accurate; capped by the ceiling for close-approach safety
+        # (the adaptive tolerance + step-doubling still refine near planets).
+        # See _make_snapshot.
+        self.rkn_adaptive_far_maxdt = True
+        self.rkn_far_field_target_steps = 2500.0
+        self.rkn_max_dt_ceiling = 30000.0
         self.rkn_last_accepted_steps = 0
         self.rkn_last_rejected_steps = 0
         self.rkn_last_min_dt = 0.0
@@ -1982,6 +2000,11 @@ class Predictor:
         self.use_time_dependent_bodies = bool(use_time_dependent_bodies)
         self.use_reference_acceleration_correction = False
         self.debug_moving_sources = False
+        # wall-clock duration (ms) of the most recent trajectory compute
+        # (_compute_from_snapshot). In async mode this runs on a worker thread,
+        # so it reflects the real line-calculation cost even though it overlaps
+        # rendering. Read by the per-frame TIMING line in test.py.
+        self.last_compute_ms = 0.0
         self._trajectory_version = 0
         self._last_seen_px = None
         self._last_seen_py = None
@@ -1992,8 +2015,26 @@ class Predictor:
         self.velocity_invalidation_rel_tol = 1e-5
         self.position_invalidation_abs_tol = 100.0
         self.sync_recompute_on_velocity_change = True
+        # A coasting ship's velocity changes by ~|g|*dt each step from gravity
+        # alone; only a jump BEYOND that (real thrust) should invalidate the
+        # trajectory. Without this the detector fires every frame and forces a
+        # synchronous full recompute, bypassing the async worker. Margin covers
+        # accel changing across the step / large sim_dt. See
+        # _handle_trajectory_branch_change.
+        self.gravity_dv_safety_factor = 4.0
         self.max_async_sim_age = max(2.0 * self.dt, 1.0)
-        self.max_async_wall_age = 0.5
+        # Freshness of accepted async results is gated by WALL age (seconds since
+        # the worker finished) rather than sim-time age: sim-time age scales with
+        # sim_dt and horizon and wrongly rejected every result, forcing the
+        # blocking sync path. The per-frame anchor + rebase keep position exact,
+        # so a wall-fresh result is always safe to accept. See _swap_ready_result.
+        self.max_async_wall_age = 1.5
+        # Throttle redundant async re-submissions to ~this rate (wall seconds).
+        # When a compute is cheaper than one frame, recompute_every_update would
+        # otherwise submit 60x/s; ~25 Hz refresh looks identical and frees CPU.
+        # Heavier computes self-throttle via single-flight (pending skips submit).
+        self.async_submit_min_interval = 0.04
+        self._last_submit_wall = 0.0
 
         self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
@@ -2519,6 +2560,18 @@ class Predictor:
         expected_motion = max(cur_speed, last_speed, 1.0) * max(dt_age, 0.0)
         allowed_pos = max(float(self.position_invalidation_abs_tol), expected_motion * 4.0)
 
+        # Allow the velocity change that gravity alone produces over dt_age, so
+        # normal orbital coasting does not trip the detector (which would force a
+        # synchronous full recompute every frame). Only thrust beyond this margin
+        # invalidates. Reuses world.acceleration_at (cheap ~4-body sum).
+        if world is not None:
+            try:
+                g = world.acceleration_at(ship, ship.position, cur_time)
+                expected_gravity_dv = math.hypot(float(g.x), float(g.y)) * max(dt_age, 0.0)
+                allowed_speed = max(allowed_speed, float(self.gravity_dv_safety_factor) * expected_gravity_dv)
+            except Exception:
+                pass
+
         reason = None
         if delta_speed > allowed_speed:
             reason = "velocity"
@@ -2907,6 +2960,24 @@ class Predictor:
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
         physics_ref_enabled = 0
         ref_index = self._current_reference_body_index()
+
+        # Horizon-scaled far-field step ceiling. A long look-ahead over a smooth
+        # arc is otherwise integrated at the fixed max_dt cap, so cost grows
+        # ~arc/max_dt. Raise max_dt for long horizons to target a bounded step
+        # budget (roughly constant compute cost); the adaptive tolerance +
+        # step-doubling still refine near planets, so only the smooth far field
+        # coarsens. Floored at the preset max_dt (short horizons unchanged) and
+        # capped by the ceiling (close-approach safety). Tied to the HORIZON
+        # (arc = max_points × precision), not to `precision`, so the spacing
+        # decouple holds.
+        eff_max_dt = float(self.rkn_max_dt)
+        if self.rkn_adaptive_far_maxdt and float(self.rkn_far_field_target_steps) > 0.0:
+            speed = math.hypot(float(ship.velocity.x), float(ship.velocity.y))
+            horizon_arc = float(max_points) * float(effective_precision)
+            if speed > 1.0 and horizon_arc > 0.0:
+                desired = (horizon_arc / speed) / float(self.rkn_far_field_target_steps)
+                eff_max_dt = max(eff_max_dt, min(desired, float(self.rkn_max_dt_ceiling)))
+
         snapshot = {
             "ship_px": float(ship.position.x),
             "ship_py": float(ship.position.y),
@@ -2931,7 +3002,7 @@ class Predictor:
             "aspi_close_acc_threshold": float(self.aspi_close_acc_threshold),
             "aspi_use_rk4_fallback": bool(self.aspi_use_rk4_fallback),
             "rkn_min_dt": float(self.rkn_min_dt),
-            "rkn_max_dt": float(self.rkn_max_dt),
+            "rkn_max_dt": float(eff_max_dt),
             "rkn_rtol": float(self.rkn_rtol),
             "rkn_atol_pos": float(self.rkn_atol_pos),
             "rkn_atol_vel": float(self.rkn_atol_vel),
@@ -2985,6 +3056,16 @@ class Predictor:
         return snapshot
 
     def _compute_from_snapshot(self, snapshot):
+        # Thin timing shim: record the wall-clock cost of the actual trajectory
+        # compute into self.last_compute_ms (single choke point for both the
+        # async worker and the synchronous paths). See last_compute_ms in __init__.
+        _t0 = time.perf_counter()
+        try:
+            return self._compute_from_snapshot_impl(snapshot)
+        finally:
+            self.last_compute_ms = (time.perf_counter() - _t0) * 1000.0
+
+    def _compute_from_snapshot_impl(self, snapshot):
         mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", "rkn"))
         self._debug_integrator_mode("compute", snapshot)
         rkn_stats = None
@@ -3518,38 +3599,36 @@ class Predictor:
                 except Exception:
                     snapshot_ref_index = -1
                 is_stale_reference = snapshot_ref_index != current_ref_index
-                is_stale_speed = delta_speed > allowed_speed
-                is_stale_pos = pos_delta > allowed_pos
-                max_async_sim_age = float(getattr(self, "max_async_sim_age", max(2.0 * float(self.dt), 1.0)))
-                is_stale_sim_time = sim_age is not None and abs(float(sim_age)) > max_async_sim_age
                 wall_age = 0.0
                 try:
                     wall_age = max(0.0, time.time() - float(snapshot.get("submit_ts", time.time())))
                 except Exception:
                     wall_age = 0.0
-                max_wall_age = float(getattr(self, "max_async_wall_age", 0.5))
-                is_stale_wall_age = sim_age is None and wall_age > max_wall_age
+                max_wall_age = float(getattr(self, "max_async_wall_age", 1.5))
+
+                # Freshness is gated by WALL age (seconds since the worker
+                # finished) — sim-time age scales with sim_dt and horizon and
+                # wrongly rejected every result, forcing the blocking sync path.
+                # Thrust since the snapshot is already caught by the
+                # trajectory_version check above; zoom / frame changes by the
+                # view / reference checks. The per-frame anchor + whole-curve
+                # rebase correct for the ship's motion during compute, so any
+                # wall-fresh, version/view/reference-matching result is safe.
+                is_stale_wall_age = wall_age > max_wall_age
 
                 reject_reason = None
                 if is_stale_view:
                     reject_reason = "view_scale"
                 elif is_stale_reference:
                     reject_reason = "reference_frame"
-                elif is_stale_sim_time:
-                    reject_reason = "sim_age"
                 elif is_stale_wall_age:
                     reject_reason = "wall_age"
-                elif is_stale_speed:
-                    reject_reason = "velocity"
-                elif is_stale_pos:
-                    reject_reason = "position"
 
                 if reject_reason is not None:
                     self._log_snapshot_result(False, reject_reason, snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
 
                     if (
-                        reject_reason != "view_scale"
-                        and reject_reason in ("sim_age", "wall_age")
+                        reject_reason == "wall_age"
                         and self.force_sync_on_stale
                         and current_world is not None
                     ):
@@ -3560,26 +3639,13 @@ class Predictor:
                         return True
                     return False
 
-                needs_rebase = pos_delta > 1e-9
+                # Rebase the whole curve to the current ship position (corrects
+                # for motion during compute). The per-frame anchor in update()
+                # keeps the start glued to the ship between swaps.
+                needs_rebase = pos_delta > 1e-9 and math.isfinite(pos_delta)
                 if needs_rebase:
-                    sim_time_small = sim_age is None or abs(float(sim_age)) <= max_async_sim_age
-                    pos_delta_safe = math.isfinite(pos_delta) and pos_delta <= max(
-                        allowed_pos,
-                        max(cur_speed, 1.0) * max_async_sim_age * 2.0,
-                    )
-                    if delta_speed <= allowed_speed and (not is_stale_reference) and sim_time_small and pos_delta_safe:
-                        points = self._rebase_points_to_current_snapshot(points, snapshot, current_ship)
-                        self._log_snapshot_result(True, "rebased", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
-                    else:
-                        reason = "unsafe_rebase"
-                        if not sim_time_small:
-                            reason = "unsafe_rebase_sim_time"
-                        elif delta_speed > allowed_speed:
-                            reason = "unsafe_rebase_velocity"
-                        elif not pos_delta_safe:
-                            reason = "unsafe_rebase_position"
-                        self._log_snapshot_result(False, reason, snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
-                        return False
+                    points = self._rebase_points_to_current_snapshot(points, snapshot, current_ship)
+                    self._log_snapshot_result(True, "rebased", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
                 else:
                     self._log_snapshot_result(True, "matched", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
 
@@ -3634,7 +3700,14 @@ class Predictor:
         if self.length is None:
             return self.num_points
 
-        spacing_for_cap = self.base_precision if self.base_precision > 0.0 else self.precision
+        # Cap the point count by the target horizon using the SAME (effective)
+        # spacing the kernel samples at, so the traced arc = max_points *
+        # eff_precision = length, independent of `precision`. This decouples the
+        # look-ahead horizon (`length`, the thing that costs) from point spacing
+        # (`precision`, purely cosmetic). num_points stays the safety ceiling.
+        spacing_for_cap = self._effective_precision()
+        if not (spacing_for_cap > 0.0):
+            spacing_for_cap = self.base_precision if self.base_precision > 0.0 else self.precision
         max_by_length = max(1, int(self.length / spacing_for_cap) + 1)
         return min(self.num_points, max_by_length)
 
@@ -3944,12 +4017,25 @@ class Predictor:
         if not self.recompute_every_update:
             self.remove_passed_points(ship)
 
-        if self.recompute_every_update or self._points_count() < target_points or swapped:
+        # Submit a fresh background job, but throttle redundant re-submissions to
+        # ~async_submit_min_interval so a cheap compute doesn't rerun 60x/s.
+        # Always resubmit immediately when a result was just consumed (swapped)
+        # or the line is short of its target length. Heavier computes are
+        # additionally self-throttled by single-flight (submit skips if pending).
+        now = time.perf_counter()
+        need_more_points = self._points_count() < target_points
+        throttle_ready = (now - self._last_submit_wall) >= self.async_submit_min_interval
+        if need_more_points or swapped or (self.recompute_every_update and throttle_ready):
             self._submit_async_compute(ship, world, target_points)
+            self._last_submit_wall = now
 
-        # Async results are accepted only after strict snapshot matching, with
-        # whole-curve rebasing applied in _swap_ready_result when safe.
-        # Do not anchor here; that would hide stale curve tails.
+        # Keep the drawn line's start glued to the ship every frame (cheap rigid
+        # shift of the whole curve). Between background refreshes the curve then
+        # tracks the ship smoothly instead of lagging and snapping on each swap;
+        # the shape itself refreshes at the worker's cadence.
+        if self._points_count() > 0:
+            self._anchor_first_point(ship)
+
         if self.debug and not getattr(self, "_suppress_dbg_computed", False):
             try:
                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -4021,9 +4107,16 @@ class Predictor:
         return self.precision / self.base_precision
 
     def get_display_length(self):
+        # The true traced horizon: length pins it, but the num_points ceiling
+        # can clip it when spacing is finer than length/num_points. Report what
+        # is actually integrated, not length * coarsen (which only held under
+        # the old precision<->horizon coupling).
         if self.length is None:
             return None
-        return self.length * self.get_precision_factor()
+        eff = self._effective_precision()
+        if not (eff > 0.0):
+            return self.length
+        return min(self.length, self.num_points * eff)
 
     def set_precision(self, meters: float):
         meters = float(meters)
