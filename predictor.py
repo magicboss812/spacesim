@@ -2036,7 +2036,7 @@ class Predictor:
         self.async_submit_min_interval = 0.04
         self._last_submit_wall = 0.0
 
-        self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+        self.points: "np.ndarray | list" = np.empty((0, 3), dtype=np.float64) if np is not None else []
         self.debug = debug
         # suppress frequent computed debug lines by default; set False to enable
         self._suppress_dbg_computed = True
@@ -2468,7 +2468,7 @@ class Predictor:
         except Exception:
             return -1
 
-    def _empty_points_array(self):
+    def _empty_points_array(self) -> "np.ndarray | list":
         return np.empty((0, 3), dtype=np.float64) if np is not None else []
 
     def _empty_apsis_array(self):
@@ -3540,6 +3540,9 @@ class Predictor:
                 snapshot = None
                 rkn_stats = None
 
+            if points is None:
+                return False
+
             if snapshot is not None:
                 try:
                     snapshot_version = int(snapshot.get("trajectory_version", -1))
@@ -4262,9 +4265,15 @@ class Predictor:
                     self.points = np.array(self.points[remove_count:], dtype=np.float64)
             return int(remove_count)
 
-        # List / generic fallback: use same projection logic
+        # List / generic fallback: use same projection logic.
+        # self.points can't be an ndarray here (the isinstance branch above
+        # always returns) but Pyright doesn't narrow attribute access across
+        # that control flow, so alias to a local it can narrow.
+        pts = self.points
+        if isinstance(pts, np.ndarray):
+            return 0
         try:
-            n = len(self.points)
+            n = len(pts)
             if n <= 1:
                 return 0
         except Exception:
@@ -4273,8 +4282,8 @@ class Predictor:
         remove_count = 0
         try:
             for i in range(n - 1):
-                p0 = self.points[i]
-                p1 = self.points[i + 1]
+                p0 = pts[i]
+                p1 = pts[i + 1]
                 try:
                     x0 = float(p0[0]); y0 = float(p0[1])
                     x1 = float(p1[0]); y1 = float(p1[1])
@@ -4299,11 +4308,11 @@ class Predictor:
         remove_count = min(remove_count, max(0, n - 1))
         if remove_count > 0:
             try:
-                del self.points[:remove_count]
+                del pts[:remove_count]
             except Exception:
                 for _ in range(remove_count):
                     try:
-                        self.points.pop(0)
+                        pts.pop(0)
                     except Exception:
                         break
         return int(remove_count)

@@ -1,0 +1,105 @@
+{
+  "window": {
+    "width": 800,
+    "height": 800,
+    "fps": 60,
+    "vsync": true,
+    "caption": "Orbital Mechanics - OpenGL Renderer",
+    "enable_fxaa": true
+  },
+
+  "simulation": {
+    "system_file": "solar_system.json",
+    "focus_body": "Erde",
+    "initial_sim_dt": 900.0,
+    "min_sim_dt": 1.0,
+    "max_sim_dt": 1e12,
+    "sim_dt_step_factor": 1.5,
+    "max_substep_seconds": 1000.0,
+    "max_frames": 0
+  },
+
+  "physics": {
+    "gravitational_constant": 6.6730831e-11,
+    "integrator_mode": "rkn4",
+    "integrator_max_step": 30.0,
+    "integrator_min_step": 0.01,
+    "integrator_position_tolerance": 1.0,
+    "integrator_velocity_tolerance": 0.001
+  },
+
+  "camera": {
+    "initial_scale": 1e-6,
+    "min_scale": 1e-30,
+    "max_scale": 1e10,
+    "move_speed": 3.0,
+    "zoom_factor": 1.5
+  },
+
+  "ship": {
+    "rotation_speed": 3.0,
+    "thrust_acc": 600.0
+  },
+
+  "predictor": {
+    "enabled": true,
+    "num_points": 10000,
+    "dt": 1000.0,
+    "precision": 1e6,
+    "quality": "balanced",
+    "async_compute": true,
+    "rolling_mode": false,
+    "toggle_num_points": 30,
+    "length_step_factor": 2.0,
+    "precision_step_factor": 2.0,
+    "min_precision": 1.0,
+    "auto_precision_from_zoom": true,
+    "target_screen_step_px": 2.0,
+    "strict_snapshot_matching": true,
+    "force_sync_on_stale": false,
+    "use_time_dependent_bodies": true,
+    "use_reference_acceleration_correction": false,
+    "rkn_adaptive_far_maxdt": true,
+    "rkn_far_field_target_steps": 2500.0,
+    "rkn_max_dt_ceiling": 30000.0,
+    "apsis_markers_enabled": true,
+    "apsis_max_markers": 16
+  },
+
+  "renderer": {
+    "prediction_sampling_tolerance_px": 2.5,
+    "prediction_sampling_min_tolerance_px": 0.002,
+    "prediction_sampling_max_tolerance_px": 0.25,
+    "prediction_sampling_min_step_px": 0.35,
+    "prediction_sampling_max_segment_px": 4.0,
+    "prediction_sampling_max_points": 1000,
+    "prediction_sampling_reference_scale": 5e-7,
+    "prediction_visibility_margin_px": 128.0,
+    "prediction_render_max_raw_scan": 3000,
+    "prediction_render_max_draw_points": 1000,
+    "prediction_bypass_fxaa": true,
+    "show_apsis_markers": true,
+    "apsis_marker_radius_px": 5.0,
+    "body_icon_radius_px": 4.0,
+    "ship_velocity_vector_length_px": 70.0,
+    "reference_trajectories_enabled": true,
+    "reference_trajectories_max_points": 300,
+    "reference_trajectories_sample_step_s": 300.0,
+    "reference_traj_min_screen_px": 2.0,
+    "hud_font_size_small": 16,
+    "hud_font_size_medium": 20,
+    "label_texture_cache_max": 256
+  },
+
+  "debug": {
+    "print_frame_timings": true,
+    "print_loader_info": true,
+    "world_integrator_debug": false,
+    "predictor_debug": false,
+    "predictor_debug_moving_sources": false,
+    "renderer_debug_predictor": false,
+    "renderer_debug_frame": false,
+    "render_benchmark_debug": false,
+    "render_benchmark_every_n_frames": 60
+  }
+}

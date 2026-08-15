@@ -31,6 +31,9 @@ class Camera:
         # Zoom-Grenzen
         self.min_scale = 1e-30
         self.max_scale = 1e+10
+
+        # Zoomschritt pro Mausrad-Raste (aus config.json ueberschreibbar)
+        self.zoom_factor = 1.5
     
     def world_to_screen(self, world_pos):
         rel = world_pos - self.position
@@ -92,7 +95,8 @@ class Camera:
         """Verarbeitet Eingabeereignisse (Zoom, Klicks)."""
         if event.type == pygame.MOUSEWHEEL:
             # Mausrad für Zoom
-            zoom_factor = 1.5 if event.y > 0 else 1 / 1.5
+            step = max(float(getattr(self, "zoom_factor", 1.5)), 1.0 + 1e-9)
+            zoom_factor = step if event.y > 0 else 1.0 / step
             self.scale *= zoom_factor
             self.scale = max(self.min_scale, min(self.max_scale, self.scale))
         

@@ -12,6 +12,7 @@
   - [Ausführung](#ausführung)
     - [Requirements:](#requirements)
     - [Starten:](#starten)
+    - [Konfiguration:](#konfiguration)
   - [Physik der Schiffsintegration](#physik-der-schiffsintegration)
     - [Gravitationsquellen bewegen sich mit der Zeit](#gravitationsquellen-bewegen-sich-mit-der-zeit)
     - [Auswirkung](#auswirkung)
@@ -33,6 +34,16 @@
 `pip install pygame moderngl numba numpy`
 ### Starten:
 `python test.py`
+
+### Konfiguration:
+Alle spielbaren Parameter stehen in **`config.json`** — je eine Zeile pro Parameter,
+striktes JSON ohne Kommentare. Die Datei ist in Abschnitte
+gegliedert (`window`, `simulation`, `physics`, `camera`, `ship`, `predictor`,
+`renderer`, `debug`); `loader.ConfigLoader` liest sie und verteilt die Werte auf
+die jeweiligen Module (`world.py`, `camera.py`, `schiff.py`, `predictor.py`,
+`rendering.py`). Fehlende Schlüssel behalten den Default im Code, unbekannte
+werden beim Start gemeldet. `solar_system.json` bleibt unverändert die Datei für
+die Himmelskörper selbst.
 
 ---
 ## Physik der Schiffsintegration
