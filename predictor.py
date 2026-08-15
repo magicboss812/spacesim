@@ -1228,6 +1228,65 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True, nogil=True, fastmath=True)
+    def _refine_apsis_numba(pts, d2_arr, idx):
+        # parabolische verfeinerung des diskreten extremums bei `idx`: die
+        # rohe "nächster punkt"-wahl hat einen quantisierungsfehler von der
+        # größenordnung (punktabstand)^2 / (2*krümmungsradius) — der bei
+        # jedem predictor-neuaufbau anders ausfällt, weil das arc-length-
+        # sampling-raster jedes mal neu am schiff verankert wird (anderer
+        # phasenversatz zur wahren apsis). das lässt den angezeigten
+        # Pe/Ap-abstand bei UNVERÄNDERTER bahn zwischen neuberechnungen
+        # spürbar schwanken (stärker an einer scharfen periapsis, schwächer
+        # an einer flachen apoapsis). fit einer parabel durch die drei
+        # punkte um idx liefert den echten scheitel und eliminiert das.
+        n = pts.shape[0]
+        x = pts[idx, 0]
+        y = pts[idx, 1]
+        t = pts[idx, 2]
+        r = math.sqrt(d2_arr[idx])
+        if idx <= 0 or idx >= n - 1:
+            return x, y, t, r
+
+        d2_m = d2_arr[idx - 1]
+        d2_0 = d2_arr[idx]
+        d2_p = d2_arr[idx + 1]
+        if not (math.isfinite(d2_m) and math.isfinite(d2_0) and math.isfinite(d2_p)):
+            return x, y, t, r
+
+        denom = d2_m - 2.0 * d2_0 + d2_p
+        # denom ~ 0 heißt lokal (fast) linear/flach — keine verlässliche
+        # scheitel-schätzung möglich, roher punkt bleibt bestehen.
+        if not math.isfinite(denom) or abs(denom) < 1e-12 * max(d2_0, 1.0):
+            return x, y, t, r
+
+        k = 0.5 * (d2_m - d2_p) / denom
+        if k > 0.5:
+            k = 0.5
+        elif k < -0.5:
+            k = -0.5
+
+        refined_d2 = d2_0 - 0.25 * (d2_m - d2_p) * k
+        if not math.isfinite(refined_d2) or refined_d2 < 0.0:
+            return x, y, t, r
+        r = math.sqrt(refined_d2)
+
+        # position/zeit entlang des passenden nachbar-segments interpolieren,
+        # damit der marker weiterhin exakt auf der gezeichneten linie liegt.
+        if k >= 0.0:
+            frac = k
+            x = pts[idx, 0] + (pts[idx + 1, 0] - pts[idx, 0]) * frac
+            y = pts[idx, 1] + (pts[idx + 1, 1] - pts[idx, 1]) * frac
+            t = pts[idx, 2] + (pts[idx + 1, 2] - pts[idx, 2]) * frac
+        else:
+            frac = -k
+            x = pts[idx, 0] + (pts[idx - 1, 0] - pts[idx, 0]) * frac
+            y = pts[idx, 1] + (pts[idx - 1, 1] - pts[idx, 1]) * frac
+            t = pts[idx, 2] + (pts[idx - 1, 2] - pts[idx, 2]) * frac
+
+        return x, y, t, r
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
     def _find_apsis_markers_numba(
         pts,
         base_sim_time,
@@ -1246,8 +1305,12 @@ if NUMBA_AVAILABLE:
         max_markers,
     ):
         # sucht lokale extrema des abstands schiff<->referenzkörper entlang der
-        # predictor-punkte (pts: (n,3) mit x, y, absoluter sim-zeit). marker
-        # liegen exakt auf vorhandenen punkten, es wird nicht interpoliert.
+        # predictor-punkte (pts: (n,3) mit x, y, absoluter sim-zeit). der
+        # diskrete extrempunkt wird per parabel-fit über seine nachbarn zum
+        # wahren scheitel verfeinert (_refine_apsis_numba) — sonst hängt der
+        # angezeigte Pe/Ap-abstand vom zufälligen phasenversatz des arc-
+        # length-samplings ab (das raster wird bei jedem predictor-neuaufbau
+        # neu am schiff verankert) und schwankt bei unveränderter bahn.
         # rückgabe: (out, count); out-zeilen: x, y, t_abs, kind, r wobei
         # kind 0.0 = periapsis (lokales minimum), 1.0 = apoapsis (maximum).
         out = np.empty((max_markers, 5), dtype=np.float64)
@@ -1342,11 +1405,12 @@ if NUMBA_AVAILABLE:
                     # trend kippt nach unten: verfolgtes maximum = apoapsis.
                     # best_idx == 0 (schiffsposition) wird unterdrückt.
                     if best_idx > 0:
-                        out[count, 0] = pts[best_idx, 0]
-                        out[count, 1] = pts[best_idx, 1]
-                        out[count, 2] = pts[best_idx, 2]
+                        rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx)
+                        out[count, 0] = rx
+                        out[count, 1] = ry
+                        out[count, 2] = rt
                         out[count, 3] = 1.0
-                        out[count, 4] = math.sqrt(best_d2)
+                        out[count, 4] = rr
                         count += 1
                     trend = -1
                     best_d2 = d2
@@ -1357,11 +1421,12 @@ if NUMBA_AVAILABLE:
                     best_idx = i
                 elif d2 > best_d2 + hyst:
                     if best_idx > 0:
-                        out[count, 0] = pts[best_idx, 0]
-                        out[count, 1] = pts[best_idx, 1]
-                        out[count, 2] = pts[best_idx, 2]
+                        rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx)
+                        out[count, 0] = rx
+                        out[count, 1] = ry
+                        out[count, 2] = rt
                         out[count, 3] = 0.0
-                        out[count, 4] = math.sqrt(best_d2)
+                        out[count, 4] = rr
                         count += 1
                     trend = 1
                     best_d2 = d2
@@ -2711,11 +2776,28 @@ class Predictor:
                 flush=True,
             )
 
-    def _anchor_first_point(self, ship):
+    def _anchor_first_point(self, ship, world):
+        """Klebt den kurvenanfang an das schiff -- in ORT *und* ZEIT.
+
+        Die zeitspalte muss mitwandern. Sie ist bei der berechnung auf die
+        damalige `world.time` bezogen worden (_compute_from_snapshot), waehrend
+        diese funktion die kurve jeden frame raeumlich nachzieht. Ohne die
+        zeit-korrektur faellt die zeitbasis pro frame um ein sim_dt zurueck
+        (gemessen 900-2700 s). Der renderer waehlt daraus ueber
+        _world_to_screen_xy_at_time die epoche des plot-frames: bei einem
+        bewegten frame-ursprung (body-centred non-rotating) landet dieselbe
+        weltposition dadurch neben dem schiff -- gemessen 54.5 px bei
+        2e-6 px/m, exakt der drift von Erde ueber 900 s -- und springt mit
+        jedem swap, weil die latenz schwankt.
+        """
         if self._points_count() == 0:
             return
         sx = float(ship.position.x)
         sy = float(ship.position.y)
+        try:
+            st = float(world.time) if world is not None else None
+        except Exception:
+            st = None
         if np is not None and isinstance(self.points, np.ndarray):
             dx = sx - float(self.points[0, 0])
             dy = sy - float(self.points[0, 1])
@@ -2724,6 +2806,11 @@ class Predictor:
                 self.points[:, 1] += dy
                 self.points[0, 0] = sx
                 self.points[0, 1] = sy
+                if st is not None and self.points.shape[1] >= 3:
+                    dt = st - float(self.points[0, 2])
+                    if math.isfinite(dt):
+                        self.points[:, 2] += dt
+                        self.points[0, 2] = st
                 try:
                     if (
                         np is not None
@@ -2738,11 +2825,16 @@ class Predictor:
                 except Exception:
                     pass
         else:
-            # timestamp beibehalten falls beim ersten punkt vorhanden
             try:
                 t0 = float(self.points[0][2])
             except Exception:
                 t0 = 0.0
+            # zeitbasis mitziehen (siehe docstring); ohne world.time bleibt sie
+            # wie bisher stehen.
+            dt = (st - t0) if st is not None else 0.0
+            if not math.isfinite(dt):
+                dt = 0.0
+            t0 += dt
             try:
                 dx = sx - float(self.points[0][0])
                 dy = sy - float(self.points[0][1])
@@ -2750,7 +2842,7 @@ class Predictor:
                     if i == 0:
                         self.points[i] = (sx, sy, t0)
                     elif hasattr(p, "__len__") and len(p) >= 3:
-                        self.points[i] = (float(p[0]) + dx, float(p[1]) + dy, float(p[2]))
+                        self.points[i] = (float(p[0]) + dx, float(p[1]) + dy, float(p[2]) + dt)
                     else:
                         self.points[i] = (float(p[0]) + dx, float(p[1]) + dy)
             except Exception:
@@ -3436,7 +3528,7 @@ class Predictor:
             if missing > 0:
                 self._append_rolling_tail(world, missing)
 
-        self._anchor_first_point(ship)
+        self._anchor_first_point(ship, world)
         if np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
             self._roll_states[0, 0] = float(ship.position.x)
             self._roll_states[0, 1] = float(ship.position.y)
@@ -3769,7 +3861,7 @@ class Predictor:
         self.reset()
         if self.rolling_mode:
             self._compute_full_rolling(ship, world)
-            self._anchor_first_point(ship)
+            self._anchor_first_point(ship, world)
             if np is not None and isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
                 self._roll_states[0, 0] = float(ship.position.x)
                 self._roll_states[0, 1] = float(ship.position.y)
@@ -3781,7 +3873,7 @@ class Predictor:
                 self._roll_states[0, 4] = float(ship.velocity.y)
             return
         self._compute_full(ship, world)
-        self._anchor_first_point(ship)
+        self._anchor_first_point(ship, world)
 
     def update(self, ship, world):
         try:
@@ -3836,7 +3928,7 @@ class Predictor:
                                 pass
                         # Rebuild entire rolling prediction synchronously.
                         self._compute_full_rolling(ship, world)
-                        self._anchor_first_point(ship)
+                        self._anchor_first_point(ship, world)
                         # Update remembered velocity and report
                         self._last_ship_vx = cur_vx
                         self._last_ship_vy = cur_vy
@@ -3892,7 +3984,7 @@ class Predictor:
 
             if self.recompute_every_update:
                 self._compute_full(ship, world)
-                self._anchor_first_point(ship)
+                self._anchor_first_point(ship, world)
                 if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
                         print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -3905,7 +3997,7 @@ class Predictor:
             target_points = self._get_target_point_cap()
             if self._points_count() < target_points:
                 self._compute_full(ship, world)
-            self._anchor_first_point(ship)
+            self._anchor_first_point(ship, world)
             if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                 try:
                     print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -3919,7 +4011,7 @@ class Predictor:
             if ship is not None and world is not None:
                 self._cancel_pending_job()
                 self._compute_full(ship, world)
-                self._anchor_first_point(ship)
+                self._anchor_first_point(ship, world)
                 self._view_scale_changed = False
                 if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
@@ -3969,7 +4061,7 @@ class Predictor:
 
                     if self.rolling_mode:
                         self._compute_full_rolling(ship, world)
-                        self._anchor_first_point(ship)
+                        self._anchor_first_point(ship, world)
                         if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                             try:
                                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -3993,7 +4085,7 @@ class Predictor:
                         return
                     else:
                         self._compute_full(ship, world)
-                        self._anchor_first_point(ship)
+                        self._anchor_first_point(ship, world)
                         if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                             try:
                                 print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -4037,7 +4129,7 @@ class Predictor:
         # tracks the ship smoothly instead of lagging and snapping on each swap;
         # the shape itself refreshes at the worker's cadence.
         if self._points_count() > 0:
-            self._anchor_first_point(ship)
+            self._anchor_first_point(ship, world)
 
         if self.debug and not getattr(self, "_suppress_dbg_computed", False):
             try:

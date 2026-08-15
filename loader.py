@@ -238,7 +238,20 @@ class ConfigLoader:
             ('max_scale', 'max_scale', float),
             ('move_speed', 'move_speed', float),
             ('zoom_factor', 'zoom_factor', float),
+            ('zoom_smoothing', 'zoom_smoothing', float),
+            ('pan_smoothing', 'pan_smoothing', float),
+            ('zoom_to_cursor', 'zoom_to_cursor', bool),
+            ('pan_inertia_enabled', 'pan_inertia_enabled', bool),
+            ('pan_inertia_damping', 'pan_inertia_damping', float),
         ])
+        # initial_scale setzt die GEZEICHNETE skala; das zoom-ziel muss
+        # mitgezogen werden, sonst laeuft die kamera beim start sofort von
+        # der konfigurierten skala auf den (noch unveraenderten) default zurueck.
+        try:
+            camera.target_scale = camera.scale
+            camera.snap_to_targets()
+        except Exception:
+            pass
         sim = self.section('simulation')
         for key, attr in (('initial_sim_dt', 'sim_dt'),
                           ('min_sim_dt', 'min_sim_dt'),
@@ -290,6 +303,10 @@ class ConfigLoader:
         if quality is not None:
             try:
                 predictor.set_integrator_quality(quality)
+                # Das preset merken: set_integrator_quality verteilt es auf
+                # einzelne toleranzen und laesst sich daraus nicht mehr
+                # rueckwaerts ablesen. Die dev-oberflaeche zeigt es an.
+                predictor._quality = str(quality).strip().lower()
             except ValueError as exc:
                 print(f"CONFIG WARNING: predictor.quality={quality!r} ignoriert ({exc})")
 
@@ -357,24 +374,39 @@ class ConfigLoader:
             ('reference_trajectories_sample_step_s', 'reference_trajectories_sample_step_s', float),
             ('reference_traj_min_screen_px', 'reference_traj_min_screen_px', float),
             ('label_texture_cache_max', '_label_texture_cache_max', int),
-            # schriftgroessen werden unten in echte font-objekte umgesetzt
+            # UI-skalierung (aufloesungsunabhaengige darstellung)
+            ('ui_scale_reference_height', 'ui_scale_reference_height', float),
+            ('ui_scale_min', 'ui_scale_min', float),
+            ('ui_scale_max', 'ui_scale_max', float),
+            # schriftgroessen werden unten ueber set_hud_font_sizes gesetzt
             ('hud_font_size_small', None, None),
             ('hud_font_size_medium', None, None),
+            ('ui_scale', None, None),
         ])
 
         section = self.section('renderer')
         font_small = self.get_int('renderer.hud_font_size_small') if 'hud_font_size_small' in section else None
         font_medium = self.get_int('renderer.hud_font_size_medium') if 'hud_font_size_medium' in section else None
+
+        # Benutzer-skalenfaktor zuerst: er geht in die font-pixelgroesse ein,
+        # die set_hud_font_sizes() gleich darunter berechnet.
+        ui_scale_user = self.get_float('renderer.ui_scale') if 'ui_scale' in section else None
+        try:
+            if ui_scale_user is not None:
+                renderer.set_ui_scale_user(ui_scale_user)
+            else:
+                # ui_scale_reference_height/min/max koennen sich oben geaendert
+                # haben -> skala neu ableiten.
+                renderer.set_ui_scale_user(getattr(renderer, 'ui_scale_user', 1.0))
+        except Exception as exc:
+            print(f"CONFIG WARNING: UI-skalierung konnte nicht gesetzt werden ({exc})")
+
         if font_small is not None or font_medium is not None:
             try:
-                import pygame
-                pygame.font.init()
-                if font_small is not None:
-                    renderer.font_small = pygame.font.SysFont(None, font_small)
-                if font_medium is not None:
-                    renderer.font_medium = pygame.font.SysFont(None, font_medium)
-                # gecachte texturen tragen noch die alte schriftgroesse.
-                renderer._label_texture_cache = {}
+                # set_hud_font_sizes speichert DESIGN-groessen und erzeugt die
+                # fonts in groesse * ui_scale neu; der label-textur-cache wird
+                # dabei geleert (er ist nach schrifthoehe verschluesselt).
+                renderer.set_hud_font_sizes(small=font_small, medium=font_medium)
             except Exception as exc:
                 print(f"CONFIG WARNING: HUD-schriftgroesse konnte nicht gesetzt werden ({exc})")
 

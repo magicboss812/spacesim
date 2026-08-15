@@ -31,7 +31,7 @@
 ---
 ## Ausführung
 ### Requirements:
-`pip install pygame moderngl numba numpy`
+`pip install pygame moderngl numba numpy imgui-bundle`
 ### Starten:
 `python test.py`
 

@@ -1,9 +1,10 @@
 {
   "window": {
-    "width": 800,
+    "width": 1280,
     "height": 800,
     "fps": 60,
     "vsync": true,
+    "resizable": true,
     "caption": "Orbital Mechanics - OpenGL Renderer",
     "enable_fxaa": true
   },
@@ -16,6 +17,7 @@
     "max_sim_dt": 1e12,
     "sim_dt_step_factor": 1.5,
     "max_substep_seconds": 1000.0,
+    "max_frame_dt": 0.1,
     "max_frames": 0
   },
 
@@ -32,8 +34,13 @@
     "initial_scale": 1e-6,
     "min_scale": 1e-30,
     "max_scale": 1e10,
-    "move_speed": 3.0,
-    "zoom_factor": 1.5
+    "move_speed": 1.0,
+    "zoom_factor": 1.5,
+    "zoom_smoothing": 16.0,
+    "pan_smoothing": 20.0,
+    "zoom_to_cursor": true,
+    "pan_inertia_enabled": true,
+    "pan_inertia_damping": 6.0
   },
 
   "ship": {
@@ -88,10 +95,15 @@
     "reference_traj_min_screen_px": 2.0,
     "hud_font_size_small": 16,
     "hud_font_size_medium": 20,
-    "label_texture_cache_max": 256
+    "label_texture_cache_max": 256,
+    "ui_scale_reference_height": 1000.0,
+    "ui_scale_min": 1.0,
+    "ui_scale_max": 3.0,
+    "ui_scale": 1.0
   },
 
   "debug": {
+    "devui_visible": false,
     "print_frame_timings": true,
     "print_loader_info": true,
     "world_integrator_debug": false,

@@ -58,11 +58,32 @@ class Renderer:
         if self.enable_fxaa:
             self._init_fxaa()
         
-        # Pygame Fonts für HUD
+        # UI-skalierung: die gesamte oberfläche wird in "design-einheiten" gegen
+        # eine referenz-fensterhöhe angegeben und beim zeichnen mit ui_scale
+        # multipliziert. Damit wächst das HUD auf großen/hochauflösenden
+        # displays mit, statt bei 16 px stehenzubleiben.
+        #
+        # Die untergrenze ist bewusst 1.0: bei der default-fenstergröße
+        # (kleiner als die referenz) bleibt die darstellung damit exakt so wie
+        # bisher; skaliert wird ausschließlich nach oben.
+        self.ui_scale_reference_height = 1000.0
+        self.ui_scale_min = 1.0
+        self.ui_scale_max = 3.0
+        self.ui_scale_user = 1.0
+        self.ui_scale = 1.0
+
+        # Pygame Fonts für HUD. Die hier hinterlegten größen sind DESIGN-größen;
+        # die tatsächlich erzeugten font-objekte tragen größe * ui_scale und
+        # werden von _rebuild_fonts() bei jeder skalen-änderung neu erzeugt
+        # (neu rastern statt hochskalieren -> text bleibt bei jeder auflösung scharf).
         pygame.font.init()
-        self.font_small = pygame.font.SysFont(None, 16)
-        self.font_medium = pygame.font.SysFont(None, 20)
-        
+        self.hud_font_size_small = 16
+        self.hud_font_size_medium = 20
+        self.font_small = None
+        self.font_medium = None
+        self._recompute_ui_scale()
+        self._rebuild_fonts()
+
         # Debug-Info
         self.debug_info = {
             'shader_error': None,
@@ -167,6 +188,9 @@ class Renderer:
         self._hud_line_surface_cache = {}
         self._hud_texture = None
         self._hud_texture_size = (0, 0)
+        # Körper-beschriftungen, während des FBO-durchgangs gesammelt und erst
+        # nach dem FXAA-resolve gezeichnet (siehe _draw_body).
+        self._deferred_labels = []
         # HUD-memoization: solange die formatierten textzeilen identisch sind,
         # bleibt die persistente HUD-textur gültig und muss weder neu gerastert
         # (font.render/Surface/tostring) noch hochgeladen werden.
@@ -914,6 +938,76 @@ class Renderer:
         """
         self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0)
 
+    def _recompute_ui_scale(self):
+        """Leitet ui_scale aus der fensterhöhe ab. Gibt True bei änderung zurück.
+
+        Skaliert nach höhe (nicht nach fläche oder breite): breite fenster
+        sollen die oberfläche nicht aufblähen, hohe fenster schon. Das ist die
+        übliche konvention für auflösungsunabhängige spiel-UIs.
+        """
+        reference = max(float(getattr(self, 'ui_scale_reference_height', 1000.0)), 1.0)
+        raw = float(self.height) / reference
+        lo = float(getattr(self, 'ui_scale_min', 1.0))
+        hi = float(getattr(self, 'ui_scale_max', 3.0))
+        scale = max(lo, min(hi, raw)) * float(getattr(self, 'ui_scale_user', 1.0))
+        scale = max(0.1, scale)
+
+        previous = getattr(self, 'ui_scale', None)
+        self.ui_scale = scale
+        # Winzige schwankungen ignorieren: ein neuaufbau aller fonts und ein
+        # leeren des textur-caches pro pixel fenster-höhe wäre verschwendung.
+        return previous is None or abs(scale - previous) > 1e-3
+
+    def ui_px(self, design_units):
+        """Design-einheiten -> tatsächliche pixel bei aktueller ui_scale."""
+        return float(design_units) * self.ui_scale
+
+    def _rebuild_fonts(self):
+        """Erzeugt die HUD-fonts in der aktuell skalierten pixelgröße neu.
+
+        Neu rastern statt die fertigen texturen zu strecken: gestreckte
+        glyphen werden beim hochskalieren unscharf. Der label-textur-cache
+        wird dabei ungültig (er ist nach schrifthöhe verschlüsselt) und muss
+        geleert werden.
+        """
+        small_px = max(6, int(round(self.ui_px(self.hud_font_size_small))))
+        medium_px = max(6, int(round(self.ui_px(self.hud_font_size_medium))))
+        try:
+            pygame.font.init()
+            self.font_small = pygame.font.SysFont(None, small_px)
+            self.font_medium = pygame.font.SysFont(None, medium_px)
+        except Exception as exc:
+            print(f"RENDERER WARNING: HUD-fonts konnten nicht erzeugt werden ({exc})")
+            return
+        self._clear_text_caches()
+
+    def _clear_text_caches(self):
+        """Gibt alle text-abhängigen GL-texturen frei (font- oder größenwechsel)."""
+        for entry in list(getattr(self, '_label_texture_cache', {}).values()):
+            texture = entry[0]
+            if texture is not None:
+                try:
+                    texture.release()
+                except Exception:
+                    pass
+        self._label_texture_cache = {}
+        self._hud_line_surface_cache = {}
+        self._hud_cache_key = None
+
+    def set_hud_font_sizes(self, small=None, medium=None):
+        """Setzt die DESIGN-schriftgrößen und baut die fonts neu auf."""
+        if small is not None:
+            self.hud_font_size_small = int(small)
+        if medium is not None:
+            self.hud_font_size_medium = int(medium)
+        self._rebuild_fonts()
+
+    def set_ui_scale_user(self, factor):
+        """Benutzer-skalenfaktor (multiplikativ auf die automatische skala)."""
+        self.ui_scale_user = max(0.1, float(factor))
+        if self._recompute_ui_scale():
+            self._rebuild_fonts()
+
     def _get_label_texture(self, text, font):
         key = (text, font.get_height())
         entry = self._label_texture_cache.get(key)
@@ -950,12 +1044,42 @@ class Renderer:
         """
         if self._texquad_vao is None or texture is None:
             return
+        # AUF DAS PIXELRASTER RASTEN. Die weltabgeleiteten label-positionen
+        # sind subpixelgenau (Erde z. B. bei y=113.7048). Bei LINEAR-filterung
+        # verteilt ein solcher versatz jede glyphenzeile auf ZWEI pixelzeilen:
+        # der text wird weich und bekommt eine schwache kopie darueber/darunter
+        # -- sieht aus wie eine zweite zahl unter der zahl. Gemessen faellt der
+        # anteil voll deckender pixel von 19.5 % auf 9 %.
+        # Das HUD war nie betroffen, weil es ganzzahlige ursprungswerte nutzt.
+        # Die textur wird 1:1 gezeichnet, deshalb genuegt das runden der ecke.
         self._texquad_program['u_rect'].value = (
-            float(x), float(y), float(width), float(height)
+            round(float(x)), round(float(y)), float(width), float(height)
         )
         self._texquad_program['u_viewport'].value = (float(self.width), float(self.height))
         texture.use(location=0)
         self._texquad_vao.render(moderngl.TRIANGLE_STRIP)
+
+    def _ortho_y(self, y_topdown):
+        """Top-down bildschirm-Y (wie _world_to_screen_xy liefert) -> ortho-Y.
+
+        Die welt wird top-down gezeichnet (line.vert flippt y), text und
+        schiffs-pfeil laufen dagegen ueber die ortho-konvention (y nach oben,
+        ursprung unten links). Ohne diese umrechnung landet alles, was aus
+        weltkoordinaten kommt, an der ueber die BILDSCHIRMMITTE gespiegelten
+        position -- unsichtbar solange das objekt genau mittig steht, und mit
+        wachsendem abstand zur mitte immer weiter daneben.
+        """
+        return float(self.height) - float(y_topdown)
+
+    def _blit_text_topdown(self, text, x_left, y_top, font):
+        """Text an TOP-DOWN koordinaten zeichnen (x = links, y = oberkante).
+
+        Nimmt dem aufrufer die ortho-umrechnung ab: _draw_texture_ortho
+        erwartet die UNTERE linke ecke in ortho-Y.
+        """
+        entry = self._get_label_texture(text, font)
+        text_h = float(entry[2]) if entry else float(font.get_height())
+        self._blit_cached_text(text, x_left, self._ortho_y(y_top) - text_h, font)
 
     def _blit_cached_text(self, text, x, y, font):
         entry = self._get_label_texture(text, font)
@@ -1168,6 +1292,8 @@ class Renderer:
         # das schiff-marker exakt dieselben pixel-koordinaten teilen.
         ship_body = next((b for b in bodies if getattr(b, 'is_ship', False)), None)
 
+        self._deferred_labels.clear()
+
         if self.enable_fxaa and self.fbo:
             target_fbo = self.fbo
         else:
@@ -1229,15 +1355,38 @@ class Renderer:
             )
             timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
+        # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,
+        # damit der kantenfilter den text nicht verschmiert (siehe _draw_body).
+        for name, label_x, label_y in self._deferred_labels:
+            self._blit_text_topdown(name, label_x, label_y, self.font_small)
+
         hud_t0 = time.perf_counter()
         self._render_hud(camera, predictor)
         timings['hud_ms'] += (time.perf_counter() - hud_t0) * 1000.0
-        swap_t0 = time.perf_counter()
-        pygame.display.flip()
-        timings['swap_or_present_ms'] = (time.perf_counter() - swap_t0) * 1000.0
+        # Der buffer-swap liegt NICHT mehr hier, sondern in der hauptschleife
+        # (test.py -> present()). Overlays, die zuletzt zeichnen muessen
+        # (ImGui-devtools, spaeter das custom-HUD), brauchen die luecke
+        # zwischen "welt fertig gezeichnet" und "swap".
+        timings['swap_or_present_ms'] = 0.0
         timings['frame_ms'] = (time.perf_counter() - frame_t0) * 1000.0
+        self._render_t0 = frame_t0
         self.last_frame_timings = timings
         self._emit_render_benchmark(timings)
+
+    def present(self):
+        """Fuehrt den buffer-swap aus und schreibt die swap-zeit in die timings.
+
+        Von der hauptschleife aufzurufen, NACHDEM alle overlays gezeichnet sind.
+        """
+        swap_t0 = time.perf_counter()
+        pygame.display.flip()
+        swap_ms = (time.perf_counter() - swap_t0) * 1000.0
+        timings = self.last_frame_timings
+        if isinstance(timings, dict):
+            timings['swap_or_present_ms'] = swap_ms
+            start = getattr(self, '_render_t0', None)
+            if start is not None:
+                timings['frame_ms'] = (time.perf_counter() - start) * 1000.0
 
     def draw_ship_velocity_vector(self, ship, camera, reference_body=None):
         if ship is None:
@@ -1360,16 +1509,11 @@ class Renderer:
             d = directions.get(mode)
             if d is None:
                 return
-            # The orbital vectors render top-down (line shader, y flipped in
-            # line.vert) while the ship arrow renders bottom-up (fixed-function
-            # gluOrtho2D). So the arrow's on-screen heading is the vertical
-            # MIRROR of the vector for the same frame-space direction: for a
-            # target frame-heading a, the drawn arrow lands on the vector only
-            # when a is measured with d.y negated. Without the shader both paths
-            # are bottom-up and no flip is needed. This is what ties the snapped
-            # nose to the *drawn* prograde/normal vector (not its mirror).
-            dy_sign = -1.0 if getattr(self, "_line_program", None) else 1.0
-            ang_frame = math.atan2(dy_sign * float(d.y), float(d.x))
+            # `theta` ist im uhrzeigersinn gemessen (siehe _draw_ship_arrow und
+            # schiff.apply_thrust: nasenrichtung = (cos theta, -sin theta)).
+            # Damit die nase auf der frame-richtung d landet, muss also
+            # (cos theta_f, -sin theta_f) == d gelten -> d.y negiert messen.
+            ang_frame = math.atan2(-float(d.y), float(d.x))
             try:
                 theta_target = frame.heading_from_this_frame(self._frame_time_s, ang_frame)
             except Exception:
@@ -1569,15 +1713,20 @@ class Renderer:
             # FBO/Projektions-Inkonsistenzen zu vermeiden, die Label-Flackern
             # beim Umschalten der Verfolgung verursachen können.
             try:
-                lx, ly = camera.world_to_screen(body.position)
+                # Die FRAME-AWARE position (x, y) verwenden, nicht
+                # camera.world_to_screen: in rotierenden plot-frames weichen
+                # beide voneinander ab und das label loest sich vom schiff.
+                lx, ly = x, y
                 entry = self._get_label_texture(body.name, self.font_small)
                 if entry:
                     _, w, h = entry
-                    label_x = float(lx) - (float(w) / 2.0)
-                    label_y = float(ly) - 16.0
-                    self._blit_cached_text(body.name, label_x, label_y, self.font_small)
+                    self._blit_text_topdown(
+                        body.name, float(lx) - (float(w) / 2.0), float(ly) - 26.0,
+                        self.font_small,
+                    )
                 else:
-                    self._blit_cached_text(body.name, float(lx) + 12.0, float(ly) - 8.0, self.font_small)
+                    self._blit_text_topdown(body.name, float(lx) + 12.0, float(ly) - 26.0,
+                                            self.font_small)
                 speed = self._ship_frame_speed_m_s(body)
                 if getattr(self, "debug_frame", False):
                     try:
@@ -1599,9 +1748,13 @@ class Renderer:
                     speed_entry = self._get_label_texture(speed_text, self.font_small)
                     if speed_entry:
                         _, sw, _ = speed_entry
-                        self._blit_cached_text(speed_text, float(lx) - (float(sw) / 2.0), float(ly) + 24.0, self.font_small)
+                        self._blit_text_topdown(
+                            speed_text, float(lx) - (float(sw) / 2.0), float(ly) + 16.0,
+                            self.font_small,
+                        )
                     else:
-                        self._blit_cached_text(speed_text, float(lx) + 12.0, float(ly) + 24.0, self.font_small)
+                        self._blit_text_topdown(speed_text, float(lx) + 12.0, float(ly) + 16.0,
+                                                self.font_small)
             except Exception:
                 try:
                     self._draw_body_label(body.name, screen_pos, 12)
@@ -1669,15 +1822,25 @@ class Renderer:
             # Label-Position mittels camera.world_to_screen berechnen, um
             # inkonsistente Koordinatensysteme zwischen FBO und Hauptpuffer zu vermeiden.
             try:
-                lx, ly = camera.world_to_screen(body.position)
+                # frame-aware position verwenden (siehe schiffs-label oben)
+                lx, ly = x, y
                 entry = self._get_label_texture(body.name, self.font_small)
+                # NICHT sofort zeichnen: koerper laufen in den FXAA-FBO, und
+                # FXAA ist ein kantenfilter -- ueber gerastertem text macht er
+                # aus 34.7 % voll deckenden pixeln 5.3 % und verschmiert die
+                # glyphen ueber 55 % mehr pixel. Die beschriftung wird deshalb
+                # gesammelt und in render() NACH dem FXAA-resolve gezeichnet,
+                # so wie schiff und apsis-marker es schon immer wurden.
                 if entry:
                     _, w, h = entry
                     label_x = float(lx) - (float(w) / 2.0)
-                    label_y = float(ly) + float(radius_px) + 6.0
-                    self._blit_cached_text(body.name, label_x, label_y, self.font_small)
+                    # ueber den koerper setzen: top-down ist "oben" kleineres y
+                    label_y = float(ly) - float(radius_px) - 6.0 - float(h)
+                    self._deferred_labels.append((body.name, label_x, label_y))
                 else:
-                    self._blit_cached_text(body.name, float(lx) + float(radius_px) + 2.0, float(ly) - 8.0, self.font_small)
+                    self._deferred_labels.append((body.name,
+                                                  float(lx) + float(radius_px) + 2.0,
+                                                  float(ly) - 8.0))
             except Exception:
                 try:
                     self._draw_body_label(body.name, screen_pos, radius_px)
@@ -1692,7 +1855,18 @@ class Renderer:
 
         theta = float(theta_override) if theta_override is not None else float(getattr(body, 'theta', 0.0))
 
-        # Match camera.world_to_screen() y-inversion to keep visual heading correct.
+        # Der pfeil laeuft ueber die ORTHO-pipeline (y nach oben), die
+        # uebergebene position kommt aber aus _world_to_screen_xy (top-down).
+        # Ohne diese umrechnung wird der pfeil an der ueber die bildschirmmitte
+        # gespiegelten stelle gezeichnet: exakt mittig faellt das nicht auf,
+        # abseits der mitte steht das schiff weit neben seiner bahn.
+        y = self._ortho_y(y)
+
+        # `theta` ist im UHRZEIGERSINN gemessen: schiff.apply_thrust schiebt
+        # entlang Vec2(cos theta, -sin theta), das ist die weltrichtung der
+        # nase. Der pfeil muss also ebenfalls (cos, -sin) zeigen.
+        # Die positions-korrektur oben aendert daran nichts -- eine
+        # verschiebung dreht keine richtung.
         hx = math.cos(theta)
         hy = -math.sin(theta)
         nx = -hy
@@ -2285,21 +2459,16 @@ class Renderer:
 
             text = f"{label} {self._format_apsis_distance(dist)}"
             try:
-                # Diamant + linie werden über den line-shader in Y-nach-unten-
-                # bildschirmkoordinaten gezeichnet (sy wächst nach unten). Text
-                # dagegen läuft über die fixed-function-ortho aus render()
-                # (gluOrtho2D(0, w, 0, h), Y-nach-oben) mit vertikal geflippter
-                # textur. Ohne umrechnung landet das label an der über die
-                # bildschirmmitte gespiegelten position — bei markern fernab der
-                # mitte weit neben ihrem diamant. Daher sy -> ortho-Y flippen.
+                # Diamant + linie laufen über den line-shader (top-down, sy
+                # wächst nach unten), text über die ortho-konvention
+                # (y nach oben). _blit_text_topdown rechnet das um.
                 entry = self._get_label_texture(text, self.font_small)
-                th = float(entry[2]) if entry else float(self.font_small.get_height())
                 tw = float(entry[1]) if entry else 0.0
-                # oberkante des labels knapp unter die untere diamant-spitze
-                # (bildschirm-abwärts = kleineres ortho-Y): ortho_top = H - (sy + r + 4)
+                # oberkante des labels knapp unter die untere diamant-spitze.
+                # Die ortho-umrechnung macht jetzt _blit_text_topdown (frueher
+                # stand sie hier als einziger korrekt umgerechneter aufrufer).
                 label_x = sx - tw / 2.0
-                label_y = float(self.height) - (sy + r_px + 4.0) - th
-                self._blit_cached_text(text, label_x, label_y, self.font_small)
+                self._blit_text_topdown(text, label_x, sy + r_px + 4.0, self.font_small)
             except Exception:
                 pass
 
@@ -2549,9 +2718,9 @@ class Renderer:
             if entry:
                 _, w, h = entry
                 label_x = float(screen_pos[0]) - (float(w) / 2.0)
-                # Label über dem Körper platzieren; Bildschirm-Y wächst nach oben.
-                label_y = float(screen_pos[1]) + float(radius) + 6.0
-                self._blit_cached_text(name, label_x, label_y, self.font_small)
+                # screen_pos ist TOP-DOWN; ueber dem koerper heisst kleineres y.
+                label_y = float(screen_pos[1]) - float(radius) - 6.0 - float(h)
+                self._blit_text_topdown(name, label_x, label_y, self.font_small)
                 return
         except Exception:
             pass
@@ -2559,7 +2728,7 @@ class Renderer:
         # Fallback: previous heuristic
         label_x = screen_pos[0] + radius + 2
         label_y = screen_pos[1] - 8
-        self._blit_cached_text(name, label_x, label_y, self.font_small)
+        self._blit_text_topdown(name, label_x, label_y, self.font_small)
     
     def _draw_hud_quad(self, x, y, width, height):
         """Zeichnet die persistente HUD-textur als quad (ohne re-upload)."""
@@ -2641,17 +2810,23 @@ class Renderer:
 
         texts.append("[WASD] Move | [F] Unfollow | [Scroll] Zoom | [R] Cycle ref | [1]/[2] Frame mode | [T] Target overlay")
         
-        # Pygame Surface für HUD erstellen
-        line_height = 16
-        hud_width = 560
-        hud_height = max(40, len(texts) * line_height + 8)
-        origin_x = 10
-        origin_y = self.height - hud_height - 10
+        # Pygame Surface für HUD erstellen. Alle maße sind design-einheiten und
+        # werden über ui_px() auf die aktuelle fenstergröße skaliert; bei
+        # ui_scale == 1.0 ergeben sich exakt die bisherigen festwerte.
+        line_height = max(1, int(round(self.ui_px(16))))
+        hud_width = max(1, int(round(self.ui_px(560))))
+        margin = int(round(self.ui_px(10)))
+        hud_height = max(
+            int(round(self.ui_px(40))),
+            len(texts) * line_height + int(round(self.ui_px(8))),
+        )
+        origin_x = margin
+        origin_y = self.height - hud_height - margin
 
         # Bei unverändertem text bleibt die persistente HUD-textur gültig:
         # font.render (~1 pro zeile), Surface-allokation, tostring und der
         # textur-upload entfallen, es genügt ein redraw der bestehenden textur.
-        cache_key = (tuple(texts), int(self.width), int(self.height))
+        cache_key = (tuple(texts), int(self.width), int(self.height), round(self.ui_scale, 3))
         if cache_key == self._hud_cache_key and self._hud_texture is not None:
             self._draw_hud_quad(origin_x, origin_y, *self._hud_texture_size)
             return
@@ -2680,10 +2855,21 @@ class Renderer:
         self.width = width
         self.height = height
         self.ctx.viewport = (0, 0, width, height)
+        # WICHTIG: moderngl erkennt die groesse von ctx.screen nur EINMAL beim
+        # anlegen des contexts. Nach einem resize meldet ctx.screen.size noch
+        # die alte fenstergroesse -- und jedes ctx.screen.use() stellt daraus
+        # viewport UND scissor wieder her. Ohne die explizite neuzuweisung
+        # unten klemmt der scissor nach dem FXAA-pass (render() ruft dort
+        # ctx.screen.use()) alles nachfolgende -- predictor-linie, schiff, HUD
+        # -- auf das alte fenster-rechteck: beim maximieren ist dann nur noch
+        # ein ausschnitt des spiels sichtbar.
+        # ctx.screen.scissor = None hilft NICHT: das setzt den scissor auf die
+        # (weiterhin veraltete) eigengroesse des framebuffers zurueck.
         try:
             self.ctx.screen.viewport = (0, 0, width, height)
-        except Exception:
-            pass
+            self.ctx.screen.scissor = (0, 0, width, height)
+        except Exception as exc:
+            print(f"RENDERER WARNING: screen viewport/scissor resize failed ({exc})")
 
         # Framebuffer neu erstellen wenn FXAA aktiviert (programm + VAO
         # bleiben; nur textur/FBO hängen von der fenstergröße ab).
@@ -2697,18 +2883,17 @@ class Renderer:
                 print(f"FXAA resize failed: {e}")
                 self._release_fxaa_targets()
                 self.enable_fxaa = False
+        # UI-skala an die neue fensterhöhe anpassen. Nur bei echter änderung
+        # die fonts neu aufbauen -- _rebuild_fonts leert die text-caches
+        # ohnehin, und beim reinen breiten-resize wäre das verschwendet.
+        if self._recompute_ui_scale():
+            self._rebuild_fonts()
+
         # Clear HUD and label texture caches (will be recreated lazily)
         try:
-            for entry in list(self._label_texture_cache.values()):
-                texture = entry[0]
-                if texture:
-                    try:
-                        texture.release()
-                    except Exception:
-                        pass
+            self._clear_text_caches()
         except Exception:
             pass
-        self._label_texture_cache = {}
         if getattr(self, '_hud_texture', None):
             try:
                 self._hud_texture.release()

@@ -9,6 +9,7 @@ from camera import Camera
 from rendering import Renderer
 from predictor import Predictor
 from schiff import schiffcontrol
+from devui import DevContext, ImguiLayer
 from reference_frames import (
     BODY_CENTRED_BODY_DIRECTION,
     BODY_CENTRED_NON_ROTATING,
@@ -37,6 +38,16 @@ def main():
     # VSync über Umgebungsvariable aktivieren
     vsync_enabled = bool(config.get('window.vsync', True))
     os.environ['SDL_VIDEO_VSYNC'] = '1' if vsync_enabled else '0'
+
+    # Windows-DPI-Awareness VOR pygame.init() setzen. python.exe ist ohne
+    # Manifest standardmäßig DPI-unaware; ohne diesen Hint skaliert der DWM
+    # das fertige (bereits scharf gerenderte) Fenster per Bitmap-Stretch auf
+    # die physische Auflösung hoch, sobald die Windows-Skalierung > 100% ist
+    # -> das ganze Fenster inkl. HUD-Text wirkt unscharf. SDL_WINDOWS_DPI_AWARENESS
+    # ist der von SDL2 unterstützte Hint dafür und muss vor SDL_Init/pygame.init
+    # gesetzt sein.
+    if os.name == 'nt':
+        os.environ.setdefault('SDL_WINDOWS_DPI_AWARENESS', 'permonitorv2')
     max_frames = int(config.get('simulation.max_frames', 0) or 0)
     try:
         # Umgebungsvariable hat Vorrang vor der Konfiguration (Messläufe).
@@ -53,9 +64,15 @@ def main():
     HEIGHT = int(config.get('window.height', 800))
 
     # OpenGL-Flag für pygame Display; moderngl hängt sich an den von
-    # pygame/SDL erstellten GL-context (ein wrapper, geteilt mit dem Renderer)
+    # pygame/SDL erstellten GL-context (ein wrapper, geteilt mit dem Renderer).
+    # RESIZABLE: die auflösung ist dynamisch -- das fenster darf frei skaliert
+    # oder maximiert werden, viewport/FXAA-targets/UI-skala folgen über den
+    # WINDOWSIZECHANGED-handler in der hauptschleife.
+    window_flags = DOUBLEBUF | OPENGL
+    if bool(config.get('window.resizable', True)):
+        window_flags |= RESIZABLE
     screen = pygame.display.set_mode(
-        (WIDTH, HEIGHT), DOUBLEBUF | OPENGL, vsync=1 if vsync_enabled else 0
+        (WIDTH, HEIGHT), window_flags, vsync=1 if vsync_enabled else 0
     )
     gl_ctx = moderngl.create_context()
     print(gl_ctx.info['GL_VENDOR'], gl_ctx.info['GL_RENDERER'], gl_ctx.info['GL_VERSION'])
@@ -131,6 +148,15 @@ def main():
     )
     # Darstellungsparameter (Linienqualität, Marker, Spuren, HUD) aus config.json
     config.apply_to_renderer(renderer)
+
+    # Entwickler-oberflaeche (Dear ImGui, moderngl-nativ auf demselben context).
+    # Standardmaessig unsichtbar; F1 blendet sie ein. Rein werkzeug -- das
+    # spieler-HUD ist ein eigenes system.
+    devui = ImguiLayer(
+        gl_ctx, WIDTH, HEIGHT,
+        enabled=bool(config.get('debug.devui_visible', False)),
+    )
+    devui_toggle_key = pygame.K_F1
     if verbose:
         print("=== Renderer initialisiert ===")
         print(f"=== Konfiguration: {config.filepath.name} ===")
@@ -224,6 +250,10 @@ def main():
 
     apply_frame_selection()
 
+    # Startansicht ohne einflug: zoom und position sofort auf ihre ziele
+    # setzen, statt sie aus dem ursprung heranlaufen zu lassen.
+    camera.snap_to_targets()
+
 
     def update(world, dt):
         """Aktualisiert die Simulation."""
@@ -235,16 +265,94 @@ def main():
     # Dynamik in mehrere Stücke zerlegt, damit der Integrator stabil bleibt.
     MAX_SUBSTEP = max(float(config.get('simulation.max_substep_seconds', 1000.0)), 1e-6)
 
+    # Simulationstakt vom render-takt entkoppeln.
+    #
+    # Vorher wurde die simulation genau einmal pro gezeichnetem frame um
+    # camera.sim_dt vorgerückt -- die simulationsgeschwindigkeit hing damit
+    # direkt an der bildrate. Ein einbruch (fenster ziehen, resize, GC) hat die
+    # simulation verlangsamt, danach sprang sie.
+    #
+    # Jetzt wird ZEITPROPORTIONAL vorgerückt: pro frame um
+    #     camera.sim_dt * TICK_RATE * frame_dt
+    # Die simulationsrate ist damit konstant camera.sim_dt * TICK_RATE
+    # sim-sekunden pro echtsekunde, unabhängig von der bildrate.
+    #
+    # Ein akkumulator mit FESTEN ticks waere die lehrbuch-loesung, ist hier
+    # aber falsch: die tick-rate liegt bei der bildrate, also quantisiert der
+    # akkumulator gegen den vsync-jitter. Gemessen ueber 600 frames: 9 frames
+    # ruecken GAR NICHT vor, 7 frames DOPPELT (16.4 % streuung statt 4.2 %).
+    # Sichtbar wird das als stotterndes schiff, das gegen die jeden frame neu
+    # gezeichnete predictor-linie springt. Der integrator ist adaptiv (RKN mit
+    # schrittweitensteuerung) und step_simulation() zerlegt ohnehin in
+    # MAX_SUBSTEP-stuecke, ein variables aeusseres dt ist also unproblematisch.
+    TICK_RATE = float(max(1, FPS))
+    # Obergrenze für das echte frame-delta (simulation, kamera-easing, schub).
+    # Nach einem stall darf kein einzelner riesiger schritt eingespeist werden.
+    MAX_FRAME_DT = max(1e-4, float(config.get('simulation.max_frame_dt', 0.1)))
+
+    def step_simulation(sim_seconds):
+        """Rückt die welt um sim_seconds vor, aufgeteilt in MAX_SUBSTEP-stücke."""
+        if sim_seconds <= 0.0:
+            return
+        if sim_seconds <= MAX_SUBSTEP:
+            update(w, sim_seconds)
+            return
+        steps = int(math.ceil(sim_seconds / MAX_SUBSTEP))
+        sub_dt = sim_seconds / steps
+        for _ in range(steps):
+            update(w, sub_dt)
+
+    # Was die dev-oberflaeche verstellen darf (siehe devui.DevContext).
+    dev_ctx = DevContext(
+        world=w, camera=camera, predictor=predictor, renderer=renderer,
+        ship_control=ship_control, ship=ship, tick_rate=TICK_RATE,
+    )
+
     # Hauptschleife
     frame_count = 0
     while running:
-        frame_dt = clock.tick(FPS) / 1000.0
+        raw_frame_dt = clock.tick(FPS) / 1000.0
+        frame_dt = min(raw_frame_dt, MAX_FRAME_DT)
         loop_t0 = time.perf_counter()
 
+        # Eingabe-vorfahrt für diesen frame: custom-UI -> ImGui -> welt.
+        # (Das custom-UI aus Phase 3 wird hier davorgeschaltet.)
+        devui.new_frame(frame_dt)
+        ui_wants_mouse = devui.wants_mouse
+        ui_wants_keyboard = devui.wants_keyboard
+
         for event in pygame.event.get():
+            # ImGui sieht jedes ereignis zuerst, damit es seinen eigenen
+            # eingabezustand fuehren kann. Ob es die eingabe auch VERBRAUCHT,
+            # entscheiden weiter unten ui_wants_mouse / ui_wants_keyboard.
+            devui.process_event(event)
+
             if event.type == pygame.QUIT:
                 running = False
+
+            # Dynamische auflösung: fenstergröße geändert (ziehen, maximieren,
+            # DPI-wechsel). Renderer.resize() setzt viewport, baut die
+            # FXAA-targets neu auf, leert die text-caches und leitet ui_scale
+            # neu ab; die kamera braucht die neuen maße für world_to_screen.
+            elif event.type == pygame.WINDOWSIZECHANGED:
+                new_w = max(1, int(event.x))
+                new_h = max(1, int(event.y))
+                if (new_w, new_h) != (renderer.width, renderer.height):
+                    renderer.resize(new_w, new_h)
+                    camera.width = new_w
+                    camera.height = new_h
+                    devui.resize(new_w, new_h)
+
             elif event.type == pygame.KEYDOWN:
+                # F1 schaltet die dev-oberflaeche IMMER um, auch wenn ImGui
+                # gerade die tastatur haelt -- sonst liesse sie sich nicht
+                # mehr schliessen, sobald ein eingabefeld fokussiert ist.
+                if event.key == devui_toggle_key:
+                    devui.toggle()
+                    continue
+                if ui_wants_keyboard:
+                    # Tastatur gehoert der oberflaeche (texteingabe o.ae.).
+                    continue
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 # Taste P für Predictive Orbit umschalten
@@ -334,8 +442,15 @@ def main():
                     predictor.reset()
                     print(f"PREDICTOR: precision set to {predictor.precision}")
 
-            camera.handle_event(event)
-        
+            # Eingabe-vorfahrt: custom-UI -> ImGui -> welt (kamera/schiff).
+            # Solange keine oberfläche existiert, beansprucht niemand die
+            # eingabe; die flags sind der andockpunkt für Phase 2/3.
+            camera.handle_event(
+                event,
+                ui_wants_mouse=ui_wants_mouse,
+                ui_wants_keyboard=ui_wants_keyboard,
+            )
+
         # Schiff-Steuerung
         keys = pygame.key.get_pressed()
         reference_body = w.body[reference_index] if reference_index is not None else None
@@ -343,23 +458,24 @@ def main():
             ship_control.last_thrust_direction = None
             if ship is not None:
                 setattr(ship, "last_thrust_direction", None)
-            # rotation: in echtzeit sanft
-            ship_control.handle_rotation(keys, frame_dt)
-            # schub: einmal pro echtem frame festen delta-v anwenden (unabhängig von sim_dt)
-            ship_control.apply_thrust(keys, frame_dt)
+            # Schiff-steuerung liest den tastaturzustand direkt (polling, keine
+            # ereignisse) -- deshalb muss die eingabe-vorfahrt hier gesondert
+            # geprueft werden, sonst fliegt das schiff waehrend einer
+            # texteingabe in der dev-oberflaeche mit.
+            if not ui_wants_keyboard:
+                # rotation: in echtzeit sanft
+                ship_control.handle_rotation(keys, frame_dt)
+                # schub: einmal pro echtem frame festen delta-v anwenden (unabhängig von sim_dt)
+                ship_control.apply_thrust(keys, frame_dt)
 
-        # Simulation aktualisieren (nur für dynamik in unterschritte aufteilen)
-        total_sim = camera.sim_dt
-        if total_sim <= MAX_SUBSTEP:
-            update(w, total_sim)
-        else:
-            steps = int(math.ceil(total_sim / MAX_SUBSTEP))
-            sub_dt = total_sim / steps
-            for _ in range(steps):
-                update(w, sub_dt)
+        # Simulation zeitproportional vorrücken (siehe TICK_RATE oben).
+        # frame_dt ist bereits auf MAX_FRAME_DT gekappt, ein stall kann also
+        # keinen riesigen sprung einspeisen.
+        step_simulation(camera.sim_dt * TICK_RATE * frame_dt)
 
         # kamera mit echtem frame-delta für interaktives panning aktualisieren
-        camera.update(frame_dt)
+        # (zoom/schwenk laufen ihren zielen geglättet nach)
+        camera.update(frame_dt, ui_wants_keyboard=ui_wants_keyboard)
 
         # orbit-prognose berechnen (für das Schiff oder einen Körper)
         points = []
@@ -369,7 +485,16 @@ def main():
 
             if target:
                 if hasattr(predictor, 'set_view_scale'):
-                    predictor.set_view_scale(camera.scale)
+                    # WICHTIG: das zoom-ZIEL einspeisen, nicht die gerade
+                    # nachlaufende skala. set_view_scale() setzt bei jeder
+                    # änderung > snapshot_view_rel_tol (1e-6) das flag
+                    # _view_scale_changed, was in Predictor.update() einen
+                    # SYNCHRONEN _compute_full() im hauptthread auslöst. Mit
+                    # der animierten skala wäre das ein voller neuaufbau der
+                    # trajektorie in JEDEM frame einer zoom-animation. Das ziel
+                    # ist während der animation konstant -> genau ein
+                    # neuaufbau pro mausrad-raste.
+                    predictor.set_view_scale(camera.target_scale)
                 predictor.update(target, w)
 
         points = predictor.get_points()
@@ -383,6 +508,15 @@ def main():
             w.body, camera, points, predictor=predictor, sim_time=w.time,
             reference_body=reference_body, ship_control=ship_control, real_dt=frame_dt,
         )
+
+        # Overlays NACH der welt und VOR dem swap. render() macht den swap
+        # nicht mehr selbst -- das uebernimmt renderer.present() unten.
+        dev_ctx.frame_dt = frame_dt
+        dev_ctx.sim_step_s = camera.sim_dt * TICK_RATE * frame_dt
+        devui.build(dev_ctx)
+        devui.render()
+
+        renderer.present()
 
         # Per-frame timing debug line. Splits the frame into predictor line
         # calculation vs. drawing, and the render pipeline into CPU calculation
@@ -407,6 +541,7 @@ def main():
         if max_frames > 0 and frame_count >= max_frames:
             running = False
 
+    devui.shutdown()
     pygame.quit()
 
 if __name__ == "__main__":
