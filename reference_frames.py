@@ -15,6 +15,11 @@ from typing import Callable, Sequence
 
 from vec import Vec2, G as NEWTONIAN_G
 
+try:
+    import numpy as _np
+except Exception:                                    # pragma: no cover
+    _np = None
+
 
 BODY_CENTRED_NON_ROTATING = 6000
 BODY_CENTRED_BODY_DIRECTION = 6002
@@ -67,14 +72,46 @@ def _unit_or_none(x: float, y: float):
     return Vec2(x / mag, y / mag)
 
 
+#: Wie lang die tangenten-sehne mindestens sein muss, gemessen in ECHTEN
+#: stuetzweiten der linie. Siehe _prograde_from_line -- der wert teilt den
+#: seitlichen versatz des schiffs zur kurve, ist also die rauschgrenze der
+#: richtung.
+_MIN_TANGENT_CHORD_FRACTION = 0.25
+
+#: Wie weit nach vorn gesucht wird, bis eine brauchbare sehne gefunden ist.
+_TANGENT_SCAN_LIMIT = 16
+
+
 def _prograde_from_line(frame, points):
     """Frame-space tangent of the *actual* predictor polyline at its start.
 
     ``points`` are absolute (barycentric) world samples ``[x, y, t_abs]`` — the
     same array the renderer draws. Each sample is transformed to frame space at
-    its own time (exactly as the drawn line is), and the first non-degenerate
-    chord gives the on-screen tangent. Returns a unit ``Vec2`` in FRAME space,
-    or ``None`` when unavailable/degenerate.
+    its own time (exactly as the drawn line is), and the chord from the head
+    gives the on-screen tangent. Returns a unit ``Vec2`` in FRAME space, or
+    ``None`` when unavailable/degenerate.
+
+    **Die sehne muss eine MINDESTLAENGE haben, nicht nur ungleich null sein.**
+    Das ist der ganze punkt dieser funktion und war ein echter fehler
+    (behoben 2026-08-17). Im zeitraffer-halt ist ``points[0]`` die exakte
+    schiffsposition, die davor haengende stuetzstelle ``points[1]`` bleibt
+    stehen -- die kopfsehne ``c`` laeuft also zwischen zwei verbrauchten
+    stuetzstellen stetig von einer vollen punktweite auf NULL.
+
+    Gleichzeitig liegt das schiff nie exakt auf der gehaltenen kurve: welt und
+    predictor propagieren die planeten leicht unterschiedlich, es bleibt ein
+    seitlicher versatz ``d`` von einigen metern. Der winkelfehler der tangente
+    ist ``~ d/c`` -- und mit ``c -> 0`` waechst er unbegrenzt. Gemessen ueber
+    3000 frames bei 1h/s: der fehler folgt ``d/c`` punktgenau, und JEDER
+    grosse ausschlag faellt mit der kleinsten kopfsehne zusammen. Sichtbar
+    wird das als navball und prograde/normal-vektoren, die nach einigen
+    sekunden zeitraffer in beliebige richtungen springen; ein zoom hat es
+    "behoben", weil er eine vollberechnung ausloest und den versatz auf null
+    setzt.
+
+    Die alte schranke (1e-12 m) konnte das nicht abfangen: eine sehne von
+    1000 m ist voellig gesund -- sie ist nur zu kurz GEGEN das rauschen. Die
+    schranke muss deshalb relativ zur echten stuetzweite sein.
     """
     if points is None:
         return None
@@ -85,29 +122,63 @@ def _prograde_from_line(frame, points):
     if n < 2:
         return None
 
-    p0 = points[0]
-    try:
-        x0 = float(p0[0])
-        y0 = float(p0[1])
-        t0 = float(p0[2]) if len(p0) >= 3 else 0.0
-        fx0, fy0 = frame.to_this_frame_xy(t0, x0, y0)
-    except Exception:
-        return None
+    limit = min(n, _TANGENT_SCAN_LIMIT)
+    cache = {}
 
-    # Scan forward for the first sample that yields a non-degenerate chord in
-    # frame space (early samples can be sub-epsilon apart when densely spaced).
-    for i in range(1, min(n, 16)):
-        pi = points[i]
+    def frame_xy(index):
+        """Stuetzstelle `index` in rahmen-koordinaten, einmal gerechnet."""
+        if index in cache:
+            return cache[index]
+        value = None
         try:
-            xi = float(pi[0])
-            yi = float(pi[1])
-            ti = float(pi[2]) if len(pi) >= 3 else t0
-            fxi, fyi = frame.to_this_frame_xy(ti, xi, yi)
+            p = points[index]
+            t = float(p[2]) if len(p) >= 3 else 0.0
+            value = frame.to_this_frame_xy(t, float(p[0]), float(p[1]))
         except Exception:
+            value = None
+        cache[index] = value
+        return value
+
+    head = frame_xy(0)
+    if head is None:
+        return None
+    fx0, fy0 = head
+
+    # Massstab: ein echter abstand STUETZSTELLE-ZU-STUETZSTELLE. Der kopf
+    # bleibt dabei aussen vor -- er ist im halt das schiff und liefert genau
+    # die schrumpfende sehne, gegen die hier geschuetzt wird.
+    spacing = 0.0
+    for i in range(1, limit - 1):
+        a = frame_xy(i)
+        b = frame_xy(i + 1)
+        if a is None or b is None:
             continue
-        d = _unit_or_none(fxi - fx0, fyi - fy0)
-        if d is not None:
-            return d
+        spacing = math.hypot(b[0] - a[0], b[1] - a[1])
+        if spacing > 0.0:
+            break
+
+    min_chord = max(1e-12, _MIN_TANGENT_CHORD_FRACTION * spacing)
+
+    # Vorwaerts suchen, bis die sehne lang genug ist. Bei gleichmaessigen
+    # stuetzweiten -- also immer ausserhalb des halts -- greift schon i = 1,
+    # das verhalten ist dort unveraendert.
+    best = None
+    for i in range(1, limit):
+        value = frame_xy(i)
+        if value is None:
+            continue
+        dx = value[0] - fx0
+        dy = value[1] - fy0
+        mag = math.hypot(dx, dy)
+        if mag >= min_chord:
+            return _unit_or_none(dx, dy)
+        if best is None or mag > best[0]:
+            best = (mag, dx, dy)
+
+    # Nichts erreicht die mindestlaenge (sehr kurze linie): die laengste
+    # gefundene sehne ist immer noch besser als gar keine richtung.
+    if best is not None:
+        return _unit_or_none(best[1], best[2])
     return None
 
 
@@ -232,6 +303,34 @@ def _kepler_true_anomaly_from_mean(M: float, e: float) -> float:
     return math.atan2(math.sqrt(max(0.0, 1.0 - e * e)) * math.sin(E), math.cos(E) - e)
 
 
+# Sentinel fuer _scripted_top_level_batch: einzelne zeiten scheitern, der
+# stapel kann die skalare pro-punkt-verzweigung dann nicht nachbilden.
+_BATCH_MIXED = object()
+
+
+def _true_anomaly_from_mean_batch(M, e: float):
+    """Vektorisierte fassung von _kepler_true_anomaly_from_mean.
+
+    Newton-iteration wie in _solve_eccentric_anomaly, aber pro element mit
+    demselben abbruch: ein element wird nach der iteration eingefroren, in
+    der sein |dE| unter 1e-10 faellt -- exakt die iterationsfolge der
+    skalaren schleife, nur nebeneinander gerechnet.
+    """
+    M = _np.asarray(M, dtype=_np.float64)
+    E = M.copy()
+    active = _np.nonzero(_np.ones(E.shape, dtype=bool))[0]
+    for _ in range(50):
+        Ea = E[active]
+        dE = (M[active] - Ea + e * _np.sin(Ea)) / (1.0 - e * _np.cos(Ea))
+        E[active] = Ea + dE
+        keep = _np.abs(dE) >= 1e-10
+        if not bool(keep.any()):
+            break
+        active = active[keep]
+    k = math.sqrt(max(0.0, 1.0 - e * e))
+    return _np.arctan2(k * _np.sin(E), _np.cos(E) - e)
+
+
 def _mean_anomaly_from_true(nu: float, e: float) -> float:
     cos_nu = math.cos(nu)
     cos_E = (e + cos_nu) / (1.0 + e * cos_nu)
@@ -287,6 +386,24 @@ class ReferenceFrame:
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
         return float(x), float(y)
 
+    def to_this_frame_xy_arrays(self, times, xs, ys):
+        """Stapelfassung von to_this_frame_xy. None = nicht moeglich.
+
+        Der renderer projiziert je frame tausende predictor-punkte. Einzeln
+        aufgerufen ist das fast reiner Python-aufruf-overhead (gemessen 5.6 ms
+        je frame allein fuer diese schleife). Wer das hier ueberschreibt, MUSS
+        rechnerisch identisch zur skalaren fassung bleiben -- die gezeichnete
+        linie wird gegen eine referenzausgabe geprueft.
+
+        Rueckgabe None heisst 'kann ich nicht', der aufrufer nimmt dann den
+        skalaren weg. Der STANDARD ist bewusst None und nicht etwa die
+        identitaet: eine unterklasse, die to_this_frame_xy ueberschreibt und
+        das hier vergisst, wuerde sonst still ihre transformation verlieren
+        und die linie unverwandelt zeichnen. Nicht koennen ist harmlos,
+        falsch rechnen nicht.
+        """
+        return None
+
     def to_this_frame_at_time(self, time_s: float, position: Vec2) -> Vec2:
         px, py = self.to_this_frame_xy(time_s, position.x, position.y)
         return Vec2(px, py)
@@ -309,6 +426,14 @@ class ReferenceFrame:
 
 class IdentityReferenceFrame(ReferenceFrame):
     label = "Barycentric"
+
+    def to_this_frame_xy_arrays(self, times, xs, ys):
+        # Hier IST die identitaet richtig -- anders als in der basisklasse,
+        # wo sie eine vergessene ueberschreibung verschleiern wuerde.
+        if _np is None:
+            return None
+        return (_np.array(xs, dtype=_np.float64, copy=True),
+                _np.array(ys, dtype=_np.float64, copy=True))
 
 
 class _BodyEphemerisMixin:
@@ -401,6 +526,256 @@ class _BodyEphemerisMixin:
         if frac >= 1.0:
             return xhi, yhi
         return (xlo + (xhi - xlo) * frac, ylo + (yhi - ylo) * frac)
+
+    def _origin_xy_arrays(self, body, times):
+        """Stapelfassung von _body_world_position_at_time. None = nicht moeglich.
+
+        Nutzt genau dieselbe knoten-interpolation wie die skalare fassung:
+        die stuetzstellen liegen gleichmaessig auf [t0, t1] mit abstand q, und
+        zwischen zwei knoten wird linear interpoliert. Weil die knoten ein
+        REGELMAESSIGES gitter bilden, ist das eine reine np.take-plus-lerp-
+        rechnung -- mit denselben operationen in derselben reihenfolge wie
+        `xlo + (xhi - xlo) * frac`, also bis aufs letzte bit gleich.
+
+        Ohne aktives zeitfenster (q <= 0) gibt es kein gitter; dann None, und
+        der aufrufer bleibt skalar.
+        """
+        if _np is None or body is None:
+            return None
+        q = float(self._origin_interp_q)
+        if q <= 0.0:
+            return None
+
+        t = _np.asarray(times, dtype=_np.float64)
+        if t.size == 0:
+            return (_np.empty(0, dtype=_np.float64), _np.empty(0, dtype=_np.float64))
+
+        t0 = float(self._origin_interp_t0)
+        n = _np.floor((t - t0) / q)
+        if not _np.all(_np.isfinite(n)):
+            return None
+        n_int = n.astype(_np.int64)
+        k_lo = int(n_int.min())
+        k_hi = int(n_int.max()) + 1          # +1: khi des letzten knotens
+        span = k_hi - k_lo + 1
+        # Schutz vor entarteten zeitfenstern: das gitter hat normalerweise
+        # hoechstens frame_origin_interp_max_knots + 1 stuetzstellen.
+        if span <= 0 or span > 4 * max(1, int(self.frame_origin_interp_max_knots)) + 8:
+            return None
+
+        # Knot-zeiten wie in der skalaren fassung: t0 + k*q, dann dieselbe
+        # zeit-quantisierung, die _body_world_position_exact intern anwendet.
+        knot_t = t0 + (float(k_lo) + _np.arange(span, dtype=_np.float64)) * q
+        quantum = float(getattr(self, "frame_time_quantization_s", 0.0) or 0.0)
+        knot_qt = _np.round(knot_t / quantum) * quantum if quantum > 0.0 else knot_t
+
+        # Stapelweg: die ganze eltern-kette vektorisiert statt ~2 Kepler-
+        # loesungen in reinem Python PRO KNOT UND FRAME (gemessen ~260 knots
+        # und ~590 exakt-aufrufe je frame bei einem koerperzentrierten
+        # rahmen). Der stapel gleicht sich mit dem positions-cache ab, den
+        # auch die skalare fassung benutzt -- beide wege lesen also
+        # garantiert dieselben zahlen. None => skalare schleife wie zuvor.
+        batch = self._knot_positions_batch(body, knot_qt)
+        if batch is not None:
+            knot_x, knot_y = batch
+        else:
+            knot_x = _np.empty(span, dtype=_np.float64)
+            knot_y = _np.empty(span, dtype=_np.float64)
+            for j in range(span):
+                kx, ky = self._body_world_position_exact(body, t0 + (k_lo + j) * q, None)
+                knot_x[j] = kx
+                knot_y[j] = ky
+
+        i = n_int - k_lo
+        frac = (t - (t0 + n * q)) / q
+        x_lo = knot_x[i]
+        y_lo = knot_y[i]
+        return (x_lo + (knot_x[i + 1] - x_lo) * frac,
+                y_lo + (knot_y[i + 1] - y_lo) * frac)
+
+    def _knot_positions_batch(self, body, qt, depth: int = 0):
+        """Stapelfassung von _body_world_position_exact ueber ein zeit-gitter.
+
+        `qt` ist ein float64-array BEREITS QUANTISIERTER zeiten. Gibt
+        (wx, wy) arrays zurueck oder None, wenn ein zweig nicht stapelbar
+        ist -- der aufrufer bleibt dann bei der skalaren schleife, es wird
+        also nie etwas anderes gerechnet, nur schneller.
+
+        Konsistenz mit dem skalaren weg: jeder level gleicht sich mit
+        `_position_cache` ab -- vorhandene eintraege GEWINNEN (der skalare
+        weg hat sie zuerst gerechnet), neue werte werden hineingeschrieben.
+        Ein spaeterer skalarer aufruf fuer dieselbe (koerper, zeit) liest
+        damit exakt die stapel-werte; stapel- und skalarweg koennen nicht
+        auseinanderlaufen.
+        """
+        if body is None or depth > 8 or _np is None:
+            return None
+        if getattr(self, "debug_ephemeris", False):
+            # Die skalare fassung druckt in diesem modus pro aufruf -- den
+            # stapelweg hier abzukuerzen wuerde die diagnose verstecken.
+            return None
+
+        dt = qt - float(self._epoch_time_s)
+        parent = getattr(body, "is_moon_of", None)
+
+        if parent is None:
+            px = float(body.position.x)
+            py = float(body.position.y)
+            scripted_flag = bool(getattr(body, "scripted_orbit", False))
+            wx = None
+            wy = None
+            if scripted_flag or _has_scripted_orbit_data(body):
+                res = self._scripted_top_level_batch(body, dt)
+                if res is _BATCH_MIXED:
+                    # Nur EINZELNE zeiten scheitern (denom ~ 0): die skalare
+                    # fassung faellt dann pro punkt in andere zweige -- das
+                    # bildet der stapel nicht nach, also zurueck zur schleife.
+                    return None
+                if res is not None:
+                    wx, wy = res
+                # res is None: elemente unbrauchbar, und zwar zeitunabhaengig
+                # -- die skalare fassung faellt fuer JEDE zeit in die
+                # zweige darunter, genau wie hier.
+            if wx is not None:
+                pass
+            elif not scripted_flag and not getattr(body, "fixed", False):
+                try:
+                    vx = float(body.velocity.x)
+                    vy = float(body.velocity.y)
+                except Exception:
+                    vx = 0.0
+                    vy = 0.0
+                wx = px + vx * dt
+                wy = py + vy * dt
+            else:
+                wx = _np.full(dt.shape, px, dtype=_np.float64)
+                wy = _np.full(dt.shape, py, dtype=_np.float64)
+        else:
+            par = self._knot_positions_batch(parent, qt, depth + 1)
+            if par is None:
+                return None
+            rel = self._relative_position_batch(body, parent, dt)
+            if rel is None:
+                return None
+            wx = par[0] + rel[0]
+            wy = par[1] + rel[1]
+
+        wx = _np.ascontiguousarray(wx, dtype=_np.float64)
+        wy = _np.ascontiguousarray(wy, dtype=_np.float64)
+
+        cache = self._position_cache
+        bid = id(body)
+        for j in range(wx.shape[0]):
+            key = (bid, float(qt[j]))
+            hit = cache.get(key)
+            if hit is not None:
+                wx[j] = hit[0]
+                wy[j] = hit[1]
+            else:
+                cache[key] = (float(wx[j]), float(wy[j]))
+        return wx, wy
+
+    def _scripted_top_level_batch(self, body, dt):
+        """Vektorisierte fassung von _scripted_top_level_position_at_time.
+
+        None = die skalare fassung gaebe fuer JEDE zeit None (elemente
+        unbrauchbar, zeitunabhaengig). _BATCH_MIXED = einzelne zeiten
+        scheitern; das kann der stapel nicht nachbilden.
+        """
+        if not _has_scripted_orbit_data(body):
+            return None
+
+        try:
+            a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
+            e = float(getattr(body, "eccentricity", 0.0) or 0.0)
+            nu0 = _body_true_anomaly(body)
+            arg = _body_arg_periapsis(body)
+        except Exception:
+            return None
+
+        if a <= 0.0 or e < 0.0 or e >= 1.0:
+            return None
+
+        n = None
+        for attr in ("mean_motion", "angular_velocity", "orbit_angular_velocity"):
+            try:
+                value = getattr(body, attr, None)
+                if value is not None:
+                    n = float(value)
+                    break
+            except Exception:
+                pass
+
+        if n is None:
+            for attr in ("orbital_period", "period", "orbit_period"):
+                try:
+                    value = getattr(body, attr, None)
+                    if value is not None and float(value) > 0.0:
+                        n = 2.0 * math.pi / float(value)
+                        break
+                except Exception:
+                    pass
+
+        if n is None:
+            central_mass = None
+            for attr in ("central_mass", "parent_mass", "primary_mass"):
+                try:
+                    value = getattr(body, attr, None)
+                    if value is not None and float(value) > 0.0:
+                        central_mass = float(value)
+                        break
+                except Exception:
+                    pass
+            if central_mass is None:
+                central_mass = 1.989e30
+            try:
+                n = math.sqrt(NEWTONIAN_G * central_mass / (a * a * a))
+            except Exception:
+                n = None
+
+        if n is None or not math.isfinite(n):
+            return None
+
+        nu = nu0 + float(n) * dt
+        denom = 1.0 + e * _np.cos(nu)
+        if bool(_np.any(_np.abs(denom) < 1e-12)):
+            # Skalare fassung gaebe fuer EINZELNE punkte None zurueck.
+            return _BATCH_MIXED
+        r = (a * (1.0 - e * e)) / denom
+        x_orb = r * _np.cos(nu)
+        y_orb = r * _np.sin(nu)
+        c = math.cos(arg)
+        s = math.sin(arg)
+        return x_orb * c - y_orb * s, x_orb * s + y_orb * c
+
+    def _relative_position_batch(self, body, parent, dt):
+        """Vektorisierte fassung von _relative_position_to_parent_at_time."""
+        state = self._relative_epoch_state(body, parent)
+        rel0_x, rel0_y = state["rel0_m"]
+        relv_x, relv_y = state["relv_m_s"]
+
+        if state["use_kepler"]:
+            kep = state["kepler_elements"]
+            try:
+                M = kep["M0"] + kep["n"] * dt
+                nu = _true_anomaly_from_mean_batch(M, kep["e"])
+                p = kep["a"] * (1.0 - kep["e"] * kep["e"])
+                denom = 1.0 + kep["e"] * _np.cos(nu)
+                if p > 0.0 and not bool(_np.any(_np.abs(denom) <= 1e-12)):
+                    r = p / denom
+                    c = math.cos(kep["arg"])
+                    s = math.sin(kep["arg"])
+                    x_orb = r * _np.cos(nu)
+                    y_orb = r * _np.sin(nu)
+                    return x_orb * c - y_orb * s, x_orb * s + y_orb * c
+                if bool(_np.any(_np.abs(denom) <= 1e-12)):
+                    # Gemischte zweige (teils Kepler, teils linear) bildet
+                    # der stapel nicht nach -- zurueck zur skalaren schleife.
+                    return None
+            except Exception:
+                pass
+
+        return rel0_x + relv_x * dt, rel0_y + relv_y * dt
 
     def _body_world_position_exact(self, body, time_s: float, stack: set[int] | None = None) -> tuple[float, float]:
         if body is None:
@@ -673,6 +1048,13 @@ class BodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         origin_x, origin_y = self._body_world_position_at_time(self.primary_body, time_s)
         return (float(x) - origin_x, float(y) - origin_y)
 
+    def to_this_frame_xy_arrays(self, times, xs, ys):
+        origin = self._origin_xy_arrays(self.primary_body, times)
+        if origin is None:
+            return None
+        return (_np.asarray(xs, dtype=_np.float64) - origin[0],
+                _np.asarray(ys, dtype=_np.float64) - origin[1])
+
 
 class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
     """Ein nicht-rotierender Rahmen, dessen Primärposition virtuell
@@ -766,6 +1148,37 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
         ry = self._cache_sin * rel_x + self._cache_cos * rel_y
         return rx, ry
 
+    def to_this_frame_xy_arrays(self, times, xs, ys):
+        """Wie _prepare_cache + to_this_frame_xy, nur fuer ein ganzes feld.
+
+        Winkel und ursprung stammen aus denselben zwei koerperpositionen zur
+        (ggf. quantisierten) zeit wie im skalaren weg -- nur wird hier nichts
+        in _angle_cache abgelegt, weil pro frame ohnehin jeder wert genau
+        einmal gebraucht wird.
+        """
+        if _np is None:
+            return None
+        t = _np.asarray(times, dtype=_np.float64)
+        quantum = float(getattr(self, "frame_time_quantization_s", 0.0) or 0.0)
+        cache_t = _np.round(t / quantum) * quantum if quantum > 0.0 else t
+
+        primary = self._origin_xy_arrays(self.primary_body, cache_t)
+        secondary = self._origin_xy_arrays(self.secondary_body, cache_t)
+        if primary is None or secondary is None:
+            return None
+
+        dx = secondary[0] - primary[0]
+        dy = secondary[1] - primary[1]
+        norm2 = dx * dx + dy * dy
+        angle = _np.where(norm2 <= 1e-30, 0.0, _np.arctan2(dy, dx))
+        cos_a = _np.cos(angle)
+        sin_a = _np.sin(angle)
+
+        rel_x = _np.asarray(xs, dtype=_np.float64) - primary[0]
+        rel_y = _np.asarray(ys, dtype=_np.float64) - primary[1]
+        return (cos_a * rel_x - sin_a * rel_y,
+                sin_a * rel_x + cos_a * rel_y)
+
     def transform_heading(self, time_s: float, theta_world: float) -> float:
         hx = math.cos(float(theta_world))
         hy = math.sin(float(theta_world))
@@ -825,6 +1238,41 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         rx = self._cache_cos * rel_x - self._cache_sin * rel_y
         ry = self._cache_sin * rel_x + self._cache_cos * rel_y
         return rx, ry
+
+    def to_this_frame_xy_arrays(self, times, xs, ys):
+        """Wie _prepare_cache + to_this_frame_xy, nur fuer ein ganzes feld.
+
+        Winkel und ursprung stammen aus denselben zwei koerperpositionen zur
+        (ggf. quantisierten) zeit wie im skalaren weg -- nur wird hier nichts
+        in _angle_cache abgelegt, weil pro frame ohnehin jeder wert genau
+        einmal gebraucht wird.
+        """
+        if _np is None:
+            return None
+        t = _np.asarray(times, dtype=_np.float64)
+        quantum = float(getattr(self, "frame_time_quantization_s", 0.0) or 0.0)
+        cache_t = _np.round(t / quantum) * quantum if quantum > 0.0 else t
+
+        # ACHTUNG: dieser rahmen heisst seine koerper target/reference, nicht
+        # primary/secondary, und der URSPRUNG ist das ziel. Die rollen sind
+        # andere als beim body-direction-rahmen, obwohl die rechnung gleich
+        # aussieht.
+        origin = self._origin_xy_arrays(self.target_body, cache_t)
+        other = self._origin_xy_arrays(self.reference_body, cache_t)
+        if origin is None or other is None:
+            return None
+
+        dx = other[0] - origin[0]
+        dy = other[1] - origin[1]
+        norm2 = dx * dx + dy * dy
+        angle = _np.where(norm2 <= 1e-30, 0.0, _np.arctan2(dy, dx))
+        cos_a = _np.cos(angle)
+        sin_a = _np.sin(angle)
+
+        rel_x = _np.asarray(xs, dtype=_np.float64) - origin[0]
+        rel_y = _np.asarray(ys, dtype=_np.float64) - origin[1]
+        return (cos_a * rel_x - sin_a * rel_y,
+                sin_a * rel_x + cos_a * rel_y)
 
     def transform_heading(self, time_s: float, theta_world: float) -> float:
         hx = math.cos(float(theta_world))

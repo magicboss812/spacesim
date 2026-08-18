@@ -17,6 +17,7 @@ Damit bleibt der GL-zustand vollstaendig unter der kontrolle von moderngl.
 """
 
 import ctypes
+import math
 
 import moderngl
 import numpy as np
@@ -60,6 +61,225 @@ void main() {
 QUALITY_PRESETS = ("fast", "balanced", "accurate", "rk4")
 
 
+# Die serien der zeitmessung. Reihenfolge = zeilen im ringpuffer; sie ist
+# teil des dateiformats des puffers und darf nicht umsortiert werden, ohne
+# TimingHistory.push() mitzuziehen.
+#
+# Es sind GENAU die vier groessen, die test.py in der `TIMING:`-zeile
+# ausgibt, aus derselben quelle gelesen -- graph und ausgabe koennen sich
+# damit nicht widersprechen. `frame` ist die fuenfte, aber keine gezeichnete:
+# sie ist nur der bezug (budget-strich, textzeile).
+TIMING_SERIES = ("pred_compute", "pred_draw", "rend_calc", "rend_draw", "frame")
+TIMING_PLOTTED = ("pred_compute", "pred_draw", "rend_calc", "rend_draw")
+_TIMING_INDEX = {name: i for i, name in enumerate(TIMING_SERIES)}
+
+# Wie schnell der achsen-spitzenwert zerfaellt. Nur eine hysterese gegen das
+# flackern der achse: ohne sie springt die sprosse bei einem messwert, der um
+# eine leiter-grenze zittert, im wechsel zwischen zwei hoehen. Mit 0.5 s ist
+# die achse nach einem ausreisser in unter einer sekunde wieder unten.
+TIMING_AXIS_DECAY_TAU_S = 0.5
+
+
+def _nice_ceiling(value):
+    """Naechstgroessere sprosse der leiter 1 / 2 / 5 je dekade.
+
+    Der achsen-maximalwert MUSS gerastert sein. Eine achse, die dem
+    momentanen maximum stufenlos folgt, haelt die kurve optisch immer gleich
+    hoch -- man sieht dann jede aenderung der form und keine einzige der
+    groesse, was bei einer zeitmessung genau das falsche herum ist.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if not math.isfinite(v) or v <= 0.0:
+        return 1.0
+    exponent = math.floor(math.log10(v))
+    decade = 10.0 ** exponent
+    mantissa = v / decade
+    # log10 ist nicht exakt: fuer v = 1000 kann der exponent als 2.9999...
+    # herauskommen und die mantisse damit als 10.0.
+    if mantissa >= 10.0:
+        mantissa /= 10.0
+        decade *= 10.0
+    for step in (1.0, 2.0, 5.0):
+        if mantissa <= step * (1.0 + 1e-9):
+            return step * decade
+    return 10.0 * decade
+
+
+def _ms(value):
+    """Robuste ms-zahl. Fehlende/kaputte werte werden zu 0, nicht zu NaN.
+
+    Ein NaN in einem einzigen frame vergiftet sonst mittelwert UND achse des
+    ganzen fensters, und zwar still -- der graph ist dann leer statt falsch.
+    Der `type(...) is float`-pfad haelt den normalfall auf zwei vergleichen;
+    diese funktion laeuft fuenfmal je frame.
+    """
+    if type(value) is float:
+        return value if -1e9 < value < 1e9 else 0.0
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if -1e9 < v < 1e9 else 0.0
+
+
+class TimingHistory:
+    """Ringpuffer der per-frame zeitmessung, direkt fuer imgui.plot_lines.
+
+    Ein zusammenhaengendes `(serien, kapazitaet)`-float32-feld; jede zeile ist
+    eine serie und damit eine gueltige eingabe fuer `plot_lines`, ohne kopie.
+    Geschrieben wird ueber eine schreibmarke, NICHT ueber np.roll oder eine
+    liste mit append: das abtasten laeuft in jedem frame -- auch wenn das
+    panel zu ist -- und darf im bildbudget nicht auftauchen. Gemessen liegt
+    `push()` bei ~1-2 us, also unter 0.04 % eines 5.6-ms-frames.
+
+    `window()` liefert das feld zusammen mit dem offset der AELTESTEN probe,
+    weil imgui `values[(i + offset) % n]` liest. Zeigt der offset auf die
+    neueste probe, laeuft der graph rueckwaerts -- das sieht plausibel aus
+    und ist trotzdem falsch.
+    """
+
+    __slots__ = ("_data", "_rows", "_capacity", "_cursor", "_count",
+                 "_peaks", "paused", "shared_scale", "manual_max",
+                 "graph_height")
+
+    def __init__(self, capacity=240):
+        self._capacity = max(2, int(capacity))
+        self._data = np.zeros((len(TIMING_SERIES), self._capacity), dtype='f4')
+        self._rows = tuple(self._data[i] for i in range(len(TIMING_SERIES)))
+        self._cursor = 0
+        self._count = 0
+        self._peaks = [0.0] * len(TIMING_SERIES)
+        # Anzeige-einstellungen des panels. Sie leben hier, weil das panel
+        # selbst eine reine funktion ist und keinen zustand halten kann.
+        self.paused = False
+        self.shared_scale = False
+        self.manual_max = 0.0        # 0 = automatisch
+        self.graph_height = 58.0
+
+    # ------------------------------------------------------------- schreiben
+
+    def push(self, pred_compute, pred_draw, rend_calc, rend_draw, frame):
+        """Eine probe. Heisser pfad -- keine allokation, kein dict, kein try."""
+        if self.paused:
+            return
+        i = self._cursor
+        rows = self._rows
+        rows[0][i] = pred_compute
+        rows[1][i] = pred_draw
+        rows[2][i] = rend_calc
+        rows[3][i] = rend_draw
+        rows[4][i] = frame
+        i += 1
+        if i >= self._capacity:
+            i = 0
+        self._cursor = i
+        if self._count < self._capacity:
+            self._count += 1
+
+    def reset(self):
+        self._data[:, :] = 0.0
+        self._cursor = 0
+        self._count = 0
+        for i in range(len(self._peaks)):
+            self._peaks[i] = 0.0
+
+    def resize(self, capacity):
+        """Laenge umstellen und dabei die JUENGSTEN proben behalten."""
+        capacity = max(2, int(capacity))
+        if capacity == self._capacity:
+            return
+        keep = min(self._count, capacity)
+        data = np.zeros((len(TIMING_SERIES), capacity), dtype='f4')
+        if keep:
+            for i, name in enumerate(TIMING_SERIES):
+                data[i, :keep] = self.series(name)[-keep:]
+        self._data = data
+        self._rows = tuple(data[i] for i in range(len(TIMING_SERIES)))
+        self._capacity = capacity
+        self._count = keep
+        self._cursor = keep % capacity
+
+    # --------------------------------------------------------------- lesen
+
+    @property
+    def capacity(self):
+        return self._capacity
+
+    @property
+    def count(self):
+        return self._count
+
+    def window(self, name):
+        """`(feld, offset)` fuer plot_lines. Offset = aelteste probe."""
+        row = self._rows[_TIMING_INDEX[name]]
+        if self._count < self._capacity:
+            return row[:self._count], 0
+        return row, self._cursor
+
+    def series(self, name):
+        """Kopie in chronologischer reihenfolge (alt -> neu). Nur fuer tests
+        und ausgaben -- der zeichenweg benutzt window()."""
+        values, offset = self.window(name)
+        if offset == 0:
+            return values.copy()
+        return np.concatenate((values[offset:], values[:offset]))
+
+    def stats(self, name):
+        """`(cur, avg, max)` ueber den GEFUELLTEN teil des puffers.
+
+        Der ungefuellte rest ist null und wuerde den mittelwert eines gerade
+        zurueckgesetzten puffers sonst nach unten ziehen.
+        """
+        values, offset = self.window(name)
+        if values.size == 0:
+            return (0.0, 0.0, 0.0)
+        # offset zeigt auf die aelteste probe, also liegt die juengste davor.
+        # Bei offset 0 greift die negative indizierung auf das ende -- in
+        # beiden faellen (voll und teilgefuellt) das richtige element.
+        return (float(values[offset - 1]), float(values.mean()),
+                float(values.max()))
+
+    def peak(self, name, dt=0.0):
+        """Zerfallender spitzenwert der serie. Nicht gerastert.
+
+        Je frame HOECHSTENS EINMAL je serie aufrufen -- der aufruf schreibt
+        den zerfall fort. Deshalb ruft der zeichenweg das hier einmal und
+        leitet einzel- wie gemeinsame achse daraus ab.
+        """
+        index = _TIMING_INDEX[name]
+        current = self._peaks[index]
+        if dt > 0.0 and current > 0.0:
+            current *= math.exp(-float(dt) / TIMING_AXIS_DECAY_TAU_S)
+        values, _ = self.window(name)
+        if values.size:
+            window_max = float(values.max())
+            if window_max > current:
+                current = window_max
+        self._peaks[index] = current
+        return current
+
+    def axis_max(self, name, dt=0.0):
+        """Gerasterter achsen-maximalwert einer serie."""
+        return _nice_ceiling(self.peak(name, dt))
+
+    def shared_axis_max(self, dt=0.0):
+        """Gemeinsame achse ueber die vier GEZEICHNETEN serien.
+
+        `frame` bleibt bewusst draussen: es ist die summe der uebrigen und
+        wuerde die gemeinsame achse so hoch ziehen, dass die einzelnen
+        anteile flach am boden liegen.
+        """
+        highest = 0.0
+        for name in TIMING_PLOTTED:
+            value = self.peak(name, dt)
+            if value > highest:
+                highest = value
+        return _nice_ceiling(highest)
+
+
 class DevContext:
     """Sammelt die objekte, die die entwickler-panels verstellen duerfen.
 
@@ -68,11 +288,12 @@ class DevContext:
     """
 
     __slots__ = ("world", "camera", "predictor", "renderer", "ship_control",
-                 "ship", "frame_dt", "sim_step_s", "tick_rate", "notes")
+                 "ship", "frame_dt", "sim_step_s", "tick_rate", "notes",
+                 "timings")
 
     def __init__(self, world=None, camera=None, predictor=None, renderer=None,
                  ship_control=None, ship=None, frame_dt=0.0, sim_step_s=0.0,
-                 tick_rate=60.0):
+                 tick_rate=60.0, timing_capacity=240):
         self.world = world
         self.camera = camera
         self.predictor = predictor
@@ -83,6 +304,53 @@ class DevContext:
         self.sim_step_s = sim_step_s
         self.tick_rate = tick_rate
         self.notes = []
+        self.timings = TimingHistory(timing_capacity)
+
+    def sample_timings(self, frame_ms=0.0):
+        """Eine probe der vier zeitreihen. Je frame einmal, aus test.py.
+
+        BEWUSST ausserhalb von draw_dev_panels: das panel ist meistens zu
+        (F1), und ein puffer, der nur gefuellt wird, waehrend man hinschaut,
+        ist beim aufklappen leer -- also genau dann, wenn man ihn braucht.
+        Der preis dafuer ist, dass das hier in JEDEM frame laeuft, weshalb
+        es nichts alloziert und nur werte abliest, die render() und der
+        predictor ohnehin schon geschrieben haben.
+
+        Die vier groessen sind dieselben wie in der `TIMING:`-zeile:
+          pred_compute -- dauer EINER predictor-rechnung. Laeuft auf einem
+                          worker-thread, gehoert also NICHT ins bildbudget.
+          pred_draw    -- projizieren/abtasten + zeichnen der linie (haupt-thread)
+          rend_calc    -- render() ohne den swap (haupt-thread)
+          rend_draw    -- der swap selbst, inklusive der VSync-wartezeit
+        """
+        history = self.timings
+        if history.paused:
+            return
+
+        predictor = self.predictor
+        pred_compute = (_ms(getattr(predictor, 'last_compute_ms', 0.0))
+                        if predictor is not None else 0.0)
+
+        pred_draw = 0.0
+        rend_calc = 0.0
+        rend_draw = 0.0
+        renderer = self.renderer
+        if renderer is not None:
+            stats = getattr(renderer, '_last_prediction_render_stats', None)
+            if type(stats) is dict:
+                pred_draw = _ms(stats.get('prepare_ms')) + _ms(stats.get('draw_ms'))
+            timings = getattr(renderer, 'last_frame_timings', None)
+            if type(timings) is dict:
+                rend_draw = _ms(timings.get('swap_or_present_ms'))
+                rend_calc = _ms(timings.get('frame_ms')) - rend_draw
+                # frame_ms und swap_or_present_ms werden an zwei verschiedenen
+                # stellen geschrieben (render() bzw. present()). Wer render()
+                # ohne present() aufruft -- die GL-tests tun das -- hinterlaesst
+                # sie inkonsistent, und die differenz wird negativ.
+                if rend_calc < 0.0:
+                    rend_calc = 0.0
+
+        history.push(pred_compute, pred_draw, rend_calc, rend_draw, _ms(frame_ms))
 
 
 def _fmt_si(value, unit="m"):
@@ -123,6 +391,131 @@ def _checkbox(label, obj, attr, tooltip=None):
     return changed
 
 
+# Die vier gezeichneten graphen: (serie, titel, farbe, budget-strich?).
+# Der budget-strich fehlt bei `pred_compute` mit absicht -- die serie misst
+# einen worker-thread, sie hat mit dem bildbudget nichts zu tun, und ein
+# strich darueber wuerde genau die verwechslung nahelegen, die die
+# beschriftung vermeiden soll.
+_TIMING_GRAPHS = (
+    ("pred_compute", "predictor compute (worker thread)",
+     (0.42, 0.72, 1.00, 1.0), False,
+     "Dauer EINER trajektorien-rechnung, nicht die last des haupt-threads.\n"
+     "Laeuft in einem ThreadPoolExecutor (alle kernel sind nogil), also\n"
+     "auf einem anderen kern -- deshalb kein budget-strich. Der wert steht\n"
+     "still, bis die naechste rechnung fertig ist; die stufen sind echt."),
+    ("pred_draw", "predictor draw",
+     (0.40, 0.88, 0.55, 1.0), True,
+     "Haupt-thread: prepare_ms + draw_ms aus draw_prediction().\n"
+     "prepare = projizieren, abtasten, kubische unterteilung, RDP.\n"
+     "draw = die polylinien und die Ap/Pe-marker."),
+    ("rend_calc", "render calc",
+     (1.00, 0.74, 0.32, 1.0), True,
+     "Haupt-thread: render() ohne den swap, also frame_ms - swap_or_present_ms.\n"
+     "Enthaelt koerper, spuren, FXAA, HUD und den predictor-anteil oben."),
+    ("rend_draw", "render draw (swap + VSync-wartezeit)",
+     (0.92, 0.48, 0.85, 1.0), True,
+     "present() -> pygame.display.flip(). Bei aktivem VSync ist das\n"
+     "groesstenteils WARTEN auf das naechste bild. Ein hoher wert hier\n"
+     "heisst also luft im budget, kein problem -- ausser die anderen\n"
+     "serien sind gleichzeitig hoch."),
+)
+
+
+def _draw_timing_graphs(c: "DevContext"):
+    """Die vier zeitreihen als graphen. Nur anzeige -- misst selbst nichts."""
+    history = getattr(c, 'timings', None)
+    if history is None:
+        return
+
+    delta_time = float(imgui.get_io().delta_time)
+    tick_rate = max(1.0, float(getattr(c, 'tick_rate', 60.0) or 60.0))
+    budget_ms = 1000.0 / tick_rate
+
+    frame_cur, frame_avg, frame_max = history.stats('frame')
+    imgui.text(f"frame {frame_cur:6.2f} ms   avg {frame_avg:6.2f}   "
+               f"max {frame_max:6.2f}   budget {budget_ms:5.2f} @ {tick_rate:.0f} fps")
+    if frame_max > budget_ms * 1.05 and history.count > 0:
+        imgui.text_colored((1.0, 0.72, 0.25, 1.0),
+                           f"  ueber budget in der spitze (+{frame_max - budget_ms:.2f} ms)")
+
+    changed, value = imgui.checkbox("pause##timing", history.paused)
+    if changed:
+        history.paused = value
+    imgui.same_line()
+    changed, value = imgui.checkbox("shared scale##timing", history.shared_scale)
+    if changed:
+        history.shared_scale = value
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Eine achse fuer alle vier -- vergleicht die GROESSEN.\n"
+                          "Aus: jede serie skaliert selbst und zeigt ihre FORM.")
+    imgui.same_line()
+    if imgui.button("reset##timing"):
+        history.reset()
+
+    changed, value = imgui.slider_int("history (frames)", history.capacity, 60, 600)
+    if changed:
+        history.resize(value)
+    changed, value = imgui.slider_float(
+        "max ms (0 = auto)", float(history.manual_max), 0.0, 120.0, "%.1f")
+    if changed:
+        history.manual_max = value
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Feste achse statt der automatischen leiter --\n"
+                          "noetig, wenn zwei laeufe verglichen werden sollen.")
+
+    # Der zerfallende spitzenwert wird je serie GENAU EINMAL je frame
+    # fortgeschrieben; einzel- und gemeinsame achse leiten sich daraus ab.
+    # Zweimal aufrufen liesse die achse doppelt so schnell zerfallen.
+    peaks = [history.peak(name, delta_time) for name, _, _, _, _ in _TIMING_GRAPHS]
+    shared_scale = _nice_ceiling(max(peaks)) if peaks else 1.0
+    manual = float(history.manual_max)
+
+    graph_width = max(120.0, float(imgui.get_content_region_avail().x))
+    graph_size = imgui.ImVec2(graph_width, float(history.graph_height))
+    budget_color = imgui.color_convert_float4_to_u32(
+        imgui.ImVec4(1.0, 0.35, 0.35, 0.55))
+
+    for index, (name, title, color, show_budget, tooltip) in enumerate(_TIMING_GRAPHS):
+        if manual > 0.0:
+            scale = manual
+        elif history.shared_scale:
+            scale = shared_scale
+        else:
+            scale = _nice_ceiling(peaks[index])
+
+        cur, avg, peak = history.stats(name)
+        imgui.text_colored(color, title)
+        imgui.text(f"  cur {cur:6.2f}   avg {avg:6.2f}   max {peak:6.2f} ms"
+                   f"   [0 .. {scale:g}]")
+
+        values, offset = history.window(name)
+        if values.size < 2:
+            imgui.text_disabled("  (sammelt proben ...)")
+            continue
+
+        imgui.push_style_color(imgui.Col_.plot_lines, imgui.ImVec4(*color))
+        imgui.plot_lines(f"##timing_{name}", values, offset,
+                         f"{cur:.2f} ms", 0.0, scale, graph_size)
+        imgui.pop_style_color()
+        hovered = imgui.is_item_hovered()
+
+        # Der budget-strich MUSS nach plot_lines kommen: er wird ueber die
+        # rechteck-masse des zuletzt gezeichneten elements gelegt, weil
+        # plot_lines selbst keine linien-annotation kennt. Ohne ihn ist die
+        # achse eine reine zahl und man muss im kopf gegen die bildrate
+        # rechnen -- genau das soll der graph abnehmen.
+        if show_budget and 0.0 < budget_ms < scale:
+            top_left = imgui.get_item_rect_min()
+            bottom_right = imgui.get_item_rect_max()
+            y = bottom_right.y - (bottom_right.y - top_left.y) * (budget_ms / scale)
+            imgui.get_window_draw_list().add_line(
+                imgui.ImVec2(top_left.x, y), imgui.ImVec2(bottom_right.x, y),
+                budget_color, 1.0)
+
+        if hovered:
+            imgui.set_tooltip(tooltip)
+
+
 def draw_dev_panels(c: "DevContext"):
     """Die eigentlichen panels. Rein werkzeug -- kein spieler-HUD."""
     imgui.set_next_window_size(imgui.ImVec2(460, 720), imgui.Cond_.first_use_ever)
@@ -141,6 +534,10 @@ def draw_dev_panels(c: "DevContext"):
     imgui.text(f"{io.framerate:6.1f} FPS   ({1000.0 / max(io.framerate, 1e-3):5.2f} ms/frame)")
     if c.world is not None:
         imgui.text(f"sim time: {_fmt_si(getattr(c.world, 'time', 0.0), 's')}")
+
+    # ------------------------------------------------------------- Timing
+    if imgui.collapsing_header("Timing", imgui.TreeNodeFlags_.default_open):
+        _draw_timing_graphs(c)
 
     # ---------------------------------------------------------- Simulation
     if imgui.collapsing_header("Simulation", imgui.TreeNodeFlags_.default_open):
@@ -270,6 +667,29 @@ def draw_dev_panels(c: "DevContext"):
                     0.5, 40.0, "%.1f")
             imgui.text(f"drawn: {r.debug_info['prediction_points_drawn']}"
                        f" / {r.debug_info['prediction_points_in']}")
+
+            imgui.separator_text("prediction detail")
+            _checkbox("cubic refinement", r, 'prediction_hermite_enabled')
+            _slider("detail scale", r, 'prediction_detail_scale',
+                    0.1, 20.0, "%.2f", log=True)
+            _slider("max subdiv", r, 'prediction_hermite_max_subdiv',
+                    1.0, 256.0, "%.0f")
+            # Ziel = sprosse der toleranz-leiter, erreicht = das, was der
+            # punktabstand des predictors ueberhaupt hergibt. Weichen sie
+            # voneinander ab, ist NICHT die unterteilung die schranke,
+            # sondern die integration -- dann hilft nur ein feinerer
+            # punktabstand, kein hoeherer detail-regler.
+            target = r.debug_info.get('prediction_detail_target_m')
+            achieved = r.debug_info.get('prediction_detail_achieved_m')
+            if target is None or achieved is None:
+                imgui.text("tolerance: --")
+            else:
+                imgui.text(f"tolerance: {_fmt_si(target)} target"
+                           f" / {_fmt_si(achieved)} achieved")
+                if achieved > target * 1.001:
+                    imgui.text_colored((1.0, 0.72, 0.25, 1.0),
+                                       "  limited by point spacing, not subdivision")
+            imgui.text(f"sub-points added: {r.debug_info.get('prediction_detail_added', 0)}")
             imgui.text(f"bodies: {r.debug_info['bodies_rendered']} rendered, "
                        f"{r.debug_info['bodies_culled']} culled")
 

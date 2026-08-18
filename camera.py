@@ -415,6 +415,28 @@ class Camera:
                 self.sim_dt /= self.sim_dt_factor
                 self.sim_dt = max(self.sim_dt, self.min_sim_dt)
 
+    def allow_warp_rate(self, rate_s_per_s, tick_rate):
+        """Senkt den sim_dt-boden, damit diese RAFFUNG erreichbar bleibt.
+
+        `min_sim_dt` ist in sim-sekunden JE TICK angegeben und haengt damit an
+        der bildrate; zeitraffer-stufen sind in sim-sekunden je ECHTSEKUNDE
+        angegeben und tun das nicht. Der config-wert 1.0 stammt aus der zeit
+        von 60 fps, wo er genau die unterste stufe (60 s/s) traf.
+
+        Bei window.fps = 180 sperrte er sie aus: die langsamste erreichbare
+        rate war 1.0 * 180 = 180 s/s, also dauerhaft ueber
+        simulation.realtime_warp_max. Folge im spiel -- der schub war in JEDER
+        stufe gesperrt (der regler zeigte staendig "HOLD") und die vorhersage
+        kam nie aus dem zeitraffer-halt heraus. Der boden darf die
+        echtzeit-stufe bei keiner bildrate ausschliessen.
+        """
+        rate = float(rate_s_per_s)
+        ticks = float(tick_rate)
+        if not (rate > 0.0) or not (ticks > 0.0):
+            return
+        self.min_sim_dt = min(float(self.min_sim_dt), rate / ticks)
+        self.sim_dt = max(float(self.sim_dt), self.min_sim_dt)
+
     def _last_motion_dt(self):
         """Zeit seit dem letzten MOUSEMOTION, für die nachlauf-geschwindigkeit."""
         now = pygame.time.get_ticks() / 1000.0

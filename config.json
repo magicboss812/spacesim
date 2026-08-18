@@ -2,38 +2,39 @@
   "window": {
     "width": 1280,
     "height": 800,
-    "fps": 60,
+    "fps": 180,
     "vsync": true,
     "resizable": true,
     "caption": "Orbital Mechanics - OpenGL Renderer",
     "enable_fxaa": true
   },
-
   "simulation": {
     "system_file": "solar_system.json",
     "focus_body": "Erde",
     "initial_sim_dt": 900.0,
     "min_sim_dt": 1.0,
-    "max_sim_dt": 1e12,
+    "max_sim_dt": 1000000000000.0,
     "sim_dt_step_factor": 1.5,
     "max_substep_seconds": 1000.0,
     "max_frame_dt": 0.1,
+    "realtime_warp_max": 60.0,
+    "warp_timescale_divisor": 3.0,
     "max_frames": 0
   },
-
   "physics": {
     "gravitational_constant": 6.6730831e-11,
     "integrator_mode": "rkn4",
     "integrator_max_step": 30.0,
+    "integrator_warp_substep_target": 40.0,
+    "integrator_max_step_ceiling": 1000000.0,
     "integrator_min_step": 0.01,
     "integrator_position_tolerance": 1.0,
     "integrator_velocity_tolerance": 0.001
   },
-
   "camera": {
-    "initial_scale": 1e-6,
+    "initial_scale": 1e-06,
     "min_scale": 1e-30,
-    "max_scale": 1e10,
+    "max_scale": 10000000000.0,
     "move_speed": 1.0,
     "zoom_factor": 1.5,
     "zoom_smoothing": 16.0,
@@ -42,17 +43,15 @@
     "pan_inertia_enabled": true,
     "pan_inertia_damping": 6.0
   },
-
   "ship": {
     "rotation_speed": 3.0,
     "thrust_acc": 600.0
   },
-
   "predictor": {
     "enabled": true,
     "num_points": 10000,
     "dt": 1000.0,
-    "precision": 1e6,
+    "precision": 1000000.0,
     "quality": "balanced",
     "async_compute": true,
     "rolling_mode": false,
@@ -67,24 +66,37 @@
     "use_time_dependent_bodies": true,
     "use_reference_acceleration_correction": false,
     "rkn_adaptive_far_maxdt": true,
-    "rkn_far_field_target_steps": 2500.0,
+    "rkn_far_field_target_steps": 1250.0,
     "rkn_max_dt_ceiling": 30000.0,
     "apsis_markers_enabled": true,
-    "apsis_max_markers": 16
+    "apsis_max_markers": 16,
+    "thrust_pipeline_depth": 6,
+    "swap_backlog_max": 1
   },
-
   "renderer": {
     "prediction_sampling_tolerance_px": 2.5,
     "prediction_sampling_min_tolerance_px": 0.002,
     "prediction_sampling_max_tolerance_px": 0.25,
     "prediction_sampling_min_step_px": 0.35,
     "prediction_sampling_max_segment_px": 4.0,
-    "prediction_sampling_max_points": 1000,
-    "prediction_sampling_reference_scale": 5e-7,
+    "prediction_sampling_max_points": 4000,
+    "prediction_sampling_reference_scale": 5e-07,
     "prediction_visibility_margin_px": 128.0,
     "prediction_render_max_raw_scan": 3000,
-    "prediction_render_max_draw_points": 1000,
+    "prediction_render_max_draw_points": 4000,
     "prediction_bypass_fxaa": true,
+    "prediction_hermite_enabled": true,
+    "prediction_detail_scale": 1.0,
+    "prediction_hermite_max_subdiv": 64,
+    "prediction_error_ladder_m": [
+      0.001,
+      0.01,
+      1.0,
+      100.0,
+      1000.0
+    ],
+    "hud_enabled": true,
+    "show_debug_hud": false,
     "show_apsis_markers": true,
     "apsis_marker_radius_px": 5.0,
     "body_icon_radius_px": 4.0,
@@ -101,7 +113,6 @@
     "ui_scale_max": 3.0,
     "ui_scale": 1.0
   },
-
   "debug": {
     "devui_visible": false,
     "print_frame_timings": true,

@@ -2,12 +2,72 @@
 
 from vec import Vec2
 import math
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from numba import njit
 # Predictor ist absichtlich Numba-only
 NUMBA_AVAILABLE = True
+
+
+#: Spaltenzahl der punkteliste: x, y, t_abs, vx, vy.
+#:
+#: Die beiden geschwindigkeits-spalten machen aus der liste eine stueckweise
+#: KUBISCHE kurve statt einer folge von positionen -- der renderer kann sie
+#: damit zur zeichenzeit beliebig fein auswerten (Hermite), ohne dass hier ein
+#: integrationsschritt mehr faellt. Der rkn-kernel rechnet die tangente
+#: ohnehin (als ableitung genau des polynoms, mit dem er die position
+#: interpoliert) und warf sie bisher weg.
+#:
+#: Kernel, die ihre punkte LINEAR auf die schrittsehne setzen, schreiben hier
+#: NaN. Das ist kein fehlerfall, sondern die wahrheit: ein sehnenpunkt hat
+#: keine tangente, die zu ihm passt. Der renderer zeichnet solche abschnitte
+#: dann als geraden, statt eine kruemmung zu erfinden.
+POINT_COLUMNS = 5
+
+#: Spaltenzahl des koerper-notizblocks: [t, x, y, gueltig] + die fuenf
+#: zeitunabhaengigen bahngroessen + deren gueltigkeitsmerker.
+#: Siehe `_body_position_at_time_numba`.
+BODY_MEMO_COLUMNS = 10
+
+
+def _no_body_memo():
+    """Leerer notizblock fuer aufrufer, bei denen sich das merken nicht lohnt.
+
+    `_body_position_at_time_numba` erkennt an der zeilenzahl 0, dass kein
+    notizblock vorliegt, und rechnet wie zuvor.
+
+    **Das MUSS eine funktion sein, keine modul-konstante.** Numba behandelt
+    ein globales array als compile-zeit-konstante und typisiert es
+    `readonly` -- die (per `use_memo` ohnehin nie erreichten) schreibzugriffe
+    im rumpf lassen sich dann nicht mehr typisieren, und der GANZE aufrufende
+    kernel scheitert beim uebersetzen. Genau so verschwanden die Ap/Pe-marker:
+    `_find_apsis_markers_numba` warf `NumbaTypeError`, der aufrufer fing die
+    ausnahme, und `get_apsis_markers()` lieferte stillschweigend null marker
+    -- im spiel sichtbar nur daran, dass die rauten und die HUD-zahlen fehlten.
+    """
+    return np.zeros((0, BODY_MEMO_COLUMNS), dtype=np.float64)
+
+
+def _empty_points():
+    """Leere punkteliste in der kanonischen breite."""
+    if np is None:
+        return []
+    return np.empty((0, POINT_COLUMNS), dtype=np.float64)
+
+
+def _widen_points(points):
+    """Punkte auf POINT_COLUMNS bringen; fehlende tangenten werden NaN."""
+    if np is None or not isinstance(points, np.ndarray) or points.ndim != 2:
+        return points
+    have = int(points.shape[1])
+    if have >= POINT_COLUMNS:
+        return points
+    wide = np.empty((points.shape[0], POINT_COLUMNS), dtype=np.float64)
+    wide[:, :have] = points
+    wide[:, have:] = np.nan
+    return wide
 
 
 if NUMBA_AVAILABLE:
@@ -409,20 +469,31 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True, nogil=True, fastmath=True)
-    def _body_scripted_relative_xy_numba(index, local_t, body_m, body_a, body_e, body_theta, body_arg, body_parent, G):
+    def _body_kepler_constants_numba(index, body_m, body_a, body_e, body_theta, body_arg, body_parent, G):
+        """Die ZEITUNABHAENGIGEN groessen einer skriptierten bahn.
+
+        M0, mittlere bewegung, sqrt(1-e^2) und cos/sin des periapsis-arguments
+        haengen nur von den bahnelementen ab -- sie wurden bisher bei jeder
+        einzelnen auswertung neu gerechnet, acht trigonometrie- bzw.
+        wurzel-operationen von rund neunzehn. Die reihenfolge der rechnungen
+        ist WORT FUER WORT die des inline-weges unten, damit beide exakt
+        dieselben gleitkommazahlen erzeugen.
+
+        Rueckgabe: (M0, mittlere bewegung, sqrt(1-e^2), cos arg, sin arg, ok).
+        """
         parent = body_parent[index]
         if parent < 0 or parent >= body_m.shape[0]:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
         a = body_a[index]
         e = body_e[index]
         parent_mass = body_m[parent]
         if a <= 0.0 or e < 0.0 or e >= 1.0 or parent_mass <= 0.0:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
         mu = G * parent_mass
         if mu <= 0.0:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
         nu0 = body_theta[index]
         arg = body_arg[index]
@@ -431,7 +502,7 @@ if NUMBA_AVAILABLE:
         sin_nu0 = math.sin(nu0)
         denom = 1.0 + e * cos_nu0
         if abs(denom) <= 1e-14:
-            return 0.0, 0.0, 0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0
 
         sqrt_one_minus_e2 = math.sqrt(max(0.0, 1.0 - e * e))
         sin_e0 = sqrt_one_minus_e2 * sin_nu0 / denom
@@ -440,6 +511,37 @@ if NUMBA_AVAILABLE:
         mean_anomaly0 = ecc_anomaly0 - e * math.sin(ecc_anomaly0)
 
         mean_motion = math.sqrt(mu / (a * a * a))
+        return (mean_anomaly0, mean_motion, sqrt_one_minus_e2,
+                math.cos(arg), math.sin(arg), 1)
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
+    def _body_scripted_relative_xy_numba(index, local_t, body_m, body_a, body_e, body_theta, body_arg, body_parent, G, body_memo):
+        # Schneller weg: der kernel hat die zeitunabhaengigen groessen im
+        # vorlauf nach body_memo[:, 4:10] gelegt (spalte 9: 0 = nicht
+        # vorberechnet, 1 = gueltig, -1 = bahn unbrauchbar). Ohne notizblock
+        # -- oder mit abgeschaltetem `use_body_memo` -- laeuft der zweig
+        # darunter, der alles wie frueher selbst rechnet.
+        if body_memo.shape[0] == body_m.shape[0] and body_memo[index, 9] != 0.0:
+            if body_memo[index, 9] < 0.0:
+                return 0.0, 0.0, 0
+            a = body_a[index]
+            e = body_e[index]
+            mean_anomaly0 = body_memo[index, 4]
+            mean_motion = body_memo[index, 5]
+            sqrt_one_minus_e2 = body_memo[index, 6]
+            c = body_memo[index, 7]
+            s = body_memo[index, 8]
+        else:
+            (mean_anomaly0, mean_motion, sqrt_one_minus_e2, c, s,
+             const_ok) = _body_kepler_constants_numba(
+                index, body_m, body_a, body_e, body_theta, body_arg, body_parent, G,
+            )
+            if const_ok == 0:
+                return 0.0, 0.0, 0
+            a = body_a[index]
+            e = body_e[index]
+
         mean_anomaly = mean_anomaly0 + mean_motion * local_t
         two_pi = 2.0 * math.pi
         mean_anomaly = (mean_anomaly + math.pi) % two_pi
@@ -467,8 +569,6 @@ if NUMBA_AVAILABLE:
         nu = math.atan2(sqrt_one_minus_e2 * sin_e, cos_e - e)
         x_orb = r * math.cos(nu)
         y_orb = r * math.sin(nu)
-        c = math.cos(arg)
-        s = math.sin(arg)
         rel_x = x_orb * c - y_orb * s
         rel_y = x_orb * s + y_orb * c
         return rel_x, rel_y, 1
@@ -488,32 +588,87 @@ if NUMBA_AVAILABLE:
         body_arg,
         body_parent,
         G,
+        body_memo,
     ):
+        # `body_memo` ist ein (n,3)-notizblock [t, x, y] je koerper. Er ist die
+        # einzige optimierung, die diese funktion kennt, und sie ist
+        # BIT-IDENTISCH: gemerkt wird genau der wert, den derselbe rechenweg
+        # eben erzeugt hat, und getroffen wird nur bei EXAKT gleicher zeit.
+        #
+        # Sie lohnt sich, weil dieselbe koerperposition pro integrationsschritt
+        # mehrfach gebraucht wird, und zwar aus drei unabhaengigen gruenden:
+        #   1. mit bezugskoerper stellt _rkn_acc_time_numba ALLE koerper zweimal
+        #      zur selben zeit auf (einmal fuer das schiff, einmal fuer den
+        #      bezugspunkt);
+        #   2. jeder mond loest die kepler-gleichung seines planeten selbst noch
+        #      einmal -- Saturn wurde je auswertung sechsmal geloest;
+        #   3. die schrittverdopplung wertet t, t+h/2 und t+h mehrfach aus.
+        # Spalten: [t, x, y, gueltig]. Ein aufrufer ohne notizblock uebergibt
+        # ein (0,4)-array.
+        #
+        # Die vierte spalte ist NICHT redundant. Der naheliegende weg -- die
+        # zeitspalte auf NaN setzen und sich darauf verlassen, dass
+        # `NaN == local_t` falsch ist -- funktioniert hier NICHT: alle kernel
+        # laufen mit `fastmath=True`, und das schaltet LLVMs `nnan` ein, also
+        # die zusicherung, dass keine NaN auftreten. Der vergleich darf dann
+        # zu true gefaltet werden. Gemessen: der allererste zugriff meldete
+        # einen treffer und lieferte die uninitialisierten nullen zurueck --
+        # jeder koerper stand im ursprung, die bahn wich um 1.8e6 m ab.
         n = body_x.shape[0]
         if index < 0 or index >= n:
             return 0.0, 0.0
 
-        chain = np.empty(n, dtype=np.int64)
+        use_memo = body_memo.shape[0] == n
+        if use_memo and body_memo[index, 3] != 0.0 and body_memo[index, 0] == local_t:
+            return body_memo[index, 1], body_memo[index, 2]
+
+        # Kein `np.empty(n)` mehr fuer die elternkette: das war eine
+        # HALDEN-ANFORDERUNG pro aufruf, und aufgerufen wird je koerper und
+        # auswertungszeit -- gemessen ueber 200 000 mal pro vorhersage. Die
+        # kette ist hoechstens drei glieder lang (mond -> planet -> stern),
+        # also wird beim abstieg einfach neu hochgezaehlt: O(tiefe^2)
+        # zeigerschritte gegen eine allokation, und die reihenfolge der
+        # summanden bleibt exakt dieselbe.
         chain_count = 0
         cur = index
+        memo_hit = 0
+        hit_x = 0.0
+        hit_y = 0.0
 
         while cur >= 0 and cur < n and chain_count < n:
+            # Ein vorfahr, der zu DIESER zeit schon berechnet wurde, beendet
+            # den aufstieg: sein absolutwert ist die basis, auf die die
+            # restlichen glieder addiert werden -- dieselbe summe wie zuvor,
+            # in derselben reihenfolge.
+            if use_memo and body_memo[cur, 3] != 0.0 and body_memo[cur, 0] == local_t:
+                memo_hit = 1
+                hit_x = body_memo[cur, 1]
+                hit_y = body_memo[cur, 2]
+                break
             parent = body_parent[cur]
             if body_scripted[cur] == 0 or body_a[cur] <= 0.0 or parent < 0 or parent >= n:
                 break
-            chain[chain_count] = cur
             chain_count += 1
             cur = parent
 
         if cur < 0 or cur >= n:
             cur = index
             chain_count = 0
+            memo_hit = 0
 
-        wx = body_x[cur]
-        wy = body_y[cur]
+        if memo_hit != 0:
+            wx = hit_x
+            wy = hit_y
+        else:
+            wx = body_x[cur]
+            wy = body_y[cur]
 
         for chain_pos in range(chain_count - 1, -1, -1):
-            child = chain[chain_pos]
+            # `chain[chain_pos]` war der koerper, der chain_pos schritte
+            # UEBER `index` liegt -- hier wieder erlaufen statt gespeichert.
+            child = index
+            for _up in range(chain_pos):
+                child = body_parent[child]
             rel_x, rel_y, ok = _body_scripted_relative_xy_numba(
                 child,
                 local_t,
@@ -524,11 +679,20 @@ if NUMBA_AVAILABLE:
                 body_arg,
                 body_parent,
                 G,
+                body_memo,
             )
             if ok == 0:
                 return body_x[index], body_y[index]
             wx += rel_x
             wy += rel_y
+            # Jedes zwischenglied ist selbst eine gueltige koerperposition --
+            # merken, damit die geschwister-monde denselben planeten nicht
+            # noch einmal loesen.
+            if use_memo:
+                body_memo[child, 0] = local_t
+                body_memo[child, 1] = wx
+                body_memo[child, 2] = wy
+                body_memo[child, 3] = 1.0
 
         return wx, wy
 
@@ -550,6 +714,7 @@ if NUMBA_AVAILABLE:
         body_parent,
         G,
         use_time_dependent_bodies,
+        body_memo,
     ):
         ax = 0.0
         ay = 0.0
@@ -571,6 +736,7 @@ if NUMBA_AVAILABLE:
                     body_arg,
                     body_parent,
                     G,
+                    body_memo,
                 )
             else:
                 source_x = body_x[i]
@@ -609,6 +775,7 @@ if NUMBA_AVAILABLE:
         body_parent,
         G,
         use_time_dependent_bodies,
+        body_memo,
     ):
         ref_ax = 0.0
         ref_ay = 0.0
@@ -627,10 +794,14 @@ if NUMBA_AVAILABLE:
                     body_arg,
                     body_parent,
                     G,
+                    body_memo,
                 )
             else:
                 rpx = ref_px
                 rpy = ref_py
+            # Diese zweite aufstellung ALLER koerper laeuft zur exakt selben
+            # zeit wie die darunter -- ohne notizblock war sie eine volle
+            # verdopplung der teuersten schleife im predictor.
             ref_ax, ref_ay = _compute_acc_time_numba(
                 rpx,
                 rpy,
@@ -647,6 +818,7 @@ if NUMBA_AVAILABLE:
                 body_parent,
                 G,
                 use_time_dependent_bodies,
+                body_memo,
             )
 
         ax, ay = _compute_acc_time_numba(
@@ -665,6 +837,7 @@ if NUMBA_AVAILABLE:
             body_parent,
             G,
             use_time_dependent_bodies,
+            body_memo,
         )
         return ax, ay
 
@@ -693,6 +866,7 @@ if NUMBA_AVAILABLE:
         body_parent,
         G,
         use_time_dependent_bodies,
+        body_memo,
     ):
         dt2 = dt * dt
         half_dt = 0.5 * dt
@@ -702,7 +876,8 @@ if NUMBA_AVAILABLE:
         k1_ax, k1_ay = _rkn_acc_time_numba(
             px, py, local_t, ref_enabled, ref_index, ref_px, ref_py,
             body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
+            body_memo
         )
 
         p2x = px + half_dt * vx + 0.125 * dt2 * k1_ax
@@ -710,7 +885,8 @@ if NUMBA_AVAILABLE:
         k2_ax, k2_ay = _rkn_acc_time_numba(
             p2x, p2y, mid_t, ref_enabled, ref_index, ref_px, ref_py,
             body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
+            body_memo
         )
 
         p3x = px + half_dt * vx + 0.125 * dt2 * k2_ax
@@ -718,7 +894,8 @@ if NUMBA_AVAILABLE:
         k3_ax, k3_ay = _rkn_acc_time_numba(
             p3x, p3y, mid_t, ref_enabled, ref_index, ref_px, ref_py,
             body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
+            body_memo
         )
 
         p4x = px + dt * vx + 0.5 * dt2 * k3_ax
@@ -726,7 +903,8 @@ if NUMBA_AVAILABLE:
         k4_ax, k4_ay = _rkn_acc_time_numba(
             p4x, p4y, end_t, ref_enabled, ref_index, ref_px, ref_py,
             body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-            body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+            body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
+            body_memo
         )
 
         next_px = px + dt * vx + (dt2 / 6.0) * (k1_ax + k2_ax + k3_ax)
@@ -770,6 +948,7 @@ if NUMBA_AVAILABLE:
         body_parent,
         G,
         use_time_dependent_bodies,
+        body_memo,
     ):
         if use_time_dependent_bodies == 0:
             return _rkn_adaptive_step_numba(
@@ -834,18 +1013,20 @@ if NUMBA_AVAILABLE:
             full_px, full_py, full_vx, full_vy = _rkn4_step_time_numba(
                 px, py, vx, vy, local_t, step_dt, ref_enabled, ref_index, ref_px, ref_py,
                 body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-                body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+                body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
+                body_memo
             )
             half1_px, half1_py, half1_vx, half1_vy = _rkn4_step_time_numba(
                 px, py, vx, vy, local_t, half_dt, ref_enabled, ref_index, ref_px, ref_py,
                 body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-                body_theta, body_arg, body_parent, G, use_time_dependent_bodies
+                body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
+                body_memo
             )
             half2_px, half2_py, half2_vx, half2_vy = _rkn4_step_time_numba(
                 half1_px, half1_py, half1_vx, half1_vy, local_t + half_dt, half_dt,
                 ref_enabled, ref_index, ref_px, ref_py, body_x, body_y, body_m, body_fixed,
                 body_scripted, body_a, body_e, body_theta, body_arg, body_parent, G,
-                use_time_dependent_bodies
+                use_time_dependent_bodies, body_memo
             )
 
             finite_state = (
@@ -997,22 +1178,85 @@ if NUMBA_AVAILABLE:
         max_rejects,
         use_time_dependent_bodies,
         ref_index,
+        init_t,
+        init_accumulated,
+        init_proposed_dt,
+        use_body_memo,
     ):
-        out = np.empty((max_points, 3), dtype=np.float64)
+        # init_t / init_accumulated / init_proposed_dt machen den kernel
+        # FORTSETZBAR: mit dem zustand, den ein frueherer lauf in stats[7:]
+        # hinterlassen hat, rechnet er exakt dort weiter, wo er aufgehoert
+        # hat -- dieselbe schnappschuss-epoche, dieselbe schrittweite,
+        # derselbe reststrecken-zaehler. Das ist die grundlage dafuer, die
+        # vorhersage im zeitraffer hinten stueckweise zu verlaengern, statt
+        # sie periodisch ganz neu zu rechnen.
+        # Spalten 3/4 sind die GESCHWINDIGKEIT am ausgegebenen punkt. Sie
+        # kostet nichts -- die emissions-schleife unten rechnet sie ohnehin
+        # (als ableitung desselben Hermite-polynoms, mit dem sie die position
+        # interpoliert) und warf bisher alle bis auf die letzte weg. Mit ihr
+        # ist die punkteliste keine folge von positionen mehr, sondern eine
+        # stueckweise KUBISCHE kurve: der renderer kann sie zur zeichenzeit
+        # beliebig fein auswerten, ohne dass hier ein schritt mehr faellt.
+        out = np.empty((max_points, 5), dtype=np.float64)
         out[0, 0] = init_px
         out[0, 1] = init_py
-        out[0, 2] = 0.0
+        out[0, 2] = init_t
+        out[0, 3] = init_vx
+        out[0, 4] = init_vy
 
-        stats = np.zeros(7, dtype=np.float64)
+        # Notizblock fuer koerperpositionen: [t, x, y, gueltig] je koerper,
+        # EINMAL fuer den ganzen lauf angelegt und ueber alle schritte hinweg
+        # gueltig. Nullen heisst "noch nichts gerechnet" -- ein NaN-merker
+        # waere unter fastmath wirkungslos, siehe
+        # _body_position_at_time_numba. Die kepler-aufstellung der
+        # koerper ist 99 % der rechenzeit dieses kernels -- gemessen 61.7 ms
+        # gegen 0.6 ms mit eingefrorenen koerpern -- und ein grossteil davon
+        # war reine wiederholung derselben zeit. Siehe
+        # _body_position_at_time_numba.
+        # `use_body_memo = 0` legt ihn mit null zeilen an: dann greift in
+        # _body_position_at_time_numba kein einziger treffer und der kernel
+        # rechnet exakt wie vor der einfuehrung. Das ist der A/B-schalter fuer
+        # den bit-vergleich (Predictor.use_body_memo), nach demselben muster
+        # wie world.use_fast_integrator.
+        _memo_rows = body_x.shape[0] if use_body_memo != 0 else 0
+        body_memo = np.zeros((_memo_rows, 10), dtype=np.float64)
+        # Vorlauf: die zeitunabhaengigen bahngroessen EINMAL je koerper.
+        # Spalte 9 traegt das ergebnis: 1 = brauchbar, -1 = bahn unbrauchbar
+        # (dann liefert die auswertung wie zuvor sofort ok = 0).
+        for _bi in range(_memo_rows):
+            (_m0, _mm, _s1e2, _ca, _sa, _cok) = _body_kepler_constants_numba(
+                _bi, body_m, body_a, body_e, body_theta, body_arg, body_parent, G,
+            )
+            if _cok == 0:
+                body_memo[_bi, 9] = -1.0
+            else:
+                body_memo[_bi, 4] = _m0
+                body_memo[_bi, 5] = _mm
+                body_memo[_bi, 6] = _s1e2
+                body_memo[_bi, 7] = _ca
+                body_memo[_bi, 8] = _sa
+                body_memo[_bi, 9] = 1.0
+
+        stats = np.zeros(14, dtype=np.float64)
+
+        # Fortsetz-punkt = LETZTER AUSGEGEBENER punkt (nicht das ende des
+        # letzten integrationsschritts). Nur so ist die reststrecke dort
+        # definitionsgemaess 0 und kann beim fortsetzen nicht groesser als
+        # der punktabstand werden -- genau daran scheiterte die naht sonst.
+        resume_px = init_px
+        resume_py = init_py
+        resume_vx = init_vx
+        resume_vy = init_vy
+        resume_t = init_t
 
         count = 1
         px = init_px
         py = init_py
         vx = init_vx
         vy = init_vy
-        t = 0.0
-        accumulated = 0.0
-        proposed_dt = base_dt
+        t = init_t
+        accumulated = init_accumulated
+        proposed_dt = init_proposed_dt if init_proposed_dt > 0.0 else base_dt
 
         accepted_steps = 0.0
         rejected_steps = 0.0
@@ -1113,6 +1357,7 @@ if NUMBA_AVAILABLE:
                     body_parent,
                     G,
                     use_time_dependent_bodies,
+                    body_memo,
                 )
 
             rejected_steps += float(rejected_count)
@@ -1190,9 +1435,31 @@ if NUMBA_AVAILABLE:
                         failure_code = 3.0
                         break
 
+                    # Geschwindigkeit am ausgegebenen punkt: ableitung
+                    # DESSELBEN Hermite-polynoms, mit dem oben die position
+                    # interpoliert wurde -- also konsistent, nicht genaehert.
+                    # Sie wird VOR dem schreiben gerechnet, weil sie jetzt
+                    # mit in die zeile geht (spalten 3/4) und nicht mehr nur
+                    # den fortsetz-zustand fuellt.
+                    d00 = 6.0 * s2 - 6.0 * s
+                    d10 = 3.0 * s2 - 4.0 * s + 1.0
+                    d01 = -6.0 * s2 + 6.0 * s
+                    d11 = 3.0 * s2 - 2.0 * s
+                    if used_dt != 0.0:
+                        resume_vx = (d00 * px + d01 * next_px) / used_dt + d10 * vx + d11 * next_vx
+                        resume_vy = (d00 * py + d01 * next_py) / used_dt + d10 * vy + d11 * next_vy
+                    else:
+                        resume_vx = vx
+                        resume_vy = vy
+                    resume_px = sample_px
+                    resume_py = sample_py
+                    resume_t = sample_t
+
                     out[count, 0] = sample_px
                     out[count, 1] = sample_py
                     out[count, 2] = sample_t
+                    out[count, 3] = resume_vx
+                    out[count, 4] = resume_vy
                     count += 1
 
                     accumulated = 0.0
@@ -1201,8 +1468,17 @@ if NUMBA_AVAILABLE:
                 if failure_code != 0.0:
                     break
 
-                if rem_len + accumulated < precision:
-                    accumulated += rem_len
+                # Reststrecke IMMER mitzaehlen. Bisher geschah das nur, wenn
+                # die emissions-schleife regulaer endete; brach sie ab, weil
+                # das punktbudget voll war, ging die restliche strecke des
+                # segments verloren. Fuer einen einmaligen lauf war das
+                # folgenlos (danach bricht auch die aeussere schleife ab und
+                # `accumulated` wird nicht mehr gelesen) -- beim FORTSETZEN
+                # dagegen sass der fortsetz-punkt dann bis zu einer ganzen
+                # schrittweite hinter dem letzten ausgegebenen punkt, und an
+                # der nahtstelle klaffte eine luecke (gemessen 2.6e7 m bei
+                # 1e6 m punktabstand).
+                accumulated += rem_len
 
             px = next_px
             py = next_py
@@ -1223,6 +1499,15 @@ if NUMBA_AVAILABLE:
         stats[4] = max_error_norm
         stats[5] = failure_code
         stats[6] = t
+        # Fortsetz-zustand (siehe kopf der funktion). Reststrecke ist am
+        # ausgegebenen punkt per definition 0.
+        stats[7] = resume_px
+        stats[8] = resume_py
+        stats[9] = resume_vx
+        stats[10] = resume_vy
+        stats[11] = 0.0
+        stats[12] = proposed_dt
+        stats[13] = resume_t
 
         return out, count, stats
 
@@ -1326,6 +1611,11 @@ if NUMBA_AVAILABLE:
         # punktabstand und der integrator-toleranz — die extremum-wahl
         # zwischen nachbarpunkten bleibt davon unberührt.
         d2_arr = np.empty(n, dtype=np.float64)
+        # Lokal angelegt, NICHT als modul-konstante: numba typisiert ein
+        # globales array `readonly`, und dann scheitert schon die
+        # uebersetzung von _body_position_at_time_numba an dessen (hier nie
+        # erreichten) schreibzugriffen -- siehe _no_body_memo().
+        empty_memo = np.zeros((0, 10), dtype=np.float64)
         if use_time_dependent_bodies != 0:
             stride_max = 64
             time_window = 240.0
@@ -1334,6 +1624,7 @@ if NUMBA_AVAILABLE:
                 ref_index, pts[0, 2] - base_sim_time,
                 body_x, body_y, body_m, body_scripted,
                 body_a, body_e, body_theta, body_arg, body_parent, G,
+                empty_memo,
             )
             while ia < n - 1:
                 ib = ia + stride_max
@@ -1346,6 +1637,7 @@ if NUMBA_AVAILABLE:
                     ref_index, pts[ib, 2] - base_sim_time,
                     body_x, body_y, body_m, body_scripted,
                     body_a, body_e, body_theta, body_arg, body_parent, G,
+                    empty_memo,
                 )
                 ta = pts[ia, 2]
                 span = pts[ib, 2] - ta
@@ -1496,10 +1788,18 @@ if NUMBA_AVAILABLE:
         close_acc_threshold,
         use_rk4_fallback,
     ):
-        out = np.empty((max_points, 3), dtype=np.float64)
+        # Fuenf spalten wie im rkn-kernel, aber die geschwindigkeit bleibt
+        # NaN: dieser pfad setzt seine punkte LINEAR auf die schrittsehne,
+        # es gibt also gar keine tangente, die sie beschreiben koennte. NaN
+        # sagt dem renderer genau das -- er zeichnet diese abschnitte dann
+        # als geraden statt eine kruemmung zu erfinden, die die punkte nicht
+        # haben.
+        out = np.empty((max_points, 5), dtype=np.float64)
         out[0, 0] = init_px
         out[0, 1] = init_py
         out[0, 2] = 0.0
+        out[0, 3] = np.nan
+        out[0, 4] = np.nan
 
         count = 1
         px = init_px
@@ -1667,6 +1967,9 @@ if NUMBA_AVAILABLE:
                 out[count, 0] = sample_px
                 out[count, 1] = sample_py
                 out[count, 2] = sample_t
+                # Linear auf der sehne gesetzt -> keine tangente vorhanden.
+                out[count, 3] = np.nan
+                out[count, 4] = np.nan
                 count += 1
 
                 local_px = sample_px
@@ -1712,10 +2015,14 @@ if NUMBA_AVAILABLE:
         max_points,
         max_iters,
     ):
-        out = np.empty((max_points, 3), dtype=np.float64)
+        # Wie im ASPI-kernel: fuenf spalten, geschwindigkeit NaN, weil die
+        # punkte linear auf der schrittsehne sitzen.
+        out = np.empty((max_points, 5), dtype=np.float64)
         out[0, 0] = init_px
         out[0, 1] = init_py
         out[0, 2] = 0.0
+        out[0, 3] = np.nan
+        out[0, 4] = np.nan
 
         count = 1
         px = init_px
@@ -1805,6 +2112,9 @@ if NUMBA_AVAILABLE:
                 out[count, 0] = sample_px
                 out[count, 1] = sample_py
                 out[count, 2] = sample_t
+                # Linear auf der sehne gesetzt -> keine tangente vorhanden.
+                out[count, 3] = np.nan
+                out[count, 4] = np.nan
                 count += 1
 
                 local_px = sample_px
@@ -2052,8 +2362,14 @@ class Predictor:
         # (the adaptive tolerance + step-doubling still refine near planets).
         # See _make_snapshot.
         self.rkn_adaptive_far_maxdt = True
-        self.rkn_far_field_target_steps = 2500.0
+        self.rkn_far_field_target_steps = 1250.0
         self.rkn_max_dt_ceiling = 30000.0
+        # Gemessene MITTLERE inverse geschwindigkeit ueber den horizont (s/m):
+        # zeitspanne des letzten laufs geteilt durch seine bogenlaenge. 0.0 =
+        # noch unbekannt, dann faellt _make_snapshot auf die momentangeschwin-
+        # digkeit zurueck. Siehe _make_snapshot; wird in _compute_from_snapshot
+        # aus dem ergebnis nachgezogen und in reset() geloescht.
+        self._horizon_time_per_arc = 0.0
         self.rkn_last_accepted_steps = 0
         self.rkn_last_rejected_steps = 0
         self.rkn_last_min_dt = 0.0
@@ -2076,10 +2392,49 @@ class Predictor:
         self._last_seen_vx = None
         self._last_seen_vy = None
         self._last_seen_sim_time = None
+        # Beschleunigung des letzten bildes -- daraus wird die KRUEMMUNG von g
+        # ueber einen schritt geschaetzt, die schranke fuer den
+        # schwerkraft-bereinigten rest (siehe _handle_trajectory_branch_change).
+        self._last_seen_gx = None
+        self._last_seen_gy = None
         self.velocity_invalidation_abs_tol = 1.0
         self.velocity_invalidation_rel_tol = 1e-5
         self.position_invalidation_abs_tol = 100.0
         self.sync_recompute_on_velocity_change = True
+        # OBERGRENZE fuer gleichzeitig laufende vorhersagen unter schub. Wie
+        # viele es tatsaechlich werden, ergibt sich aus dem messwert:
+        # gebraucht werden `rechenzeit / bildzeit` laeufe, damit je bild genau
+        # ein ergebnis fertig wird (siehe _target_pipeline_depth). Beim
+        # gleitflug bleibt es immer bei einer einzigen rechnung.
+        # 1 = abgeschaltet, wie vor der pipeline.
+        self.thrust_pipeline_depth = 6
+        # Wie viele FERTIGE, noch nicht eingewechselte ergebnisse warten
+        # duerfen (siehe _swap_ready_result). Der klassische kompromiss eines
+        # jitter-puffers: mehr puffer = gleichmaessigeres nachziehen, aber
+        # aeltere linie. Gemessen an der periapsis unter vollschub, je 300
+        # bilder, und der abstand der gezeichneten zur synchron gerechneten
+        # linie:
+        #
+        #     0 -> 4 doppelschritte,  alter 2 s,   8.4 px abstand
+        #     1 -> 1 doppelschritt,   alter 4 s,  10.3 px
+        #     2 -> 0 doppelschritte,  alter 6 s,  17.5 px
+        #
+        # Voreinstellung 1: drei viertel der ausreisser weg fuer knapp 2 px.
+        # Die STILLSTAENDE (3 je 300 bilder) bleiben in allen faellen -- sie
+        # sind die andere haelfte derselben sache, denn es kann nie mehr als
+        # ein ergebnis je bild ankommen. Ein stillstand faellt aber kaum auf,
+        # ein doppelsprung schon.
+        self.swap_backlog_max = 1
+        # Gleitender mittelwert des abstands zwischen zwei update()-aufrufen,
+        # also der bildzeit -- der predictor bekommt sie sonst nicht mit.
+        self._update_interval_ms = 0.0
+        self._last_update_ts = None
+        self._pipeline_depth_used = 1
+        # Notizblock fuer koerperpositionen im rkn-kernel. False rechnet jede
+        # kepler-aufstellung wie frueher einzeln -- der A/B-schalter fuer den
+        # bit-vergleich (tests/warp_predictor_test.py §10), nach demselben
+        # muster wie world.use_fast_integrator. Gemessen 61.7 -> 15.8 ms.
+        self.use_body_memo = True
         # A coasting ship's velocity changes by ~|g|*dt each step from gravity
         # alone; only a jump BEYOND that (real thrust) should invalidate the
         # trajectory. Without this the detector fires every frame and forces a
@@ -2101,7 +2456,7 @@ class Predictor:
         self.async_submit_min_interval = 0.04
         self._last_submit_wall = 0.0
 
-        self.points: "np.ndarray | list" = np.empty((0, 3), dtype=np.float64) if np is not None else []
+        self.points: "np.ndarray | list" = _empty_points()
         self.debug = debug
         # suppress frequent computed debug lines by default; set False to enable
         self._suppress_dbg_computed = True
@@ -2186,6 +2541,32 @@ class Predictor:
         self.apsis_max_markers = 16
         self._apsis_markers = self._empty_apsis_array()
         self._apsis_cache_key = None
+        # Zeitraffer-halt: die gehaltene kurve aendert sich pro frame nur am
+        # kopf (verbraucht) und schwanz (angestueckelt) -- die marker der
+        # verbleibenden punkte sind bit-identisch. Statt jeden frame alle
+        # 10 000 punkte neu zu scannen (2x pro frame: HUD + renderer),
+        # werden die marker hoechstens alle `apsis_hold_rescan_s` neu
+        # gerechnet und dazwischen nur um abgelaufene gefiltert. Ein neuer
+        # marker am ENDE des horizonts erscheint damit maximal diese spanne
+        # spaeter -- am fernen ende einer tagelangen vorhersage unsichtbar.
+        self._apsis_soft_stale = False
+        self._apsis_last_scan_ts = 0.0
+        self.apsis_hold_rescan_s = 0.25
+
+        # Zeitraffer-halt (siehe _hold_advance). Standardmaessig AUS -- die
+        # hauptschleife schaltet ihn ein, sobald der zeitraffer ueber die
+        # unterste stufe geht.
+        self.hold_enabled = False
+        self._hold_invalidated = False
+        # Ob points[0] der selbst vorangestellte kopf ist (siehe
+        # _hold_advance) -- er muss vor der naechsten suche wieder weg.
+        self._hold_synthetic_head = False
+        # Ab welchem restvorrat (anteil des punktbudgets) waehrend des halts
+        # nachgerechnet wird. Das ist die failsafe-schwelle, die verhindert,
+        # dass die linie ausläuft.
+        self.hold_refresh_fraction = 0.25
+        # Ueber wie viele punkte die kopf-korrektur abklingt.
+        self.hold_taper_points = 64
 
         if self.async_compute and not self.rolling_mode:
             self._ensure_executor()
@@ -2206,14 +2587,28 @@ class Predictor:
     def _ensure_executor(self):
         if getattr(self, "_executor", None) is not None:
             return
-        # The predictor uses exactly one dedicated worker thread. The main
-        # simulation/render thread remains separate, and one trajectory is
-        # integrated sequentially inside this worker.
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="predictor-worker")
-        self._predictor_worker_threads = 1
+        # Beim GLEITFLUG laeuft hier genau eine rechnung; die tiefe wird nur
+        # unter schub ausgereizt (siehe _request_thrust_recompute).
+        #
+        # Warum ueberhaupt mehrere: eine vorhersage dauert ~17 ms, ein bild
+        # ~7 ms. Nacheinander gerechnet kann die linie also hoechstens jedes
+        # dritte bild neu sein -- das ist das ruckeln waehrend eines burns.
+        # Die dauer EINER rechnung laesst sich nicht weiter druecken, ihr
+        # DURCHSATZ aber schon: mehrere zeitversetzt gestartete laeufe geben
+        # alle ~17/tiefe ms ein ergebnis. Erlaubt ist das, weil alle kernel
+        # `nogil=True` sind -- sie laufen wirklich nebenlaeufig und nehmen dem
+        # hauptthread nichts weg (gemessen: gleiche hauptthread-arbeit 0.25 ms
+        # bei leerlaufendem gegen 0.27 ms bei ausgelastetem worker).
+        # Der pool wird auf die OBERGRENZE ausgelegt; wie viele davon
+        # tatsaechlich beschaeftigt sind, entscheidet _target_pipeline_depth
+        # bild fuer bild aus rechenzeit/bildzeit. Leerlaufende threads kosten
+        # nichts.
+        workers = self._pipeline_depth_cap()
+        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="predictor-worker")
+        self._predictor_worker_threads = workers
         if self.debug:
             try:
-                print("PRED_DBG_THREAD: predictor worker max_workers=1", flush=True)
+                print(f"PRED_DBG_THREAD: predictor worker max_workers={workers}", flush=True)
             except Exception:
                 pass
 
@@ -2352,10 +2747,32 @@ class Predictor:
 
     def reset(self):
         self._cancel_pending_job()
-        self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+        self.points = _empty_points()
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
         self._clear_apsis_markers()
+        # Der halt haelt eine kurve fest, die es nach dem reset nicht mehr gibt.
+        self._hold_synthetic_head = False
+        self._resume_context = None
+        # WICHTIG: auch den vermerk loeschen, WELCHER zustand die punkte erzeugt
+        # hat. Er wird nur beim einwechseln eines ergebnisses gesetzt, nach dem
+        # reset gibt es aber keins mehr -- er stuende also als luege da.
+        #
+        # Das ist kein aufraeumen, sondern behebt eine selbsterhaltende
+        # blockade: update() vergleicht die schiffsgeschwindigkeit gegen genau
+        # diesen vermerk und wirft die bahn weg, sobald sie abweicht. Bleibt er
+        # alt stehen, weicht sie JEDEN frame weiter ab (im zeitraffer um
+        # ~24 m/s je frame), also wird jeden frame die trajektorien-version
+        # erhoeht und der laufende hintergrund-auftrag verworfen -- der aber
+        # laenger als einen frame braucht. Gemessen nach einem druck auf
+        # '9'/'0'/'+'/'-': 20 frames, 20 auftraege abgeschickt, KEINER
+        # eingewechselt, die linie kam nie zurueck. Ohne linie faellt der
+        # navball auf die geradeaus-tangente zurueck statt auf die gezeichnete
+        # bahn -- das ist das springen der marker.
+        self._last_swapped_snapshot = None
+        # Die gemessene bahn-zeitspanne gehoert zu der kurve, die es nicht mehr
+        # gibt. Nach einem reparenting/teleport waere sie schlicht falsch.
+        self._horizon_time_per_arc = 0.0
 
     def set_reference_body_index(self, index: int | None):
         if index is None:
@@ -2417,6 +2834,7 @@ class Predictor:
                     snapshot["body_arg"],
                     snapshot["body_parent"],
                     float(snapshot["G"]),
+                    _no_body_memo(),
                 )
             return float(snapshot["body_x"][index]), float(snapshot["body_y"][index])
         except Exception:
@@ -2534,7 +2952,7 @@ class Predictor:
             return -1
 
     def _empty_points_array(self) -> "np.ndarray | list":
-        return np.empty((0, 3), dtype=np.float64) if np is not None else []
+        return _empty_points()
 
     def _empty_apsis_array(self):
         return np.empty((0, 5), dtype=np.float64) if np is not None else []
@@ -2607,7 +3025,9 @@ class Predictor:
             self._remember_ship_state(ship, world)
             return False
 
-        delta_speed = math.hypot(cur_vx - float(last_vx), cur_vy - float(last_vy))
+        dvx_seen = cur_vx - float(last_vx)
+        dvy_seen = cur_vy - float(last_vy)
+        delta_speed = math.hypot(dvx_seen, dvy_seen)
         cur_speed = math.hypot(cur_vx, cur_vy)
         allowed_speed = self._allowed_velocity_delta(cur_speed)
 
@@ -2625,26 +3045,97 @@ class Predictor:
         expected_motion = max(cur_speed, last_speed, 1.0) * max(dt_age, 0.0)
         allowed_pos = max(float(self.position_invalidation_abs_tol), expected_motion * 4.0)
 
-        # Allow the velocity change that gravity alone produces over dt_age, so
-        # normal orbital coasting does not trip the detector (which would force a
-        # synchronous full recompute every frame). Only thrust beyond this margin
-        # invalidates. Reuses world.acceleration_at (cheap ~4-body sum).
+        # Die schwerkraft wird HERAUSGERECHNET, nicht mit einer schranke
+        # ueberdeckt.
+        #
+        # Frueher stand hier `allowed_speed = max(allowed, 4 * |g| * dt)`: der
+        # gesamte geschwindigkeitssprung wurde gegen eine schranke von der
+        # groesse des schwerkraft-anteils gehalten. Fern vom planeten geht das
+        # auf, NAHE DER PERIAPSIS nicht: dort ist |g| = 8.1 m/s^2, ueber einen
+        # 2-sekunden-schritt also 16 m/s schwerkraft gegen 6.7 m/s vollschub
+        # je bild -- die schranke lag bei 65 m/s und der schub verschwand
+        # vollstaendig darunter. Die vorhersagelinie wurde in genau dem
+        # moment nicht mehr angefordert, in dem sie sich am staerksten
+        # aendert, und sprang erst wieder an, wenn das schiff weit genug weg
+        # war. Das ist das ruckartige nachziehen nahe der periapsis.
+        #
+        # Richtig ist der REST: was bleibt von der geschwindigkeitsaenderung
+        # uebrig, wenn man abzieht, was die schwerkraft erklaert. Gemessen auf
+        # einer bahn mit e = 0.7 um die Erde, je bild:
+        #
+        #     periapsis   gleitflug 0.023 m/s   |   schub 6.69 m/s
+        #     apoapsis    gleitflug 0.000 m/s   |   schub 6.67 m/s
+        #
+        # Der schub steht damit ueberall gleich deutlich da (faktor ~290 ueber
+        # dem grundrauschen), und die feste toleranz von 1 m/s trennt beides
+        # sauber. Nebenbei faengt der test auch den fall, in dem schub der
+        # schwerkraft ENTGEGEN zeigt und die summe klein ist: bei nu = 90 Grad
+        # betraegt der gesamtsprung 0.98 m/s -- unter der toleranz -- der rest
+        # aber 6.66 m/s.
+        #
+        # Die restschranke muss mit der KRUEMMUNG von g mitwachsen, sonst
+        # feuert sie im zeitraffer: `g * dt` erklaert einen 28-stunden-schritt
+        # nicht mehr. `|g_jetzt - g_vorher| * dt` waechst genau mit diesem
+        # fehler mit -- gemessen im gleitflug von 0.5 s bis 100800 s (7 d/s)
+        # bleibt der rest bei jedem schritt unter der schranke.
+        residual_speed = delta_speed
         if world is not None:
             try:
                 g = world.acceleration_at(ship, ship.position, cur_time)
-                expected_gravity_dv = math.hypot(float(g.x), float(g.y)) * max(dt_age, 0.0)
-                allowed_speed = max(allowed_speed, float(self.gravity_dv_safety_factor) * expected_gravity_dv)
+                gx = float(g.x)
+                gy = float(g.y)
+                span = max(dt_age, 0.0)
+                residual_speed = math.hypot(dvx_seen - gx * span, dvy_seen - gy * span)
+
+                last_gx = self._last_seen_gx
+                last_gy = self._last_seen_gy
+                if last_gx is None or last_gy is None:
+                    # Ohne vorwert die alte, grosszuegige schranke nehmen --
+                    # lieber eine anforderung verpassen als im zeitraffer die
+                    # gehaltene kurve zu zerreissen.
+                    curvature_dv = math.hypot(gx, gy) * span
+                else:
+                    curvature_dv = math.hypot(gx - float(last_gx), gy - float(last_gy)) * span
+                allowed_speed = max(allowed_speed,
+                                    float(self.gravity_dv_safety_factor) * curvature_dv)
+                self._last_seen_gx = gx
+                self._last_seen_gy = gy
             except Exception:
-                pass
+                residual_speed = delta_speed
 
         reason = None
-        if delta_speed > allowed_speed:
+        if residual_speed > allowed_speed:
             reason = "velocity"
         elif delta_pos > allowed_pos:
             reason = "position"
 
         if reason is None:
             self._remember_ship_state(ship, world)
+            return False
+
+        # Schub ist KEIN bruch der bahn, sondern ihre stetige veraenderung: die
+        # gezeichnete linie ist danach ein paar dutzend millisekunden alt, aber
+        # nicht falsch. Sie deshalb zu leeren und synchron neu zu rechnen kostet
+        # 59 ms pro frame (voller sonnensystem-satz) und verwarf zugleich jedes
+        # asynchrone ergebnis, weil die version im naechsten frame schon wieder
+        # weiter war. Ein echter POSITIONS-sprung (teleport, reparenting) ist
+        # dagegen ein bruch -- dort bleibt der harte weg unten.
+        if reason == "velocity" and self._request_thrust_recompute(ship, world):
+            self._remember_ship_state(ship, world)
+            if self.debug:
+                try:
+                    print(
+                        "PRED_DBG_TRAJECTORY_REFRESH: "
+                        f"reason=velocity rest={residual_speed:.6e} (roh {delta_speed:.6e}) "
+                        f"allowed={allowed_speed:.6e} "
+                        "mode=async-coalesced",
+                        flush=True,
+                    )
+                except Exception:
+                    pass
+            # Nicht kurzschliessen: update() soll normal weiterlaufen, damit
+            # ein fertiges ergebnis eingewechselt und die linie ans schiff
+            # geheftet wird.
             return False
 
         old_version = int(self._trajectory_version)
@@ -2654,7 +3145,7 @@ class Predictor:
                 if reason == "velocity":
                     print(
                         "PRED_DBG_TRAJECTORY_INVALIDATED: "
-                        f"reason=velocity dv={delta_speed:.6e} allowed={allowed_speed:.6e} "
+                        f"reason=velocity rest={residual_speed:.6e} allowed={allowed_speed:.6e} "
                         f"old_version={old_version} new_version={self._trajectory_version}",
                         flush=True,
                     )
@@ -2798,6 +3289,27 @@ class Predictor:
             st = float(world.time) if world is not None else None
         except Exception:
             st = None
+
+        # IM ZEITRAFFER NICHT STARR VERSCHIEBEN. Diese methode zieht sonst
+        # die ganze kurve um den kopfversatz mit. Bei gehaltener kurve ist
+        # dieser versatz gross (das gespeicherte ergebnis ist mehrere frames
+        # alt und das schiff je frame ~1e8 m weiter), die kurve wuerde also
+        # jeden frame quer durchs bild wandern -- und genau das macht sie
+        # anschliessend fuer den halt unbrauchbar, weil ihre zeitspalte dann
+        # nicht mehr zu ihrer geometrie passt (gemessen: kopfabstand 3.2e6 m
+        # statt der punktweite 1e6 m, obwohl die echte abweichung zwischen
+        # welt und predictor nur 37 m je frame betraegt).
+        if (self._hold_active() and np is not None
+                and isinstance(self.points, np.ndarray)
+                and self.points.ndim == 2 and self.points.shape[0] >= 2
+                and st is not None):
+            dx = sx - float(self.points[0, 0])
+            dy = sy - float(self.points[0, 1])
+            dt = st - float(self.points[0, 2]) if self.points.shape[1] >= 3 else 0.0
+            if math.isfinite(dx) and math.isfinite(dy) and math.isfinite(dt):
+                self._apply_head_taper(self.points, sx, sy, st, dx, dy, dt)
+                self._invalidate_derived_caches(soft=True)
+            return
         if np is not None and isinstance(self.points, np.ndarray):
             dx = sx - float(self.points[0, 0])
             dy = sy - float(self.points[0, 1])
@@ -2924,9 +3436,44 @@ class Predictor:
                 if rel_change <= self.snapshot_view_rel_tol:
                     return
 
+            # Neu rechnen lohnt nur, wenn der zoom die WIRKSAME punktdichte
+            # veraendert. Mit angepinntem horizont (length = num_points *
+            # precision, siehe test.py) klemmt _horizon_spacing_floor() die
+            # zoom-verfeinerung bei JEDEM zoomwert auf exakt `precision` --
+            # der synchrone _compute_full lieferte dann eine bit-identische
+            # linie und kostete trotzdem die volle rechenzeit im hauptthread,
+            # einmal pro mausrad-raste. Das war der massive fps-einbruch beim
+            # zoomen. Aendert der zoom die dichte wirklich (nicht
+            # angepinnter horizont), bleibt das verhalten wie zuvor.
+            try:
+                eff_old = float(self._effective_precision())
+            except Exception:
+                eff_old = None
 
             self._view_scale = scale
- 
+
+            try:
+                eff_new = float(self._effective_precision())
+            except Exception:
+                eff_new = None
+            eff_changed = True
+            if eff_old is not None and eff_new is not None:
+                eff_changed = (
+                    abs(eff_new - eff_old) / max(abs(eff_old), 1e-30)
+                    > self.snapshot_view_rel_tol
+                )
+            # Nur ueberspringen, wenn es eine linie zum BEHALTEN gibt: ohne
+            # punkte garantierte der alte weg, dass der naechste update()
+            # synchron eine baut -- diese zusicherung bleibt bestehen.
+            try:
+                has_points = self._points_count() > 0
+            except Exception:
+                has_points = False
+            if not eff_changed and has_points:
+                if self.debug:
+                    print("PRED_DBG_VIEW_SCALE: eff_precision unchanged, no recompute")
+                return
+
             try:
                 self._view_scale_changed = True
                 if self.debug:
@@ -2958,11 +3505,349 @@ class Predictor:
             except Exception:
                 pass
 
+    # ------------------------------------------------------ zeitraffer-halt
+
+    def set_hold(self, enabled):
+        """Zeitraffer-halt ein/aus. Ausschalten erzwingt eine neuberechnung."""
+        enabled = bool(enabled)
+        if enabled == getattr(self, 'hold_enabled', False):
+            return
+        self.hold_enabled = enabled
+        self._hold_synthetic_head = False
+        self._resume_context = None
+        # Beim verlassen muss die kurve einmal frisch gerechnet werden: der
+        # spieler darf sofort wieder schub geben, und die gehaltene kurve
+        # weiss davon nichts.
+        self._hold_invalidated = True
+
+    def invalidate_hold(self):
+        """Die gehaltene kurve ist ueberholt (schub, rahmenwechsel, ...)."""
+        self._hold_invalidated = True
+        self._hold_synthetic_head = False
+        self._resume_context = None
+
+    def _hold_active(self):
+        if not bool(getattr(self, 'hold_enabled', False)):
+            return False
+        if self.rolling_mode:
+            return False
+        if not self.initialized:
+            return False
+        # Eine zoom-aenderung veraendert die punktdichte und muss deshalb
+        # durch den normalen rechenweg -- der halt darf sie nicht schlucken.
+        if getattr(self, '_view_scale_changed', False):
+            return False
+        return True
+
+    def _hold_advance(self, ship, world):
+        """Kurve VERBRAUCHEN statt neu rechnen. True = frame ist erledigt.
+
+        WARUM. Ohne halt ruft update() bei jedem frame eine neuberechnung an
+        und `_anchor_first_point` schiebt die gespeicherte kurve STARR so,
+        dass ihr kopf auf dem schiff sitzt. Bei 1m/s ist der versatz je frame
+        winzig. Bei 7d/s rueckt das schiff je frame um ~10 000 sim-sekunden
+        bahn weiter -- die ganze kurve wird also um diesen betrag quer
+        verschoben und springt zurueck, sobald ein frisch gerechnetes
+        ergebnis eintrifft. Genau dieser wechsel ist das "zittern" der linie
+        und der Ap/Pe-marker.
+
+        Richtig ist: die vorhersage ist eine eigenschaft der BAHN, nicht des
+        augenblicks. Ohne schub bleibt sie stehen und das schiff rutscht an
+        ihr entlang. Also werden vorn die punkte weggeworfen, deren zeit
+        bereits vergangen ist (die zeitspalte ist absolute sim-zeit, das ist
+        exakt und per suchlauf billig), und der rest bleibt, wo er ist.
+
+        Der kopf wird trotzdem an das schiff gezogen, aber ABKLINGEND ueber
+        die ersten `hold_taper_points` punkte -- welt und predictor
+        propagieren die planeten leicht unterschiedlich, ohne korrektur
+        klafft am schiff eine luecke. Die korrektur voll auf die ganze kurve
+        zu legen waere wieder die starre verschiebung von oben.
+
+        Failsafe: laeuft der vorrat unter `hold_refresh_fraction`, gibt die
+        methode False zurueck und der normale weg rechnet nach. Die linie
+        kann also nicht auslaufen.
+        """
+        if getattr(self, '_hold_invalidated', False):
+            self._hold_invalidated = False
+            self._hold_synthetic_head = False
+            return False
+        if ship is None or world is None or np is None:
+            return False
+        points = self.points
+        if not isinstance(points, np.ndarray) or points.ndim != 2:
+            return False
+        if points.shape[0] < 4 or points.shape[1] < 3:
+            return False
+
+        try:
+            now = float(world.time)
+        except Exception:
+            return False
+        if not math.isfinite(now):
+            return False
+
+        # Den selbst vorangestellten kopf aus dem vorframe wieder entfernen,
+        # damit unten immer auf den UNVERAENDERTEN stuetzstellen gesucht wird
+        # (und die liste nicht bei jedem frame um einen punkt waechst).
+        if getattr(self, '_hold_synthetic_head', False) and points.shape[0] >= 3:
+            points = points[1:]
+
+        times = points[:, 2]
+        if not (math.isfinite(float(times[0])) and math.isfinite(float(times[-1]))):
+            return False
+        # Reicht die kurve zeitlich ueberhaupt noch in die zukunft?
+        if float(times[-1]) <= now:
+            return False
+
+        # Erster punkt, der noch in der zukunft liegt. Die zeitspalte ist
+        # monoton steigend, also genuegt eine binaere suche.
+        drop = int(np.searchsorted(times, now, side='left'))
+        drop = max(0, min(drop, points.shape[0] - 2))
+
+        sx = float(ship.position.x)
+        sy = float(ship.position.y)
+
+        # DIE KURVE WIRD VORN ANGESTUECKELT, NICHT VERBOGEN.
+        #
+        # Stuetzstellen lassen sich nur GANZ wegwerfen -- eine halbe gibt es
+        # nicht. Vorher blieb deshalb als kopf immer die naechste stuetzstelle
+        # VOR dem schiff stehen, und die abklingende kopfkorrektur zog die
+        # ersten punkte um diesen rest zurueck. Der rest laeuft zwischen zwei
+        # verbrauchten stuetzstellen von 0 auf eine volle punktweite und
+        # springt dann zurueck: ein saegezahn mit der amplitude EINER
+        # PUNKTWEITE (gemessen kopfabstand 0.00 -> 1.00 stuetzweite). Weil
+        # das eine weltlaenge ist und der zoom welt und linie gleich
+        # vergroessert, sah es auf JEDER zoomstufe gleich aus -- die linie
+        # rueckte sichtbar in stufen statt stetig vor.
+        #
+        # Richtig ist, dem unveraenderten rest einfach die aktuelle
+        # schiffsposition als neuen kopf voranzustellen. Das erste segment
+        # ist dann ein echtes teilstueck, das stetig kuerzer wird, bis die
+        # naechste stuetzstelle verbraucht ist. Kein punkt hinter dem kopf
+        # bewegt sich dabei ueberhaupt.
+        tail = points[drop:] if drop > 0 else points
+        head = np.empty((1, points.shape[1]), dtype=np.float64)
+        head[0, 0] = sx
+        head[0, 1] = sy
+        head[0, 2] = now
+        if points.shape[1] > 3:
+            # Der kopf IST das schiff -- also auch seine tangente. Frueher
+            # wurde die der naechsten stuetzstelle uebernommen; damit haette
+            # das erste (stetig kuerzer werdende) teilstueck eine tangente
+            # getragen, die zur falschen stelle der bahn gehoert.
+            head[0, 3] = float(getattr(ship.velocity, 'x', 0.0))
+            head[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
+        points = np.concatenate((head, tail), axis=0)
+
+        # Immer uebernehmen, auch wenn gleich darauf abgebrochen wird: sonst
+        # rastet der halt ein. Bricht er ab, bevor der schnitt steht, bleibt
+        # die kurve stehen, waehrend das schiff weiterfliegt -- der
+        # kopfabstand waechst dann jeden frame weiter (gemessen 6.4e5 ->
+        # 3.2e6 m in fuenf frames) und die abbruchbedingung ist von da an
+        # dauerhaft erfuellt.
+        self.points = points
+        self._hold_synthetic_head = True
+        self._invalidate_derived_caches(soft=True)
+
+        # HINTEN ANSTUECKELN, was vorn verbraucht wurde -> der horizont
+        # bleibt konstant und die linie wandert mit, statt zu schrumpfen und
+        # bei jeder auffrischung zurueckzuspringen.
+        if drop > 0:
+            budget = self._get_target_point_cap()
+            missing = int(budget) - int(self.points.shape[0])
+            if missing > 0:
+                self._hold_extend_tail(missing)
+            points = self.points
+
+        target_points = self._get_target_point_cap()
+        remaining = points.shape[0]
+        refresh_at = max(4, int(target_points * float(getattr(
+            self, 'hold_refresh_fraction', 0.25))))
+        if remaining < refresh_at:
+            # Vorrat zu klein -> normaler weg rechnet nach (und der halt
+            # greift danach wieder). Das ist die failsafe-schwelle.
+            self._hold_synthetic_head = False
+            return False
+
+        # Weicht das schiff von der gehaltenen kurve ab, stimmt sie nicht
+        # mehr (schub, sprung, rahmenwechsel) -- dann lieber neu rechnen als
+        # eine falsche kurve weiterzeichnen. Gemessen wird gegen die ZWEITE
+        # stuetzstelle, denn die erste ist ja das schiff selbst. Regulaer
+        # liegt es hoechstens eine punktweite davor; der spielraum darueber
+        # faengt ab, dass welt und predictor die planeten nicht voellig
+        # gleich propagieren (gemessen ~37 m je frame).
+        if points.shape[0] >= 3:
+            span = math.hypot(float(points[2, 0]) - float(points[1, 0]),
+                              float(points[2, 1]) - float(points[1, 1]))
+            gap = math.hypot(float(points[1, 0]) - sx,
+                             float(points[1, 1]) - sy)
+            if gap > max(span * 4.0, 1.0):
+                self._hold_synthetic_head = False
+                return False
+
+        return True
+
+    def _hold_extend_tail(self, wanted):
+        """Hinten so viele punkte anstueckeln, wie vorn verbraucht wurden.
+
+        Damit bleibt der HORIZONT konstant. Ohne das wird die gehaltene kurve
+        nur von vorn aufgebraucht, schrumpft also sichtbar, bis die
+        auffrischung sie schlagartig wieder auf volle laenge bringt -- die
+        linie pulsiert dann im takt der auffrischung, statt gleichmaessig
+        mitzuwandern.
+
+        Gerechnet wird als FORTSETZUNG desselben laufs: derselbe
+        schnappschuss, derselbe integrator-zustand, dieselbe schrittweite
+        (siehe _resume_context und die init_*-parameter des kernels). Die
+        angehaengten punkte sind deshalb genau die, die eine von vornherein
+        laengere rechnung geliefert haette -- kein bruch an der nahtstelle.
+
+        Kostet nur die tatsaechlich verbrauchten punkte (bei 7d/s rund 170 je
+        frame) statt der vollen neuberechnung von 10 000.
+        """
+        wanted = int(wanted)
+        if wanted <= 0 or np is None:
+            return 0
+        context = getattr(self, '_resume_context', None)
+        if not context:
+            return 0
+        if _compute_distance_points_rkn_numba is None:
+            return 0
+        points = self.points
+        if not isinstance(points, np.ndarray) or points.shape[0] < 2:
+            return 0
+
+        snapshot = context['snapshot']
+        px, py, vx, vy = context['state']
+        if not all(math.isfinite(v) for v in (px, py, vx, vy)):
+            return 0
+
+        try:
+            out, used, stats = _compute_distance_points_rkn_numba(
+                px, py, vx, vy,
+                0,
+                float(snapshot.get("ref_px", 0.0)),
+                float(snapshot.get("ref_py", 0.0)),
+                snapshot["body_x"], snapshot["body_y"],
+                snapshot["body_m"], snapshot["body_fixed"],
+                context['body_scripted'], context['body_a'], context['body_e'],
+                context['body_theta'], context['body_arg'], context['body_parent'],
+                snapshot["G"], context['base_dt'], snapshot["precision"],
+                int(wanted) + 1, int(max(10000, (wanted + 1) * 100)),
+                context['min_dt'], context['max_dt'],
+                context['rtol'], context['atol_pos'], context['atol_vel'],
+                context['safety'], context['min_factor'], context['max_factor'],
+                context['max_rejects'],
+                context['use_time_dependent_bodies'], context['ref_index'],
+                context['kernel_t'], context['accumulated'], context['proposed_dt'],
+                1 if getattr(self, 'use_body_memo', True) else 0,
+            )
+        except Exception:
+            return 0
+
+        used = int(used)
+        if used <= 1:
+            return 0
+
+        # out[0] ist der fortsetz-punkt selbst und steht schon in der liste.
+        addition = out[1:used].copy()
+        addition[:, 2] += float(snapshot.get("sim_time", 0.0))
+        self.points = np.concatenate((points, addition), axis=0)
+
+        context['state'] = (float(stats[7]), float(stats[8]),
+                            float(stats[9]), float(stats[10]))
+        context['accumulated'] = float(stats[11])
+        context['proposed_dt'] = float(stats[12])
+        context['kernel_t'] = float(stats[13])
+        self._invalidate_derived_caches(soft=True)
+        return int(addition.shape[0])
+
+    def _apply_head_taper(self, points, sx, sy, now, dx, dy, dt):
+        """Kopf ans schiff ziehen -- ABKLINGEND ueber die ersten punkte.
+
+        Der unterschied zu `_anchor_first_point` ist der ganze punkt der
+        sache: dort wird die KOMPLETTE kurve starr um (dx, dy) verschoben,
+        hier klingt die korrektur ueber `hold_taper_points` punkte auf null
+        ab. Das fernfeld bleibt also stehen, wo es steht.
+        """
+        taper = int(max(1, min(int(getattr(self, 'hold_taper_points', 64)),
+                               points.shape[0])))
+        weights = np.zeros(points.shape[0], dtype=np.float64)
+        weights[:taper] = np.linspace(1.0, 0.0, taper, endpoint=False)
+
+        points[:, 0] += dx * weights
+        points[:, 1] += dy * weights
+        if points.shape[1] >= 3:
+            points[:, 2] += dt * weights
+        points[0, 0] = sx
+        points[0, 1] = sy
+        if points.shape[1] >= 3:
+            points[0, 2] = now
+
+    def _invalidate_derived_caches(self, soft=False):
+        """Von der punkteliste abgeleitete zwischenergebnisse verwerfen.
+
+        soft=True heisst: die kurve wurde nur vorn verbraucht / hinten
+        verlaengert / am kopf angeschmiegt (zeitraffer-halt). Die apsis-
+        marker der verbliebenen punkte sind dann weiterhin gueltig und
+        get_apsis_markers() darf sie gefiltert weiterreichen, statt neu zu
+        scannen.
+        """
+        for attr in ('_apsis_cache_key', '_apsis_cache_value'):
+            if hasattr(self, attr):
+                try:
+                    setattr(self, attr, None)
+                except Exception:
+                    pass
+        self._apsis_soft_stale = bool(soft)
+
+    def _horizon_spacing_floor(self):
+        """Feinste punktdichte, die den HORIZONT noch traegt -- oder None.
+
+        Die kernel setzt punkte in festem ABSTAND (`_effective_precision`)
+        und hoechstens `num_points` viele. Der wirklich gezeichnete bogen
+        ist damit `num_points * spacing`. Sobald das kleiner als `length`
+        wird, endet die linie einfach vorzeitig -- ein engerer punktabstand
+        VERKUERZT also die vorhersage.
+
+        Der bodenwert `length / num_points` ist genau der abstand, bei dem
+        das punktbudget den horizont gerade noch ausfuellt.
+        """
+        if self.length is None:
+            return None
+        try:
+            budget = int(self.num_points)
+            horizon = float(self.length)
+        except Exception:
+            return None
+        if budget <= 0 or not (horizon > 0.0):
+            return None
+        return horizon / float(budget)
+
     def _effective_precision(self):
         effective = float(self.precision)
         if self.auto_precision_from_zoom and self._view_scale is not None:
             zoom_precision = self.target_screen_step_px / max(self._view_scale, 1e-30)
             effective = min(effective, max(self.min_precision, zoom_precision))
+
+        # HORIZONT VOR PUNKTDICHTE. Ohne diese schranke frisst das zoom-
+        # abhaengige verfeinern den horizont auf: gemessen blieb bei
+        # view_scale 2e-5 noch 10 % der vorhersage uebrig, bei 2e-4 noch
+        # 1 %. Auf dem schirm sieht das aus, als wuerde die linie an der
+        # ersten bildkante abgeschnitten und komme nie zurueck -- samt
+        # verschwundener Ap/Pe-marker und leerem CLOSEST/T-CA, weil beide
+        # ueber dieselbe punkteliste laufen.
+        #
+        # Bei erreichtem budget wird also GROEBER gezeichnet statt KUERZER.
+        # Das ist die richtige seite des tauschs: die groebere teilung fehlt
+        # nur dort, wo die bahn ohnehin kaum kruemmt (der bogenfehler einer
+        # sehne waechst mit c^2/8R und ist im fernfeld weit unter einem
+        # pixel), waehrend ein fehlender horizont die anzeige unbrauchbar
+        # macht. Mehr naehe-detail gibt es ueber ein groesseres
+        # `predictor.num_points`, nicht ueber einen kuerzeren horizont.
+        floor = self._horizon_spacing_floor()
+        if floor is not None and effective < floor:
+            effective = floor
         return effective
 
     def _serialize_bodies_numba(self, world):
@@ -3064,10 +3949,35 @@ class Predictor:
         # decouple holds.
         eff_max_dt = float(self.rkn_max_dt)
         if self.rkn_adaptive_far_maxdt and float(self.rkn_far_field_target_steps) > 0.0:
-            speed = math.hypot(float(ship.velocity.x), float(ship.velocity.y))
             horizon_arc = float(max_points) * float(effective_precision)
-            if speed > 1.0 and horizon_arc > 0.0:
-                desired = (horizon_arc / speed) / float(self.rkn_far_field_target_steps)
+            # Wieviel ZEIT deckt dieser bogen ab? Genau das braucht die
+            # schrittzahl-schaetzung -- und genau das darf NICHT aus der
+            # momentangeschwindigkeit kommen. Auf einer exzentrischen bahn ist
+            # sie im perihel das MAXIMUM und im aphel das MINIMUM der ganzen
+            # bahn, der fehler geht also in beide richtungen und ausgerechnet
+            # im perihel nach unten: die schaetzung faellt zu kurz aus, die
+            # schrittweite wird zu klein gedeckelt und der lauf kostet ein
+            # vielfaches. Gemessen auf Pe 29 Gm / Ap 129 Gm bei 32x horizont:
+            # 6663 schritte / 256 ms im perihel gegen 1160 / 43 ms im aphel --
+            # dieselbe bahn, derselbe bogen, 6x. Genau das ist das stocken der
+            # linie am perihel (die auffrischung faellt unter die bildrate)
+            # und genau deshalb ist am aphel nichts davon zu merken.
+            #
+            # Die ehrliche groesse ist die MITTLERE inverse geschwindigkeit
+            # ueber den bogen, und die kennt der letzte lauf bereits exakt:
+            # seine zeitspanne durch seine bogenlaenge. Als verhaeltnis
+            # gespeichert ueberlebt sie auch ein '+'/'-' auf den horizont.
+            # Rueckkopplung ohne ruecklauf: die zeitspanne ist eine eigenschaft
+            # der bahn, nicht der schrittweite -- ein groesseres max_dt
+            # verandert sie nicht, es gibt also keinen regelkreis.
+            time_per_arc = float(getattr(self, "_horizon_time_per_arc", 0.0) or 0.0)
+            if time_per_arc <= 0.0:
+                # Erster lauf: nichts gemessen, also der alte schaetzer.
+                speed = math.hypot(float(ship.velocity.x), float(ship.velocity.y))
+                if speed > 1.0:
+                    time_per_arc = 1.0 / speed
+            if time_per_arc > 0.0 and horizon_arc > 0.0:
+                desired = (horizon_arc * time_per_arc) / float(self.rkn_far_field_target_steps)
                 eff_max_dt = max(eff_max_dt, min(desired, float(self.rkn_max_dt_ceiling)))
 
         snapshot = {
@@ -3123,6 +4033,14 @@ class Predictor:
             snapshot["view_scale"] = float(self._view_scale) if self._view_scale is not None else None
         except Exception:
             snapshot["view_scale"] = None
+        try:
+            snapshot["eff_precision"] = float(self._effective_precision())
+        except Exception:
+            snapshot["eff_precision"] = None
+        # Muss ueber den schnappschuss laufen, nicht ueber self: der kernel
+        # laeuft im worker-thread und darf den schalter nicht mitten im lauf
+        # wechseln sehen.
+        snapshot["use_body_memo"] = bool(getattr(self, "use_body_memo", True))
         body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
         snapshot["body_x"] = body_x
         snapshot["body_y"] = body_y
@@ -3153,9 +4071,38 @@ class Predictor:
         # async worker and the synchronous paths). See last_compute_ms in __init__.
         _t0 = time.perf_counter()
         try:
-            return self._compute_from_snapshot_impl(snapshot)
+            result = self._compute_from_snapshot_impl(snapshot)
+            self._record_horizon_time_per_arc(result, snapshot)
+            return result
         finally:
             self.last_compute_ms = (time.perf_counter() - _t0) * 1000.0
+
+    def _record_horizon_time_per_arc(self, result, snapshot):
+        """Mittlere inverse geschwindigkeit ueber den horizont mitschreiben.
+
+        Einzige quelle fuer die schrittweiten-deckelung in `_make_snapshot`
+        (dort steht, warum die momentangeschwindigkeit dafuer untauglich ist).
+        Laeuft auf dem worker-thread; es ist eine einzelne float-zuweisung,
+        also unter der GIL atomar -- der hauptthread liest nie einen halben
+        wert. Nur volle laeufe zaehlen: eine kurze fortsetzung (der
+        schwanz-anbau im zeitraffer) misst nur ihr eigenes stueck bahn und
+        wuerde die mittelung wieder auf einen momentanwert zusammenziehen.
+        """
+        try:
+            points = result.get("points") if isinstance(result, dict) else None
+            if points is None or len(points) < 3:
+                return
+            precision = float(snapshot.get("precision", 0.0) or 0.0)
+            max_points = int(snapshot.get("max_points", 0) or 0)
+            n = int(len(points))
+            if precision <= 0.0 or max_points <= 0 or n < max(3, max_points // 2):
+                return
+            arc = float(n - 1) * precision
+            span = float(points[-1, 2]) - float(points[0, 2])
+            if arc > 0.0 and math.isfinite(span) and span > 0.0:
+                self._horizon_time_per_arc = span / arc
+        except Exception:
+            pass
 
     def _compute_from_snapshot_impl(self, snapshot):
         mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", "rkn"))
@@ -3290,7 +4237,42 @@ class Predictor:
                 max_rejects,
                 use_time_dependent_bodies,
                 ref_index,
+                float(snapshot.get("resume_t", 0.0)),
+                float(snapshot.get("resume_accumulated", 0.0)),
+                float(snapshot.get("resume_proposed_dt", 0.0)),
+                1 if snapshot.get("use_body_memo", True) else 0,
             )
+            # Alles aufheben, was noetig ist, um GENAU HIER weiterzurechnen.
+            # Entscheidend ist, dass der SCHNAPPSCHUSS mitgehalten wird: die
+            # koerper-arrays sind auf seine epoche bezogen und werden im
+            # kernel analytisch fortgeschrieben. Mit einem frischeren
+            # schnappschuss weiterzurechnen waere ein anderer lauf.
+            self._resume_context = {
+                'snapshot': snapshot,
+                'base_dt': base_dt,
+                'min_dt': min_dt,
+                'max_dt': max_dt,
+                'rtol': rtol,
+                'atol_pos': atol_pos,
+                'atol_vel': atol_vel,
+                'safety': safety,
+                'min_factor': min_factor,
+                'max_factor': max_factor,
+                'max_rejects': max_rejects,
+                'body_scripted': body_scripted,
+                'body_a': body_a,
+                'body_e': body_e,
+                'body_theta': body_theta,
+                'body_arg': body_arg,
+                'body_parent': body_parent,
+                'use_time_dependent_bodies': use_time_dependent_bodies,
+                'ref_index': ref_index,
+                'state': (float(rkn_stats[7]), float(rkn_stats[8]),
+                          float(rkn_stats[9]), float(rkn_stats[10])),
+                'accumulated': float(rkn_stats[11]),
+                'proposed_dt': float(rkn_stats[12]),
+                'kernel_t': float(rkn_stats[13]),
+            }
         elif mode == "aspi" or mode == "aspi_rk4_fallback":
             min_dt = float(snapshot.get("aspi_min_dt", 1.0))
             max_dt = float(snapshot.get("aspi_max_dt", 120.0))
@@ -3390,7 +4372,7 @@ class Predictor:
         start_ts = time.time()
         try:
             if self.num_points <= 0:
-                self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+                self.points = _empty_points()
                 self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
                 self.initialized = True
                 return
@@ -3424,7 +4406,10 @@ class Predictor:
             )
 
             states = out[:int(used)].copy()
-            new_points = states[:, :3].copy() if (np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0) else np.empty((0, 3), dtype=np.float64)
+            # Alle fuenf spalten uebernehmen (frueher [:, :3]): die
+            # geschwindigkeiten sind echte RK4-werte an den stuetzstellen und
+            # taugen als tangente fuer die zeichenzeit-verfeinerung.
+            new_points = states.copy() if (np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0) else _empty_points()
 
             try:
                 old_points = self.points if (np is not None and isinstance(self.points, np.ndarray)) else np.array(self.points, dtype=np.float64) if self.points is not None else None
@@ -3442,7 +4427,7 @@ class Predictor:
             if np is not None and isinstance(states, np.ndarray) and states.shape[0] > 0:
                 self.points = new_points.copy()
             else:
-                self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+                self.points = _empty_points()
             self.initialized = True
             self._last_swapped_snapshot = snapshot
         finally:
@@ -3507,7 +4492,7 @@ class Predictor:
             return 0
 
         self._roll_states = np.concatenate((self._roll_states, to_add), axis=0)
-        self.points = self._roll_states[:, :3].copy()
+        self.points = self._roll_states.copy()
         added = int(to_add.shape[0])
         try:
             self._computed_since_last_update += added
@@ -3539,12 +4524,147 @@ class Predictor:
             self._roll_states[0, 3] = float(ship.velocity.x)
             self._roll_states[0, 4] = float(ship.velocity.y)
 
-    def _submit_async_compute(self, ship, world, max_points):
+    def _async_jobs_in_flight(self):
+        """Wie viele auftraege rechnen gerade?
+
+        `_pending_futures` enthaelt auch bereits FERTIGE futures, die nur noch
+        nicht eingewechselt wurden -- die zaehlen hier nicht als "in arbeit".
+        """
+        count = 0
+        pending = getattr(self, "_pending_futures", None)
+        if pending:
+            for _job_id, fut in list(pending):
+                try:
+                    if not fut.done():
+                        count += 1
+                except Exception:
+                    count += 1
+        if count == 0:
+            pf = getattr(self, "_pending_future", None)
+            if pf is not None and not any(pf is f for _j, f in (pending or [])):
+                try:
+                    if not pf.done():
+                        count += 1
+                except Exception:
+                    count += 1
+        return count
+
+    def _async_job_in_flight(self):
+        """Rechnet ueberhaupt ein auftrag? (bequemlichkeit fuer altes verhalten)"""
+        return self._async_jobs_in_flight() > 0
+
+    def _pipeline_depth_cap(self):
+        """Obergrenze: konfiguration und verfuegbare kerne."""
+        cap = int(max(1, getattr(self, "thrust_pipeline_depth", 1)))
+        try:
+            cores = int(os.cpu_count() or 2)
+        except Exception:
+            cores = 2
+        # Einen kern fuer haupt- und darstellungs-thread frei lassen.
+        return max(1, min(cap, max(1, cores - 1)))
+
+    def _target_pipeline_depth(self):
+        """So viele gleichzeitige laeufe, dass je BILD eines fertig wird.
+
+        Die dauer einer vorhersage laesst sich nicht unter die bildzeit
+        druecken -- sie haengt am horizont (17 ms bei der grundeinstellung,
+        ~74 ms bei vierfachem horizont) und ein bild dauert 11 ms. Wie oft
+        sich die linie erneuert, haengt aber nicht an dieser dauer, sondern am
+        DURCHSATZ: bei `n` zeitversetzt gestarteten laeufen wird alle
+        rechenzeit/n ein ergebnis fertig. Gebraucht werden also
+
+            n = rechenzeit / bildzeit
+
+        laeufe (aufgerundet, plus einer als puffer gegen schwankungen), damit
+        in jedem bild genau einer ankommt. Eine feste zahl kann das nicht
+        leisten: sie ist beim kurzen horizont verschwenderisch und beim langen
+        zu klein -- genau das war bei vierfachem horizont noch sichtbar
+        (3 laeufe / 74 ms = 40 erneuerungen je sekunde bei 90 bildern).
+
+        Die bildzeit misst der predictor selbst am abstand seiner eigenen
+        aufrufe; die rechenzeit ist der letzte messwert aus
+        `_compute_from_snapshot`.
+        """
+        cap = self._pipeline_depth_cap()
+        if cap <= 1:
+            self._pipeline_depth_used = 1
+            return 1
+
+        frame_ms = float(getattr(self, "_update_interval_ms", 0.0) or 0.0)
+        compute_ms = float(getattr(self, "last_compute_ms", 0.0) or 0.0)
+        if frame_ms <= 0.0 or compute_ms <= 0.0:
+            # Noch nichts gemessen: bescheiden anfangen, nicht mit voller
+            # breitseite -- der erste messwert kommt schon im naechsten bild.
+            depth = min(2, cap)
+        else:
+            depth = int(math.ceil(compute_ms / frame_ms)) + 1
+            depth = max(1, min(cap, depth))
+        self._pipeline_depth_used = depth
+        return depth
+
+    def _request_thrust_recompute(self, ship, world):
+        """Schub-neuberechnung ANFORDERN statt sie im hauptthread zu erzwingen.
+
+        Waehrend eines brennmanoevers reisst der schub die geschwindigkeit in
+        JEDEM frame ueber die toleranz. Der alte weg hat daraufhin jedes mal
+        `_compute_full` synchron laufen lassen: gemessen mit dem vollen
+        sonnensystem **0.12 ms im gleitflug gegen 59 ms unter schub**, also
+        ~14 fps, solange die pfeiltaste gedrueckt ist. Ausserdem wurde die
+        laufende asynchrone rechnung jedes mal verworfen und die linie
+        geleert -- unter dauerschub kam also nie ein ergebnis durch.
+
+        Statt dessen wird die anforderung ZUSAMMENGEFASST: laeuft schon ein
+        auftrag, passiert nichts (er ist ohnehin schon aktueller als die
+        gezeichnete linie); laeuft keiner, wird genau einer abgeschickt. Die
+        alte linie bleibt sichtbar und wird wie immer per
+        `_anchor_first_point` ans schiff geheftet, bis das neue ergebnis da
+        ist. Damit erneuert sich die vorhersage waehrend des brennens etwa
+        alle 60 ms (statt gar nicht) und der hauptthread bleibt frei.
+
+        Rueckgabe: True = zusammengefasst, der aufrufer laesst die vorhandene
+        linie stehen. False = der aufrufer muss den alten, harten weg gehen
+        (kein async, rolling-modus, oder es gibt gar keine linie, die man
+        behalten koennte -- dann gilt weiterhin die zusicherung, dass
+        update() synchron eine baut).
+        """
+        if world is None or ship is None:
+            return False
+        if self.rolling_mode or not self.async_compute:
+            return False
+        if self.num_points <= 0:
+            return False
+        try:
+            if self._points_count() <= 0:
+                return False
+        except Exception:
+            return False
+
+        # Weil je bild hoechstens einer dazukommt, starten die laeufe
+        # automatisch um eine bildzeit versetzt -- und liefern deshalb auch um
+        # eine bildzeit versetzt ab, statt gebuendelt.
+        depth = self._target_pipeline_depth()
+        if self._async_jobs_in_flight() < depth:
+            try:
+                self._submit_async_compute(
+                    ship, world, self._get_target_point_cap(), max_in_flight=depth,
+                )
+            except Exception:
+                return False
+        return True
+
+    def _submit_async_compute(self, ship, world, max_points, max_in_flight=1):
         pending = getattr(self, "_pending_futures", [])
 
-        if self._single_flight:
+        if self._single_flight and max_in_flight <= 1:
             if len(pending) > 0:
                 return
+        elif self._async_jobs_in_flight() >= max_in_flight:
+            # Gezaehlt wird, was RECHNET. `len(pending)` waere falsch: darin
+            # stehen auch schon fertige, nur noch nicht eingewechselte
+            # ergebnisse, und die haben keinen worker mehr belegt. Sie
+            # mitzuzaehlen haette den nachschub genau in den bildern
+            # blockiert, in denen gerade eines fertig geworden ist.
+            return
 
         snapshot = self._make_snapshot(ship, world, max_points)
         self._debug_integrator_mode("submit", snapshot)
@@ -3578,10 +4698,11 @@ class Predictor:
             pass
 
         # Ersetze Queue statt endlos anzuhängen
-        if self._single_flight:
+        if self._single_flight and max_in_flight <= 1:
             self._pending_futures = [(job_id, fut)]
         else:
-            self._pending_futures.append((job_id, fut))
+            pending.append((job_id, fut))
+            self._pending_futures = pending
 
         self._next_job_id += 1
         self._jobs_submitted += 1
@@ -3600,23 +4721,72 @@ class Predictor:
             finished_future = None
             finished_job_id = None
 
-            if len(pending) > 2:
-
-                pending[:] = pending[-2:]
-
-            # find first completed future
+            # GLEICHMAESSIG einwechseln -- ein ergebnis je bild, das AELTESTE
+            # zuerst.
+            #
+            # Immer das neueste zu nehmen liegt nahe (es ist ja das aktuellste),
+            # macht das nachziehen aber ruckartig: die laeufe werden zwar
+            # gleichmaessig gestartet, aber nicht ganz gleichmaessig fertig.
+            # In einem bild wird keines fertig, im naechsten zwei -- und
+            # "neuestes zuerst" macht daraus einen stillstand gefolgt von einem
+            # DOPPELSCHRITT. Gemessen unter vollschub an der periapsis: der
+            # sprung der kurvenform ist in so einem bild doppelt so gross wie in
+            # seinen nachbarn, und das alter des gezeigten zustands faellt dabei
+            # von 6 auf 4 sekunden. Rund 2 % der bilder waren betroffen, also
+            # etwa jede sekunde eines -- das ist das stockende, "wie hohe
+            # netzwerk-latenz" wirkende nachziehen. Eine gleichmaessig zu
+            # langsame bildrate sieht man nicht, einen ausreisser alle 90 bilder
+            # schon.
+            #
+            # Die abhilfe ist dieselbe wie bei genau diesem netzwerk-problem:
+            # ein kleiner puffer, aus dem in gleichmaessigen schritten
+            # entnommen wird. Schwankende ankunft wird so zu gleichmaessiger
+            # ausgabe, bezahlt mit etwas mehr, aber KONSTANTER verzoegerung.
+            # `swap_backlog_max` begrenzt, wie viele fertige ergebnisse warten
+            # duerfen; darueber hinaus wird uebersprungen, damit die
+            # verzoegerung nicht davonlaeuft.
+            done_entries = []
             for idx, (jid, fut) in enumerate(pending):
                 try:
                     done = fut.done()
                 except Exception:
                     done = False
                 if done:
-                    finished_future = fut
-                    finished_job_id = jid
-                    pending.pop(idx)
-                    break
+                    done_entries.append((jid, idx))
 
-            if finished_future is None:
+            if not done_entries:
+                return False
+
+            done_entries.sort()
+            backlog_max = int(max(0, getattr(self, "swap_backlog_max", 1)))
+            # So weit vorspulen, dass hoechstens `backlog_max` ergebnisse
+            # zurueckbleiben -- im normalfall ist das 0 und es wird schlicht
+            # das aelteste genommen.
+            skip = max(0, len(done_entries) - 1 - backlog_max)
+            finished_job_id, newest_idx = done_entries[skip]
+            finished_future = pending[newest_idx][1]
+
+            keep = []
+            for idx, entry in enumerate(pending):
+                if idx == newest_idx:
+                    continue
+                jid, fut = entry
+                try:
+                    done = fut.done()
+                except Exception:
+                    done = False
+                if done and jid < finished_job_id:
+                    continue
+                keep.append(entry)
+            pending[:] = keep
+
+            # Ein ergebnis, das AELTER ist als die gezeichnete linie, darf sie
+            # nicht ersetzen -- sonst laeuft die vorhersage rueckwaerts.
+            try:
+                last_swapped = int(getattr(self, "_last_swapped_job_id", -1))
+            except Exception:
+                last_swapped = -1
+            if finished_job_id is not None and finished_job_id < last_swapped:
                 return False
 
         try:
@@ -3678,13 +4848,25 @@ class Predictor:
                 allowed_pos = float(self.snapshot_position_abs_tol)
 
 
-                snap_view = snapshot.get("view_scale", None)
+                # Veraltet ist ein ergebnis erst, wenn der zoom die WIRKSAME
+                # punktdichte veraendert hat -- der rohe view-scale-vergleich
+                # verwarf ergebnisse auch dann, wenn die dichte durch
+                # _horizon_spacing_floor() ohnehin festgeklemmt ist und die
+                # linie identisch waere (siehe set_view_scale).
                 is_stale_view = False
                 try:
-                    if snap_view is not None and self._view_scale is not None:
-                        rel_view = abs(snap_view - self._view_scale) / max(abs(self._view_scale), 1e-30)
-                        if rel_view > float(self.snapshot_view_rel_tol):
+                    snap_eff = snapshot.get("eff_precision", None)
+                    if snap_eff is not None:
+                        cur_eff = float(self._effective_precision())
+                        rel_eff = abs(float(snap_eff) - cur_eff) / max(abs(cur_eff), 1e-30)
+                        if rel_eff > float(self.snapshot_view_rel_tol):
                             is_stale_view = True
+                    else:
+                        snap_view = snapshot.get("view_scale", None)
+                        if snap_view is not None and self._view_scale is not None:
+                            rel_view = abs(snap_view - self._view_scale) / max(abs(self._view_scale), 1e-30)
+                            if rel_view > float(self.snapshot_view_rel_tol):
+                                is_stale_view = True
                 except Exception:
                     is_stale_view = False
 
@@ -3812,7 +4994,7 @@ class Predictor:
             return
 
         if self.num_points <= 0:
-            self.points = np.empty((0, 3), dtype=np.float64) if np is not None else []
+            self.points = _empty_points()
             self.initialized = True
             return
 
@@ -3876,6 +5058,24 @@ class Predictor:
         self._anchor_first_point(ship, world)
 
     def update(self, ship, world):
+        # Bildzeit mitschreiben: update() laeuft genau einmal je bild, der
+        # abstand zweier aufrufe IST also die bildzeit. Sie bestimmt, wie
+        # viele vorhersagen gleichzeitig laufen muessen, damit je bild eine
+        # fertig wird (_target_pipeline_depth). Gleitender mittelwert, weil
+        # einzelne bilder stark schwanken; ausreisser (fenster verschoben,
+        # pause) werden verworfen.
+        try:
+            now_ts = time.perf_counter()
+            last_ts = self._last_update_ts
+            self._last_update_ts = now_ts
+            if last_ts is not None:
+                gap_ms = (now_ts - last_ts) * 1000.0
+                if 0.05 <= gap_ms <= 250.0:
+                    prev = float(self._update_interval_ms or 0.0)
+                    self._update_interval_ms = gap_ms if prev <= 0.0 else (prev * 0.9 + gap_ms * 0.1)
+        except Exception:
+            pass
+
         try:
             self._computed_since_last_update = 0
         except Exception:
@@ -3971,6 +5171,32 @@ class Predictor:
             self._computed_since_last_update = 0
             return
 
+        # ------------------------------------------------ zeitraffer-halt
+        # Der halt uebernimmt den frame VOLLSTAENDIG -- er laeuft vor beiden
+        # rechenwegen und kehrt in jedem fall zurueck. Das ist absicht: der
+        # asynchrone weg wuerde sonst weiterhin jeden frame ein mehrere
+        # frames altes ergebnis einwechseln und `_anchor_first_point`
+        # darauf loslassen, und genau diese starre verschiebung einer
+        # veralteten kurve ist das zittern, das der halt beseitigen soll.
+        #
+        # Aufgefrischt wird EINMAL SYNCHRON, wenn der vorrat zur neige geht
+        # (siehe _hold_advance). Das kostet ~6 ms und faellt bei 7d/s etwa
+        # alle 40 frames an -- deterministisch, statt jeden frame ein
+        # bisschen.
+        if self._hold_active():
+            if not self._hold_advance(ship, world):
+                self._cancel_pending_job()
+                self._compute_full(ship, world)
+                self._anchor_first_point(ship, world)
+                self._view_scale_changed = False
+            if self.debug and not getattr(self, "_suppress_dbg_computed", False):
+                try:
+                    print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update} (hold)")
+                except Exception:
+                    pass
+            self._computed_since_last_update = 0
+            return
+
         if not self.async_compute:
             if not self.initialized:
                 self.initialize(ship, world)
@@ -3985,6 +5211,11 @@ class Predictor:
             if self.recompute_every_update:
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship, world)
+                # Die zoom-anforderung ist mit dem vollen neuaufbau erfuellt.
+                # Nur der asynchrone weg hat das flag bisher zurueckgesetzt;
+                # synchron blieb es stehen und haette den zeitraffer-halt
+                # dauerhaft blockiert.
+                self._view_scale_changed = False
                 if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
                         print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -3998,6 +5229,7 @@ class Predictor:
             if self._points_count() < target_points:
                 self._compute_full(ship, world)
             self._anchor_first_point(ship, world)
+            self._view_scale_changed = False
             if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                 try:
                     print(f"PRED_DBG_COMPUTED: computed={self._computed_since_last_update}")
@@ -4036,7 +5268,17 @@ class Predictor:
                 cur_speed = math.hypot(cur_vx, cur_vy)
                 allowed_speed = max(self.snapshot_velocity_abs_tol, self.snapshot_velocity_rel_tol * max(cur_speed, 1.0))
 
-                if delta_speed >= allowed_speed:
+                # Dieselbe zusammenfassung wie in
+                # _handle_trajectory_branch_change, nur gegen den zuletzt
+                # EINGEWECHSELTEN zustand gemessen. Dieser melder ist der,
+                # der die linie nach dem brennschluss wieder exakt macht:
+                # solange die gezeichnete kurve noch zum vor-schub-zustand
+                # gehoert, fordert er weiter nach, bis ein passendes ergebnis
+                # eingewechselt ist -- dann liegt dv wieder in der toleranz
+                # und er verstummt von selbst.
+                if delta_speed >= allowed_speed and self._request_thrust_recompute(ship, world):
+                    pass
+                elif delta_speed >= allowed_speed:
                     old_version = int(self._trajectory_version)
                     self._trajectory_version = old_version + 1
                     if self.debug:
@@ -4172,6 +5414,27 @@ class Predictor:
         if cache_key == self._apsis_cache_key:
             return self._apsis_markers
 
+        # Zeitraffer-halt: nur weich invalidiert (vorn verbraucht, hinten
+        # angestueckelt, kopf angeschmiegt) -- die uebrigen punkte stehen
+        # bit-identisch, also stehen auch ihre marker. Innerhalb des
+        # rescan-fensters nur die abgelaufenen marker herausfiltern statt
+        # alle punkte neu zu scannen; das lief sonst ZWEIMAL pro frame
+        # (HUD-telemetrie und renderer sehen je ein anderes array).
+        now_ts = time.perf_counter()
+        if (getattr(self, '_apsis_soft_stale', False)
+                and bool(getattr(self, 'hold_enabled', False))
+                and isinstance(self._apsis_markers, np.ndarray)
+                and (now_ts - float(getattr(self, '_apsis_last_scan_ts', 0.0))
+                     < float(getattr(self, 'apsis_hold_rescan_s', 0.25)))):
+            markers = self._apsis_markers
+            if markers.shape[0] > 0 and pts.shape[1] >= 3:
+                head_t = float(pts[0, 2])
+                if float(markers[:, 2].min()) < head_t:
+                    markers = markers[markers[:, 2] >= head_t]
+                    self._apsis_markers = markers
+            self._apsis_cache_key = cache_key
+            return self._apsis_markers
+
         try:
             markers, count = _find_apsis_markers_numba(
                 pts,
@@ -4191,10 +5454,96 @@ class Predictor:
                 int(self.apsis_max_markers),
             )
             self._apsis_markers = markers[:int(count)].copy()
-        except Exception:
+        except Exception as exc:
+            # Dieser fang hat schon einen uebersetzungsfehler des kernels
+            # verschluckt (readonly-notizblock, siehe _no_body_memo): die
+            # marker verschwanden im spiel ohne jede meldung. Ein leeres
+            # ergebnis ist ein voellig normaler zustand -- eine AUSNAHME ist
+            # es nicht, also wird sie einmal gemeldet.
+            if not getattr(self, "_apsis_scan_error_logged", False):
+                self._apsis_scan_error_logged = True
+                try:
+                    print(f"PREDICTOR: apsis-scan fehlgeschlagen: {exc!r}", flush=True)
+                except Exception:
+                    pass
             self._apsis_markers = self._empty_apsis_array()
         self._apsis_cache_key = cache_key
+        self._apsis_soft_stale = False
+        self._apsis_last_scan_ts = now_ts
         return self._apsis_markers
+
+    def interpolation_error_floor(self, sample_limit=256):
+        """Kleinster zeichenfehler, den diese punkteliste ueberhaupt zulaesst.
+
+        Der gezeichnete fehler zerfaellt in zwei UNABHAENGIGE anteile:
+
+            fehler = |Hermite - wahrheit|  +  |polygon - Hermite|
+                     (haengt am PUNKTABSTAND)  (haengt an der UNTERTEILUNG)
+
+        Die zeichenzeit-unterteilung drueckt nur den zweiten term. Der erste
+        ist die klassische schranke des kubischen Hermite-polynoms,
+        ``h^4/384 * max|f''''|``; fuer eine bahn mit lokalem kruemmungsradius
+        ``R`` und punktabstand ``c`` ist das
+
+            floor ~ c^4 / (384 * R^3)
+
+        Gegen numerisch integrierte kreisboegen ueber drei zehnerpotenzen von
+        ``R`` und ``c`` geprueft: passt auf 0.4 % genau.
+
+        Das ist der grund, warum die feinen sprossen der toleranz-leiter
+        (1 mm, 1 cm) mit dem heutigen punktabstand NICHT erreichbar sind --
+        dafuer muesste neu integriert werden, nicht feiner ausgewertet. Die
+        methode gibt den wert zurueck, damit der renderer die angeforderte
+        sprosse daran klemmen und den ERREICHTEN wert anzeigen kann, statt
+        eine genauigkeit zu behaupten, die die linie nicht hat.
+
+        Rueckgabe: meter, oder ``None`` wenn nicht bestimmbar.
+        """
+        points = self.points
+        if np is None or not isinstance(points, np.ndarray):
+            return None
+        if points.ndim != 2 or points.shape[0] < 3 or points.shape[1] < 2:
+            return None
+
+        n = int(points.shape[0])
+        # AUSDUENNEN DARF DEN PUNKTABSTAND NICHT VERAENDERN. Ein einfaches
+        # `linspace` ueber die liste tut genau das: die drei punkte eines
+        # tripels liegen dann nicht mehr eine, sondern mehrere stuetzweiten
+        # auseinander -- und weil der boden mit c^4 geht, kommt ein vielfaches
+        # heraus (gemessen 120 m statt 7.6 m auf derselben bahn). Gezogen
+        # werden deshalb ANFANGSINDIZES, und jedes tripel bleibt benachbart.
+        triples = n - 2
+        if triples < 1:
+            return None
+        limit = int(max(1, min(int(sample_limit), triples)))
+        if limit < triples:
+            starts = np.unique(np.linspace(0, triples - 1, limit).astype(np.int64))
+        else:
+            starts = np.arange(triples, dtype=np.int64)
+
+        p0 = points[starts, :2]
+        p1 = points[starts + 1, :2]
+        p2 = points[starts + 2, :2]
+
+        a = p1 - p0
+        b = p2 - p1
+        la = np.hypot(a[:, 0], a[:, 1])
+        lb = np.hypot(b[:, 0], b[:, 1])
+        lc = np.hypot(p2[:, 0] - p0[:, 0], p2[:, 1] - p0[:, 1])
+
+        # Umkreisradius der drei aufeinanderfolgenden punkte = lokaler
+        # kruemmungsradius. Vierfache dreiecksflaeche ueber das kreuzprodukt.
+        cross = np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            radius = (la * lb * lc) / (2.0 * cross)
+            spacing = 0.5 * (la + lb)
+            floor = (spacing ** 4) / (384.0 * radius ** 3)
+
+        floor = floor[np.isfinite(floor)]
+        if floor.size == 0:
+            # Perfekt gerade linie: ein kubisches polynom trifft sie exakt.
+            return 0.0
+        return float(np.max(floor))
 
     def get_precision_factor(self):
         if self.base_precision <= 0.0:
@@ -4218,6 +5567,10 @@ class Predictor:
         if meters <= 0.0:
             raise ValueError("precision must be > 0")
         self.precision = meters
+        # Die gehaltene kurve traegt den ALTEN punktabstand. Ohne diesen
+        # vermerk schluckt der zeitraffer-halt die umstellung vollstaendig --
+        # gemessen: punktzahl und richtung aendern sich um exakt 0.
+        self.invalidate_hold()
         if self.rolling_mode:
             self.reset()
         elif self.async_compute:
@@ -4226,6 +5579,7 @@ class Predictor:
     def set_length(self, meters: float | None):
         if meters is None:
             self.length = None
+            self.invalidate_hold()
             if self.rolling_mode:
                 self.reset()
             elif self.async_compute:
@@ -4235,6 +5589,9 @@ class Predictor:
         if meters <= 0.0:
             raise ValueError("length must be > 0")
         self.length = meters
+        # Der horizont steuert ueber _horizon_spacing_floor() auch den
+        # punktabstand -- die gehaltene kurve passt danach nicht mehr.
+        self.invalidate_hold()
         if self.rolling_mode:
             self.reset()
         elif self.async_compute:
@@ -4312,9 +5669,9 @@ class Predictor:
                     try:
                         self._roll_states = self._roll_states[remove_count:]
                         if isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
-                            self.points = self._roll_states[:, :3].copy()
+                            self.points = self._roll_states.copy()
                         else:
-                            self.points = np.empty((0, 3), dtype=np.float64)
+                            self.points = _empty_points()
                     except Exception:
                         try:
                             self._roll_states = np.array(self._roll_states[remove_count:], dtype=np.float64)

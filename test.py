@@ -10,6 +10,8 @@ from rendering import Renderer
 from predictor import Predictor
 from schiff import schiffcontrol
 from devui import DevContext, ImguiLayer
+from ui import UIContext, UIRoot, UIState
+from ui.hud import Hud
 from reference_frames import (
     BODY_CENTRED_BODY_DIRECTION,
     BODY_CENTRED_NON_ROTATING,
@@ -34,6 +36,12 @@ def main():
 
     verbose = bool(config.get('debug.print_loader_info', True))
     print_timings = bool(config.get('debug.print_frame_timings', True))
+    # Zaehlerstand fuer pred_hz (erneuerungen der vorhersagelinie je sekunde,
+    # ueber ein halbsekunden-fenster gemittelt -- je bild gezaehlt waere es
+    # nur 0 oder 1).
+    timing_hz_t0 = None
+    timing_hz_swaps = 0
+    timing_pred_hz = 0.0
 
     # VSync über Umgebungsvariable aktivieren
     vsync_enabled = bool(config.get('window.vsync', True))
@@ -58,8 +66,31 @@ def main():
         max_frames = env_max_frames
     max_frames = max(0, max_frames)
 
-    # Starte Pygame mit OpenGL
-    pygame.init()
+    # Ab welcher raffung (sim-sekunden je echtsekunde) gilt der lauf als
+    # "gerafft": darueber ist der schub gesperrt und die vorhersage wird
+    # gehalten statt neu gerechnet. Standard ist genau die unterste
+    # zeitraffer-stufe des HUDs (60 sim-s/s), also "echtzeit" in diesem spiel.
+    # Muss VOR dem HUD-aufbau stehen -- der schubregler zeigt die sperre an.
+    REALTIME_WARP_MAX = float(config.get('simulation.realtime_warp_max', 60.0))
+    # Wie viele bahn-zeitskalen ein frame hoechstens vorruecken darf.
+    # Muss VOR dem Hud-aufbau stehen -- das HUD blendet damit stufen ab.
+    WARP_TIMESCALE_DIVISOR = max(
+        float(config.get('simulation.warp_timescale_divisor', 3.0)), 1e-6)
+
+    # Starte Pygame mit OpenGL.
+    #
+    # NUR display und font -- NICHT pygame.init(). pygame.init() faehrt JEDES
+    # untermodul hoch, auch mixer und joystick, und beide zaehlen dabei die
+    # geraete des rechners auf. Auf diesem system kostet das gemessen
+    # 25.2 s (mixer) + 20.1 s (joystick) = 45.3 s, in denen das fenster noch
+    # gar nicht existiert -- der start wirkt schlicht wie ein absturz.
+    # Die dauer haengt an audio-/HID-treibern, nicht am spiel: sie kann sich
+    # jederzeit wieder aendern. Deshalb wird hier gar nicht erst geraten,
+    # sondern nur initialisiert, was das spiel wirklich benutzt.
+    # Verwendet werden ausschliesslich display, event, font, image, key,
+    # mouse und time; von denen brauchen nur display und font ein init.
+    pygame.display.init()
+    pygame.font.init()
     WIDTH = int(config.get('window.width', 800))
     HEIGHT = int(config.get('window.height', 800))
 
@@ -78,7 +109,7 @@ def main():
     print(gl_ctx.info['GL_VENDOR'], gl_ctx.info['GL_RENDERER'], gl_ctx.info['GL_VERSION'])
     pygame.display.set_caption(str(config.get('window.caption', "Orbital Mechanics - OpenGL Renderer")))
     clock = pygame.time.Clock()
-    FPS = int(config.get('window.fps', 60))
+    FPS = int(config.get('window.fps', 180))
 
     # System laden
     loader = SystemLoader(config.get('simulation.system_file', "solar_system.json"))
@@ -121,7 +152,14 @@ def main():
     # cosmetic. Pin the horizon from startup so changing spacing ('9'/'0') no
     # longer moves the horizon (and thus no longer changes compute cost).
     # Default = num_points * base precision, so initial output is unchanged.
-    predictor.set_length(predictor.num_points * predictor.precision)
+    PREDICTOR_BASE_LENGTH = predictor.num_points * predictor.precision
+    predictor.set_length(PREDICTOR_BASE_LENGTH)
+    # Der horizont ist ein PRODUKT: basis * manuell ('+'/'-') * raffung.
+    # Der raffungs-anteil kommt aus predictor_warp_length_mult(); ohne ihn
+    # deckt die linie bei 1 y/s nur 2.1 tage einer 45-jahre-reise ab und der
+    # halt laeuft staendig leer (gemessen 277 volle neuberechnungen je 600
+    # frames). Siehe apply_predictor_horizon().
+    predictor_manual_mult = 1.0
     predictor_enabled = bool(config.get('predictor.enabled', True))
     if not predictor_enabled:
         predictor.reset()
@@ -157,6 +195,16 @@ def main():
         enabled=bool(config.get('debug.devui_visible', False)),
     )
     devui_toggle_key = pygame.K_F1
+
+    # Spieler-HUD (eigene schicht, siehe spacesim/ui/). Die ui_scale kommt
+    # vom renderer, damit HUD und weltbeschriftungen dieselbe skala teilen.
+    ui_ctx = UIContext(
+        gl_ctx, WIDTH, HEIGHT,
+        ui_scale=renderer.ui_scale,
+        label_cache_max=int(config.get('renderer.label_texture_cache_max', 256)),
+    )
+    ui_root = UIRoot(ui_ctx)
+
     if verbose:
         print("=== Renderer initialisiert ===")
         print(f"=== Konfiguration: {config.filepath.name} ===")
@@ -165,32 +213,16 @@ def main():
 
     # principia-ähnliche frame-pipeline:
     # selector (eingabe) -> adapter (factory/dispatch) -> renderer (projektion).
-    celestial_indices = [i for i, b in enumerate(w.body) if not getattr(b, 'is_ship', False)]
-    if not celestial_indices:
-        celestial_indices = list(range(len(w.body)))
-
-    ship_index = next((i for i, b in enumerate(w.body) if getattr(b, 'is_ship', False)), None)
-
-    if earth is not None:
-        reference_index = w.body.index(earth)
-    else:
-        reference_index = celestial_indices[0] if celestial_indices else 0
-    reference_cursor = celestial_indices.index(reference_index) if reference_index in celestial_indices else 0
-
-    frame_extension = BODY_CENTRED_NON_ROTATING
-    target_overlay_enabled = False
-
-    def choose_secondary(primary_index):
-        primary = w.body[primary_index]
-        parent = getattr(primary, 'is_moon_of', None)
-        if parent is not None:
-            for idx, candidate in enumerate(w.body):
-                if candidate is parent and not getattr(candidate, 'is_ship', False):
-                    return idx
-        for idx in celestial_indices:
-            if idx != primary_index:
-                return idx
-        return primary_index
+    # Ansichts-zustand (bezugsrahmen, referenzkoerper, ziel-overlay).
+    #
+    # Lag frueher als LOKALE VARIABLEN genau hier -- kein objekt kam daran,
+    # ein HUD-bedienelement haette sie nicht lesen und nicht setzen koennen.
+    # Jetzt in ui/state.py, mit aenderungs-benachrichtigung: tastatur und
+    # HUD schreiben denselben zustand und koennen nicht auseinanderlaufen.
+    ui_state = UIState(
+        w.body,
+        initial_reference_index=(w.body.index(earth) if earth is not None else None),
+    )
 
     frame_adapter = PlottingFrameAdapter(renderer, w.body)
 
@@ -203,9 +235,11 @@ def main():
 
     frame_selector = ReferenceFrameSelector(on_frame_change)
 
-    def apply_frame_selection():
-        secondary_index = choose_secondary(reference_index)
-        if frame_extension == BODY_CENTRED_BODY_DIRECTION:
+    def apply_frame_selection(state=None):
+        state = state if state is not None else ui_state
+        reference_index = state.reference_index
+        secondary_index = state.secondary_index()
+        if state.frame_extension == BODY_CENTRED_BODY_DIRECTION:
             frame_selector.set_to_body_direction(reference_index, secondary_index)
             mode_text = (
                 f"body-direction ({w.body[reference_index].name} -> "
@@ -215,11 +249,19 @@ def main():
             frame_selector.set_to_body_non_rotating(reference_index)
             mode_text = f"body-centred non-rotating ({w.body[reference_index].name})"
 
+        # Ein rahmen-/bezugskoerperwechsel macht eine gehaltene vorhersage
+        # ungueltig: die kurve wird gegen den neuen bezug gerechnet.
+        try:
+            if hasattr(predictor, 'invalidate_hold'):
+                predictor.invalidate_hold()
+        except Exception:
+            pass
+
         # predictor-physik-korrektur für translierte nicht-rotierende rahmen:
         # referenzkörper-beschleunigung nur in diesem modus subtrahieren.
         try:
             if hasattr(predictor, 'set_reference_body_index'):
-                if frame_extension == BODY_CENTRED_NON_ROTATING:
+                if state.frame_extension == BODY_CENTRED_NON_ROTATING:
                     predictor.set_reference_body_index(reference_index)
                 else:
                     predictor.set_reference_body_index(None)
@@ -237,9 +279,12 @@ def main():
             camera.follow(w.body[follow_index])
             camera_follow_name = w.body[follow_index].name
 
-        if target_overlay_enabled and ship_index is not None:
-            frame_selector.set_target_frame(ship_index, reference_index)
-            overlay_text = f"ON ({w.body[ship_index].name} vs {w.body[reference_index].name})"
+        if state.target_overlay_enabled and state.ship_index is not None:
+            frame_selector.set_target_frame(state.ship_index, reference_index)
+            overlay_text = (
+                f"ON ({w.body[state.ship_index].name} vs "
+                f"{w.body[reference_index].name})"
+            )
         else:
             overlay_text = "OFF"
 
@@ -248,7 +293,23 @@ def main():
             f"| camera_follow={camera_follow_name}"
         )
 
+    ui_state.on_change = apply_frame_selection
     apply_frame_selection()
+
+    # Spieler-HUD aufbauen. Muss NACH ui_state und dem frame-selector
+    # entstehen: die rahmenwahl im HUD schreibt in ui_state, und dessen
+    # aenderungs-benachrichtigung ist erst jetzt verdrahtet.
+    # renderer.hud_enabled = false baut das HUD GAR NICHT erst auf (statt es
+    # nur zu verstecken): so laesst sich der reine welt-render sauber gegen
+    # den mit HUD messen, und wer die alte darstellung will, zahlt nichts.
+    hud = None
+    if bool(config.get('renderer.hud_enabled', True)):
+        hud = Hud(
+            ui_root, w, ship, ship_control, camera, renderer, predictor, ui_state,
+            tick_rate=float(max(1, FPS)),
+            realtime_warp_max=REALTIME_WARP_MAX,
+            warp_timescale_divisor=WARP_TIMESCALE_DIVISOR,
+        )
 
     # Startansicht ohne einflug: zoom und position sofort auf ihre ziele
     # setzen, statt sie aus dem ursprung heranlaufen zu lassen.
@@ -286,21 +347,117 @@ def main():
     # schrittweitensteuerung) und step_simulation() zerlegt ohnehin in
     # MAX_SUBSTEP-stuecke, ein variables aeusseres dt ist also unproblematisch.
     TICK_RATE = float(max(1, FPS))
+
+    # Echtzeit muss bei JEDER bildrate erreichbar sein -- sonst bleibt der
+    # schub dauerhaft gesperrt. Begruendung steht bei Camera.allow_warp_rate.
+    camera.allow_warp_rate(REALTIME_WARP_MAX, TICK_RATE)
+
     # Obergrenze für das echte frame-delta (simulation, kamera-easing, schub).
     # Nach einem stall darf kein einzelner riesiger schritt eingespeist werden.
     MAX_FRAME_DT = max(1e-4, float(config.get('simulation.max_frame_dt', 0.1)))
 
     def step_simulation(sim_seconds):
-        """Rückt die welt um sim_seconds vor, aufgeteilt in MAX_SUBSTEP-stücke."""
+        """Rückt die welt um sim_seconds vor, aufgeteilt in stücke.
+
+        Die stückgrösse ist MAX_SUBSTEP -- ausser im zeitraffer, wo die
+        integrator-decke darüber liegt. Das ist kein detail: solange die stücke
+        1000 s bleiben, kostet JEDES stück mindestens einen teilschritt, und die
+        decke aus world.set_warp_step_ceiling() kann gar nicht wirken. Gemessen
+        bei 365 d/s: die teilschritt-zahl bleibt bei 176 (= 175200/1000) egal wie
+        hoch die decke gesetzt wird. Es sind also ZWEI decken, und beide müssen
+        steigen, sonst bringt keine etwas.
+        """
         if sim_seconds <= 0.0:
             return
-        if sim_seconds <= MAX_SUBSTEP:
+        # Decke aus der raffung ableiten (in echtzeit bleibt sie bei 30 s, der
+        # integrator rechnet dann bit-identisch wie bisher).
+        ceiling = w.set_warp_step_ceiling(sim_seconds)
+        chunk = max(MAX_SUBSTEP, ceiling)
+        if sim_seconds <= chunk:
             update(w, sim_seconds)
             return
-        steps = int(math.ceil(sim_seconds / MAX_SUBSTEP))
+        steps = int(math.ceil(sim_seconds / chunk))
         sub_dt = sim_seconds / steps
         for _ in range(steps):
             update(w, sub_dt)
+
+    def warp_rate():
+        """Aktuelle raffung in sim-sekunden je echtsekunde."""
+        return float(camera.sim_dt) * TICK_RATE
+
+
+    def clamp_warp_to_orbit():
+        """Raffung auf das begrenzen, was die BAHN noch aufloest.
+
+        Nahe an einem koerper ist die obergrenze keine frage der rechen-
+        leistung: ein frame bei 1 y/s rueckt um 48 stunden vor, das sind rund
+        24 umlaeufe eines 2-stunden-orbits. Gemessen in einem 2000-km-orbit
+        bei 1 y/s: 5120 teilschritte und 270 ms je frame -- und die waeren
+        auch dann noetig, wenn sie billig waeren, weil sonst schlicht die
+        bahn verloren geht.
+
+        Das HUD blendet gesperrte stufen bereits ab; das hier ist der riegel
+        fuer PageUp/PageDown und die dev-oberflaeche, die daran vorbeigehen.
+        """
+        fn = getattr(w, 'characteristic_timescale', None)
+        if fn is None or ship is None:
+            return
+        try:
+            t_char = fn(ship)
+        except Exception:
+            return
+        if not t_char or t_char <= 0.0:
+            return
+        cap_rate = max(t_char / WARP_TIMESCALE_DIVISOR * TICK_RATE,
+                       REALTIME_WARP_MAX)
+        if warp_rate() > cap_rate:
+            camera.sim_dt = max(float(getattr(camera, 'min_sim_dt', 1e-6)),
+                                cap_rate / TICK_RATE)
+
+    def thrust_allowed():
+        # Kleine toleranz, damit die unterste stufe nicht an rundung scheitert.
+        return warp_rate() <= REALTIME_WARP_MAX * 1.001
+
+    def predictor_warp_length_mult():
+        """Horizont-faktor aus der raffung -- zweierpotenz, gedeckelt.
+
+        Bei hoher raffung frisst das schiff den horizont schneller als der
+        halt ihn nachziehen kann, und jeder leerlauf kostet eine SYNCHRONE
+        volle neuberechnung. Ein laengerer horizont ist deshalb bei raffung
+        nicht teurer, sondern BILLIGER -- gemessen bei 1 y/s ueber 600 frames:
+
+            faktor  median   p99     max    volle neuberechnungen
+              1x    4.20 ms  5.69   8.29         277
+             16x    1.62 ms  4.17   4.45           0
+             64x    0.70 ms  3.86   4.84           0
+            256x    0.28 ms  1.12  54.25           1   <-- sichtbarer hakler
+
+        Der deckel bei 64 ist also nicht willkuerlich: darueber werden die
+        neuberechnungen zwar noch seltener, aber die EINZELNE kostet dann so
+        viel, dass sie als ruckler sichtbar wird. Zweierpotenzen sorgen
+        ausserdem dafuer, dass sich der wert nur beim stufenwechsel aendert --
+        set_length() verwirft den halt, das darf nicht jeden frame passieren.
+        """
+        rate = warp_rate()
+        ratio = rate / 604800.0          # ab 7 d/s waechst der horizont mit
+        if ratio <= 1.0:
+            return 1.0
+        # RUNDEN, nicht abschneiden: abgeschnitten faellt 1 y/s auf 32x, und
+        # das ist gemessen die schlechtere stufe (max 14.7 ms gegen 4.8 ms bei
+        # 64x). Gerundet ergibt die reihe genau die gemessenen guten werte
+        # 7d/s->1, 30d/s->4, 100d/s->16, 1y/s->64.
+        exp = min(6, max(0, int(round(math.log2(ratio)))))
+        return float(1 << exp)
+
+    def apply_predictor_horizon():
+        """Horizont neu setzen, wenn sich basis*manuell*raffung geaendert hat."""
+        if predictor.num_points <= 0:
+            return
+        wanted = PREDICTOR_BASE_LENGTH * predictor_manual_mult * predictor_warp_length_mult()
+        current = predictor.length
+        if current is not None and abs(current - wanted) <= wanted * 1e-9:
+            return
+        predictor.set_length(wanted)
 
     # Was die dev-oberflaeche verstellen darf (siehe devui.DevContext).
     dev_ctx = DevContext(
@@ -316,16 +473,30 @@ def main():
         loop_t0 = time.perf_counter()
 
         # Eingabe-vorfahrt für diesen frame: custom-UI -> ImGui -> welt.
-        # (Das custom-UI aus Phase 3 wird hier davorgeschaltet.)
+        #
+        # begin_frame() macht layout und hover-ermittlung des HUDs und MUSS
+        # vor der ereignisschleife laufen -- sonst wird der treffertest gegen
+        # das layout des vorframes gemacht.
+        # Telemetrie abtasten und die responsive umschaltung anwenden, BEVOR
+        # begin_frame() das layout rechnet -- die panelhoehen haengen an den
+        # gerade gemessenen texten.
+        if hud is not None:
+            hud.update()
+        ui_root.begin_frame(frame_dt)
         devui.new_frame(frame_dt)
-        ui_wants_mouse = devui.wants_mouse
-        ui_wants_keyboard = devui.wants_keyboard
+        ui_wants_mouse = ui_root.wants_mouse or devui.wants_mouse
+        ui_wants_keyboard = ui_root.wants_keyboard or devui.wants_keyboard
 
         for event in pygame.event.get():
-            # ImGui sieht jedes ereignis zuerst, damit es seinen eigenen
+            # Das spieler-HUD sieht jedes ereignis ZUERST. Verbraucht es das
+            # ereignis, bekommen weder ImGui noch die welt es zu sehen.
+            consumed_by_hud = ui_root.handle_event(event)
+
+            # ImGui sieht die uebrigen ereignisse, damit es seinen eigenen
             # eingabezustand fuehren kann. Ob es die eingabe auch VERBRAUCHT,
             # entscheiden weiter unten ui_wants_mouse / ui_wants_keyboard.
-            devui.process_event(event)
+            if not consumed_by_hud:
+                devui.process_event(event)
 
             if event.type == pygame.QUIT:
                 running = False
@@ -342,6 +513,9 @@ def main():
                     camera.width = new_w
                     camera.height = new_h
                     devui.resize(new_w, new_h)
+                    # ui_scale kommt vom renderer, damit HUD und
+                    # weltbeschriftungen exakt dieselbe skala benutzen.
+                    ui_root.resize(new_w, new_h, ui_scale=renderer.ui_scale)
 
             elif event.type == pygame.KEYDOWN:
                 # F1 schaltet die dev-oberflaeche IMMER um, auch wenn ImGui
@@ -377,25 +551,22 @@ def main():
                             w.enable_epicycles(center)
                             print(f"EPICYCLE: enabled (center={center.name})")
 
-                elif event.key == pygame.K_r and celestial_indices:
-                    reference_cursor = (reference_cursor + 1) % len(celestial_indices)
-                    reference_index = celestial_indices[reference_cursor]
-                    apply_frame_selection()
+                # R / 1 / 2 / T schreiben denselben zustand wie die
+                # HUD-bedienelemente (ui/state.py) -- deshalb kein direktes
+                # setzen mehr, sondern die methoden des zustands. Das
+                # anwenden loest die aenderungs-benachrichtigung aus.
+                elif event.key == pygame.K_r:
+                    ui_state.cycle_reference()
 
                 elif event.key == pygame.K_1:
-                    frame_extension = BODY_CENTRED_NON_ROTATING
-                    apply_frame_selection()
+                    ui_state.set_frame_extension(BODY_CENTRED_NON_ROTATING)
 
                 elif event.key == pygame.K_2:
-                    frame_extension = BODY_CENTRED_BODY_DIRECTION
-                    apply_frame_selection()
+                    ui_state.set_frame_extension(BODY_CENTRED_BODY_DIRECTION)
 
                 elif event.key == pygame.K_t:
-                    if ship_index is None:
+                    if not ui_state.toggle_target_overlay():
                         print("FRAME: no ship available for target overlay")
-                    else:
-                        target_overlay_enabled = not target_overlay_enabled
-                        apply_frame_selection()
 
                 # I/K/J/L: orientierungs-snap (rastender autopilot) umschalten.
                 # Tippen rastet ein, erneutes Tippen löst; render() hält die Nase
@@ -419,17 +590,23 @@ def main():
                 #               gleiche rechenzeit und gleiche genauigkeit.
                 ch = event.unicode
                 if ch == '+' or event.key == pygame.K_KP_PLUS:
-                    # länge verlängern (schrittfaktor aus config.json)
-                    base_len = predictor.length if predictor.length is not None else predictor.num_points * predictor.precision
-                    predictor.set_length(base_len * length_step)
+                    # '+'/'-' verstellen den MANUELLEN faktor, nicht die laenge
+                    # direkt -- sonst wuerde apply_predictor_horizon() die
+                    # eingabe im naechsten frame wieder ueberschreiben.
+                    predictor_manual_mult *= length_step
+                    apply_predictor_horizon()
                     predictor.reset()
-                    print(f"PREDICTOR: length set to {predictor.length}")
+                    print(f"PREDICTOR: length set to {predictor.length} "
+                          f"(manuell x{predictor_manual_mult:g}, "
+                          f"raffung x{predictor_warp_length_mult():g})")
                 elif ch == '-' or event.key == pygame.K_KP_MINUS:
-                    cur = predictor.length if predictor.length is not None else predictor.num_points * predictor.precision
-                    new_len = max(predictor.precision, cur / length_step)
-                    predictor.set_length(new_len)
+                    lowest = predictor.precision / max(PREDICTOR_BASE_LENGTH, 1e-9)
+                    predictor_manual_mult = max(lowest, predictor_manual_mult / length_step)
+                    apply_predictor_horizon()
                     predictor.reset()
-                    print(f"PREDICTOR: length set to {predictor.length}")
+                    print(f"PREDICTOR: length set to {predictor.length} "
+                          f"(manuell x{predictor_manual_mult:g}, "
+                          f"raffung x{predictor_warp_length_mult():g})")
                 elif ch == '9':
                     # präzision erhöhen (feiner = kleinere abstände)
                     new_prec = max(predictor_min_precision, predictor.precision / precision_step)
@@ -443,8 +620,12 @@ def main():
                     print(f"PREDICTOR: precision set to {predictor.precision}")
 
             # Eingabe-vorfahrt: custom-UI -> ImGui -> welt (kamera/schiff).
-            # Solange keine oberfläche existiert, beansprucht niemand die
-            # eingabe; die flags sind der andockpunkt für Phase 2/3.
+            # consumed_by_hud faengt den fall ab, dass ein HUD-element das
+            # ereignis in DIESEM frame beansprucht hat; ui_wants_* deckt den
+            # allgemeinen zustand ab (z. B. ein regler, der gerade gezogen
+            # wird, auch wenn der zeiger ihn verlassen hat).
+            if consumed_by_hud:
+                continue
             camera.handle_event(
                 event,
                 ui_wants_mouse=ui_wants_mouse,
@@ -453,7 +634,7 @@ def main():
 
         # Schiff-Steuerung
         keys = pygame.key.get_pressed()
-        reference_body = w.body[reference_index] if reference_index is not None else None
+        reference_body = ui_state.reference_body
         if ship_control:
             ship_control.last_thrust_direction = None
             if ship is not None:
@@ -463,10 +644,23 @@ def main():
             # geprueft werden, sonst fliegt das schiff waehrend einer
             # texteingabe in der dev-oberflaeche mit.
             if not ui_wants_keyboard:
-                # rotation: in echtzeit sanft
+                # rotation: in echtzeit sanft. DREHEN BLEIBT IMMER ERLAUBT,
+                # auch im zeitraffer -- es aendert die bahn nicht.
                 ship_control.handle_rotation(keys, frame_dt)
-                # schub: einmal pro echtem frame festen delta-v anwenden (unabhängig von sim_dt)
-                ship_control.apply_thrust(keys, frame_dt)
+                # SCHUB NUR IN ECHTZEIT. Oberhalb der untersten zeitraffer-
+                # stufe rueckt die welt je frame um stunden bis tage vor; ein
+                # impuls "einmal pro frame" waere dort weder dosierbar noch
+                # reproduzierbar (er haenge an der bildrate), und er macht die
+                # gehaltene vorhersage in jedem frame ungueltig. Deshalb ist
+                # der schub gesperrt, solange gerafft wird -- der spieler
+                # geht zum manoevrieren auf die unterste stufe zurueck.
+                if thrust_allowed():
+                    ship_control.apply_thrust(keys, frame_dt)
+
+        # Raffung auf die bahn-zeitskala begrenzen (siehe clamp_warp_to_orbit).
+        clamp_warp_to_orbit()
+        # Horizont an die raffung anpassen (no-op, solange die stufe steht).
+        apply_predictor_horizon()
 
         # Simulation zeitproportional vorrücken (siehe TICK_RATE oben).
         # frame_dt ist bereits auf MAX_FRAME_DT gekappt, ein stall kann also
@@ -484,6 +678,11 @@ def main():
             target = ship if ship else next((b for b in w.body if not b.fixed), None)
 
             if target:
+                # Im zeitraffer die kurve HALTEN statt jeden frame neu
+                # rechnen -- sonst zieht _anchor_first_point sie je frame um
+                # die volle bahnbewegung starr mit und sie zittert. Siehe
+                # Predictor._hold_advance.
+                predictor.set_hold(not thrust_allowed())
                 if hasattr(predictor, 'set_view_scale'):
                     # WICHTIG: das zoom-ZIEL einspeisen, nicht die gerade
                     # nachlaufende skala. set_view_scale() setzt bei jeder
@@ -511,6 +710,13 @@ def main():
 
         # Overlays NACH der welt und VOR dem swap. render() macht den swap
         # nicht mehr selbst -- das uebernimmt renderer.present() unten.
+        #
+        # Reihenfolge: spieler-HUD zuerst, entwicklerwerkzeuge darueber. Das
+        # HUD landet damit hinter dem FXAA-resolve (render() ist fertig) --
+        # ein kantenfilter ueber UI-text und 1px-rahmen wuerde beides
+        # verschmieren.
+        ui_root.render()
+
         dev_ctx.frame_dt = frame_dt
         dev_ctx.sim_step_s = camera.sim_dt * TICK_RATE * frame_dt
         devui.build(dev_ctx)
@@ -518,9 +724,24 @@ def main():
 
         renderer.present()
 
+        # Zeitreihen fuer die graphen der dev-oberflaeche (F1 -> Timing).
+        #
+        # NACH present(): render() setzt swap_or_present_ms auf 0.0 und erst
+        # present() traegt den echten wert nach -- davor abgetastet waere
+        # `render draw` konstant null. Das panel zeigt damit den stand des
+        # VORIGEN frames, was bei 180 fps niemand sieht.
+        #
+        # Laeuft unbedingt, auch mit geschlossenem panel: ein puffer, der nur
+        # gefuellt wird, waehrend man hinschaut, ist beim aufklappen leer.
+        # Kostet dafuer gemessene 1.0 us je frame (0.02 % eines 5.6-ms-frames),
+        # siehe tests/devui_timing_test.py.
+        frame_ms = (time.perf_counter() - loop_t0) * 1000.0
+        dev_ctx.sample_timings(frame_ms)
+
         # Per-frame timing debug line. Splits the frame into predictor line
         # calculation vs. drawing, and the render pipeline into CPU calculation
-        # vs. present-on-screen (swap/flip; includes the VSync wait).
+        # vs. present-on-screen (swap/flip; includes the VSync wait). Dieselben
+        # vier groessen wie die graphen oben, aus derselben quelle.
         if print_timings:
             rt = getattr(renderer, 'last_frame_timings', {}) or {}
             ps = getattr(renderer, '_last_prediction_render_stats', {}) or {}
@@ -529,11 +750,28 @@ def main():
             rend_calc = rend_total - rend_draw
             pred_calc = float(getattr(predictor, 'last_compute_ms', 0.0))
             pred_draw = float(ps.get('prepare_ms', 0.0)) + float(ps.get('draw_ms', 0.0))
-            frame_ms = (time.perf_counter() - loop_t0) * 1000.0
+
+            # Wie oft die LINIE selbst neu wird -- das ist eine andere groesse
+            # als pred_calc (die dauer EINER rechnung) und die eigentlich
+            # interessante beim schub: mehrere rechnungen laufen versetzt
+            # nebeneinander, der durchsatz ist deshalb hoeher als 1/pred_calc.
+            # Ziel ist ein wert nahe der bildrate; `pipe` zeigt, wie viele
+            # rechnungen der predictor dafuer gerade parallel faehrt.
+            now_hz = time.perf_counter()
+            swaps_now = int(getattr(predictor, '_jobs_swapped', 0))
+            if timing_hz_t0 is None:
+                timing_hz_t0 = now_hz
+                timing_hz_swaps = swaps_now
+            elapsed_hz = now_hz - timing_hz_t0
+            if elapsed_hz >= 0.5:
+                timing_pred_hz = (swaps_now - timing_hz_swaps) / elapsed_hz
+                timing_hz_t0 = now_hz
+                timing_hz_swaps = swaps_now
             print(
                 f"TIMING: pred_calc={pred_calc:.1f}ms pred_draw={pred_draw:.1f}ms "
                 f"rend_calc={rend_calc:.1f}ms rend_draw={rend_draw:.1f}ms "
-                f"frame={frame_ms:.1f}ms",
+                f"frame={frame_ms:.1f}ms "
+                f"pred_hz={timing_pred_hz:.0f} pipe={int(getattr(predictor, '_pipeline_depth_used', 1))}",
                 flush=True,
             )
 

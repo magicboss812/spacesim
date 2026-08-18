@@ -8,6 +8,21 @@ from bodies import body, schiff
 DEFAULT_CONFIG_FILE = "config.json"
 
 
+def _float_list(value):
+    """JSON-liste -> aufsteigend sortierte liste positiver floats.
+
+    Wird fuer `renderer.prediction_error_ladder_m` gebraucht. Sortiert und
+    filtert hier, damit die auswahl der sprosse sich darauf verlassen kann --
+    eine unsortierte leiter waehlt sonst still die falsche.
+    """
+    if isinstance(value, (int, float)):
+        value = [value]
+    rungs = sorted(float(v) for v in value if float(v) > 0.0)
+    if not rungs:
+        raise ValueError("leere toleranz-leiter")
+    return rungs
+
+
 def _strip_jsonc(text):
     """Entfernt kommentare und abschliessende kommata aus einem JSON-text.
 
@@ -221,6 +236,8 @@ class ConfigLoader:
             ('gravitational_constant', 'G', float),
             ('integrator_mode', 'integrator_mode', str),
             ('integrator_max_step', 'integrator_max_step', float),
+            ('integrator_warp_substep_target', 'integrator_warp_substep_target', float),
+            ('integrator_max_step_ceiling', 'integrator_max_step_ceiling', float),
             ('integrator_min_step', 'integrator_min_step', float),
             ('integrator_position_tolerance', 'integrator_position_tolerance', float),
             ('integrator_velocity_tolerance', 'integrator_velocity_tolerance', float),
@@ -333,6 +350,15 @@ class ConfigLoader:
             ('rkn_max_dt_ceiling', 'rkn_max_dt_ceiling', float),
             ('apsis_markers_enabled', 'apsis_markers_enabled', bool),
             ('apsis_max_markers', 'apsis_max_markers', int),
+            # Gleichzeitige vorhersagen unter schub. Eine rechnung dauert
+            # laenger als ein bild, also gibt erst der DURCHSATZ mehrerer
+            # zeitversetzter laeufe eine bildweise nachziehende linie.
+            # 1 = wie vorher (eine nach der anderen).
+            ('thrust_pipeline_depth', 'thrust_pipeline_depth', int),
+            # Jitter-puffer fuer das einwechseln fertiger vorhersagen.
+            # 0 = immer sofort das neueste (kuerzeste verzoegerung, aber
+            # ruckartig), 2 = vollstaendig gleichmaessig, dafuer aeltere linie.
+            ('swap_backlog_max', 'swap_backlog_max', int),
             # nur von test.py ausgewertet (tastenbelegung / ein-aus-verhalten)
             ('quality', None, None),
             ('enabled', None, None),
@@ -365,6 +391,15 @@ class ConfigLoader:
             ('prediction_render_max_raw_scan', 'prediction_render_max_raw_scan', int),
             ('prediction_render_max_draw_points', 'prediction_render_max_draw_points', int),
             ('prediction_bypass_fxaa', 'prediction_bypass_fxaa', bool),
+            # Aufloesungsgetriebene verfeinerung der vorhersagelinie.
+            ('prediction_hermite_enabled', 'prediction_hermite_enabled', bool),
+            ('prediction_detail_scale', 'prediction_detail_scale', float),
+            ('prediction_hermite_max_subdiv', 'prediction_hermite_max_subdiv', int),
+            ('prediction_error_ladder_m', 'prediction_error_ladder_m', _float_list),
+            # Das spieler-HUD haengt nicht am renderer, sondern wird in
+            # test.py aufgebaut -- hier nur als bekannt markieren.
+            ('hud_enabled', None, None),
+            ('show_debug_hud', 'show_debug_hud', bool),
             ('show_apsis_markers', 'show_apsis_markers', bool),
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
             ('body_icon_radius_px', 'body_icon_radius_px', float),

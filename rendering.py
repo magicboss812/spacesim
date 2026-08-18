@@ -15,6 +15,101 @@ import numpy as np
 
 from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
 
+# Numba-fassungen der reinen zahlenschleifen im linien-zeichenweg
+# (min-step-verdichtung und RDP-vereinfachung). Wort-fuer-wort dieselbe
+# arithmetik wie die Python-methoden darunter -- die bleiben als referenz
+# und fallback erhalten; ohne numba aendert sich exakt nichts.
+try:
+    from numba import njit as _njit
+
+    @_njit(cache=True, nogil=True)
+    def _compact_min_step_numba(xs, ys, min_step2):
+        n = xs.shape[0]
+        keep = np.empty(n, dtype=np.int64)
+        keep[0] = 0
+        m = 1
+        lx = xs[0]
+        ly = ys[0]
+        for i in range(1, n):
+            dx = xs[i] - lx
+            dy = ys[i] - ly
+            if dx * dx + dy * dy >= min_step2:
+                keep[m] = i
+                m += 1
+                lx = xs[i]
+                ly = ys[i]
+        # Wie die Python-fassung: der letzte punkt wird angehaengt, wenn er
+        # nicht ohnehin schon der zuletzt behaltene ist (koordinatenvergleich).
+        if xs[keep[m - 1]] != xs[n - 1] or ys[keep[m - 1]] != ys[n - 1]:
+            keep[m] = n - 1
+            m += 1
+        return keep[:m]
+
+    @_njit(cache=True, nogil=True)
+    def _rdp_keep_numba(xs, ys, tol2):
+        n = xs.shape[0]
+        keep = np.zeros(n, dtype=np.uint8)
+        keep[0] = 1
+        keep[n - 1] = 1
+        stack = np.empty((2 * n + 8, 2), dtype=np.int64)
+        stack[0, 0] = 0
+        stack[0, 1] = n - 1
+        top = 1
+        while top > 0:
+            top -= 1
+            start = stack[top, 0]
+            end = stack[top, 1]
+            if end <= start + 1:
+                continue
+
+            ax = xs[start]
+            ay = ys[start]
+            bx = xs[end]
+            by = ys[end]
+            abx = bx - ax
+            aby = by - ay
+            ab2 = abx * abx + aby * aby
+
+            max_d2 = -1.0
+            index = -1
+            for i in range(start + 1, end):
+                px = xs[i]
+                py = ys[i]
+                if ab2 <= 1e-18:
+                    dx = px - ax
+                    dy = py - ay
+                    d2 = dx * dx + dy * dy
+                else:
+                    apx = px - ax
+                    apy = py - ay
+                    t = (apx * abx + apy * aby) / ab2
+                    if t < 0.0:
+                        t = 0.0
+                    elif t > 1.0:
+                        t = 1.0
+                    proj_x = ax + t * abx
+                    proj_y = ay + t * aby
+                    dx = px - proj_x
+                    dy = py - proj_y
+                    d2 = dx * dx + dy * dy
+                if d2 > max_d2:
+                    max_d2 = d2
+                    index = i
+
+            if max_d2 > tol2 and index != -1:
+                keep[index] = 1
+                stack[top, 0] = start
+                stack[top, 1] = index
+                top += 1
+                stack[top, 0] = index
+                stack[top, 1] = end
+                top += 1
+        return keep
+
+    _LINE_KERNELS_OK = True
+except Exception:
+    _LINE_KERNELS_OK = False
+
 
 class Renderer:
     def __init__(self, width, height, enable_fxaa=True, ctx=None):
@@ -92,6 +187,9 @@ class Renderer:
             'bodies_as_icon': 0,
             'prediction_points_in': 0,
             'prediction_points_drawn': 0,
+            'prediction_detail_target_m': None,
+            'prediction_detail_achieved_m': None,
+            'prediction_detail_added': 0,
         }
         self.render_benchmark_debug = False
         self.render_benchmark_every_n_frames = 60
@@ -120,11 +218,45 @@ class Renderer:
         self.prediction_visibility_margin_px = 128.0
         self.prediction_bypass_fxaa = True
         self.prediction_render_max_raw_scan = 3000
-        self.prediction_render_max_draw_points = 1000
+        self.prediction_render_max_draw_points = 4000
         self.prediction_render_max_world_length = None
         self.prediction_render_max_screen_length_px = None
+
+        # ---- aufloesungsgetriebene verfeinerung der vorhersagelinie ----
+        #
+        # Die punkteliste ist seit den geschwindigkeits-spalten (predictor.
+        # POINT_COLUMNS) eine stueckweise KUBISCHE kurve, keine folge von
+        # positionen. Zwischen zwei stuetzstellen wird deshalb zur zeichenzeit
+        # HERMITE ausgewertet statt linear verbunden -- und zwar nur so fein,
+        # wie es der bildschirm hergibt, und nur dort, wo etwas zu sehen ist.
+        #
+        # Warum das ueberhaupt noetig ist: der kernel setzt punkte in festem
+        # weltabstand (1000 km im auslieferungszustand). Eine sehne dieser
+        # laenge schneidet eine erdnahe bahn um c^2/8R = 17.8 km ab. Kubisch
+        # interpoliert sind es 7.6 m -- derselbe punktabstand, 2350-fach
+        # kleinerer fehler, ohne einen einzigen zusaetzlichen
+        # integrationsschritt.
+        self.prediction_hermite_enabled = True
+        # Ziel-abweichung in geraete-pixeln. `test.py` setzt
+        # SDL_WINDOWS_DPI_AWARENESS=permonitorv2 vor dem display-init, also
+        # sind self.width/height ECHTE geraetepixel -- ein pixel-budget ist
+        # damit schon ein DPI-budget, ohne umrechnung.
+        self.prediction_detail_scale = 1.0
+        self.prediction_hermite_max_subdiv = 64
+        # Sprossen der toleranz-leiter in metern, aufsteigend. Gewaehlt wird
+        # die groesste sprosse, die noch unter dem bildschirm-wunsch liegt.
+        #
+        # Die quantisierung ist NICHT kosmetik: ohne sie aendert sich das ziel
+        # bei jeder zoom-stufe und die verfeinerung wird jeden frame neu
+        # gerechnet -- derselbe fehler, den der predictor bei
+        # `snapshot_view_rel_tol` schon einmal hatte (37 neubauten je
+        # zoom-geste statt 1).
+        self.prediction_error_ladder_m = [0.001, 0.01, 1.0, 100.0, 1000.0]
         # apoapsis/periapsis-marker auf der prädiktionslinie (vom predictor
         # geliefert, hier nur gezeichnet).
+        # Die alte debug-textwand. Standardmaessig aus -- das spieler-HUD
+        # (spacesim/ui/hud/) traegt ihre werte seit Phase 4.
+        self.show_debug_hud = False
         self.show_apsis_markers = True
         self.apsis_marker_radius_px = 5.0
         self._prediction_line_cache_key_value = None
@@ -819,11 +951,21 @@ class Renderer:
             y0 + u2 * dy,
         )
 
-    def _build_clipped_polyline_runs(self, screen_points, margin_px=128.0):
+    def _build_clipped_polyline_runs(self, screen_points, margin_px=128.0,
+                                     coords=None):
         """
         Converts one logical predictor polyline into multiple visible screen-space runs.
         Important: preserve original segment topology. Never connect visible points
         across an offscreen gap.
+
+        `coords` sind dieselben punkte als (sx, sy)-arrays. Damit werden
+        segmente, die TRIVIAL ausserhalb liegen (beide enden jenseits
+        derselben kante), vorab in numpy aussortiert, statt fuer jedes der
+        ~3000 segmente einzeln zu klippen. Das ist keine naeherung: ein so
+        verworfenes segment kann das rechteck nicht schneiden, der klipper
+        haette also ohnehin None geliefert und den lauf abgebrochen -- genau
+        das tut die luecken-pruefung unten. Ohne `coords` laeuft alles wie
+        zuvor.
         """
         if screen_points is None or len(screen_points) < 2:
             return []
@@ -833,10 +975,41 @@ class Renderer:
         right = float(self.width) + float(margin_px)
         bottom = float(self.height) + float(margin_px)
 
+        segment_indices = None
+        if coords is not None and np is not None:
+            sx, sy = coords
+            if len(sx) == len(screen_points):
+                out_left = sx < left
+                out_right = sx > right
+                out_top = sy < top
+                out_bottom = sy > bottom
+                trivially_out = (
+                    (out_left[:-1] & out_left[1:])
+                    | (out_right[:-1] & out_right[1:])
+                    | (out_top[:-1] & out_top[1:])
+                    | (out_bottom[:-1] & out_bottom[1:])
+                )
+                segment_indices = np.flatnonzero(~trivially_out)
+
         runs = []
         run = []
 
-        for i in range(len(screen_points) - 1):
+        if segment_indices is None:
+            iterator = range(len(screen_points) - 1)
+        else:
+            iterator = segment_indices
+
+        previous_index = None
+        for i in iterator:
+            i = int(i)
+            # Uebersprungene segmente sind verworfene segmente: der lauf
+            # bricht dort ab, sonst wuerde ueber die luecke hinweg verbunden.
+            if previous_index is not None and i != previous_index + 1:
+                if len(run) >= 2:
+                    runs.append(run)
+                run = []
+            previous_index = i
+
             x0, y0 = screen_points[i]
             x1, y1 = screen_points[i + 1]
 
@@ -1035,12 +1208,16 @@ class Renderer:
         except Exception:
             return None
 
-    def _draw_texture_ortho(self, texture, x, y, width, height):
+    def _draw_texture_ortho(self, texture, x, y, width, height, color=(1.0, 1.0, 1.0, 1.0)):
         """Zeichnet eine textur als quad in der ortho-konvention (y nach oben).
 
         Ersatz für die früheren immediate-mode glTexCoord/glVertex-quads unter
         gluOrtho2D(0, w, 0, h): (x, y) ist die untere linke ecke, texcoord
         (0, 0) liegt ebendort (texturen werden vertikal geflippt hochgeladen).
+
+        color toent die textur multiplikativ (texquad.frag, u_color). Der
+        uniform MUSS gesetzt werden -- GL initialisiert uniforms mit 0, ein
+        ausgelassenes u_color zeichnet also nichts.
         """
         if self._texquad_vao is None or texture is None:
             return
@@ -1056,6 +1233,9 @@ class Renderer:
             round(float(x)), round(float(y)), float(width), float(height)
         )
         self._texquad_program['u_viewport'].value = (float(self.width), float(self.height))
+        self._texquad_program['u_color'].value = (
+            float(color[0]), float(color[1]), float(color[2]), float(color[3])
+        )
         texture.use(location=0)
         self._texquad_vao.render(moderngl.TRIANGLE_STRIP)
 
@@ -1117,7 +1297,12 @@ class Renderer:
             active_ids.add(body_id)
             trail = self._reference_traj_points.get(body_id)
             if trail is None:
-                trail = deque(maxlen=max(64, int(self.reference_trajectories_max_points)))
+                # Fester numpy-puffer statt deque von tupeln: das zeichnen
+                # braucht die spur als array, und np.asarray über eine
+                # tupel-liste kostete pro körper und frame spürbar zeit
+                # (27 körper x bis zu 300 punkte, jeden frame neu gewandelt).
+                cap = max(64, int(self.reference_trajectories_max_points))
+                trail = {'buf': np.empty((cap, 2), dtype=np.float64), 'n': 0}
                 self._reference_traj_points[body_id] = trail
 
             try:
@@ -1125,13 +1310,21 @@ class Renderer:
             except Exception:
                 continue
 
-            if trail:
-                lx, ly = trail[-1]
-                dx = fx - lx
-                dy = fy - ly
+            buf = trail['buf']
+            n = trail['n']
+            if n > 0:
+                dx = fx - buf[n - 1, 0]
+                dy = fy - buf[n - 1, 1]
                 if dx * dx + dy * dy < 1e-18:
                     continue
-            trail.append((float(fx), float(fy)))
+            if n < buf.shape[0]:
+                buf[n, 0] = fx
+                buf[n, 1] = fy
+                trail['n'] = n + 1
+            else:
+                buf[:-1] = buf[1:]
+                buf[-1, 0] = fx
+                buf[-1, 1] = fy
 
         stale_ids = [k for k in self._reference_traj_points.keys() if k not in active_ids]
         for stale_id in stale_ids:
@@ -1153,12 +1346,13 @@ class Renderer:
                 continue
 
             trail = self._reference_traj_points.get(id(body))
-            if trail is None or len(trail) < 2:
+            if trail is None or trail['n'] < 2:
                 continue
 
             # Vektorisiert statt python-schleife: spuren haben bis zu
             # reference_trajectories_max_points punkte pro körper und frame.
-            arr = np.asarray(trail, dtype=np.float64)
+            # `buf[:n]` ist eine sicht auf den ringpuffer -- keine wandlung.
+            arr = trail['buf'][:trail['n']]
             sxs = half_w + (arr[:, 0] - camera_frame_xy[0]) * scale
             sys_ = half_h - (arr[:, 1] - camera_frame_xy[1]) * scale
             min_sx = float(sxs.min()); max_sx = float(sxs.max())
@@ -2112,6 +2306,10 @@ class Renderer:
             int(self.prediction_render_max_draw_points),
             None if self.prediction_render_max_world_length is None else float(self.prediction_render_max_world_length),
             None if self.prediction_render_max_screen_length_px is None else float(self.prediction_render_max_screen_length_px),
+            bool(self.prediction_hermite_enabled),
+            float(self.prediction_detail_scale),
+            int(self.prediction_hermite_max_subdiv),
+            tuple(float(v) for v in self.prediction_error_ladder_m),
         )
 
     def _prediction_scan_indices(self, raw_count, stats):
@@ -2129,9 +2327,27 @@ class Renderer:
         return indices
 
     def _iter_prediction_indices_evenly(self, count, max_scan):
+        """Gleichmaessige stichprobe der rohpunkte -- GEMERKT, nicht neu gebaut.
+
+        Das ergebnis haengt einzig an (count, max_scan). Der cache greift
+        aber NUR, solange beide gleich bleiben -- und `count` aendert sich im
+        zeitraffer jeden frame, weil der halt die punkteliste vorn beschneidet
+        (siehe Predictor._hold_advance). Deshalb muss auch der neubau billig
+        sein; er laeuft ueber numpy statt ueber eine Python-schleife.
+        """
         count = int(count)
         max_scan = int(max_scan)
 
+        key = (count, max_scan)
+        cached = getattr(self, '_prediction_indices_cache', None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        indices = self._build_prediction_indices(count, max_scan)
+        self._prediction_indices_cache = (key, indices)
+        return indices
+
+    def _build_prediction_indices(self, count, max_scan):
         if count <= 0:
             return []
 
@@ -2142,6 +2358,20 @@ class Renderer:
             return [0]
 
         step = (count - 1) / float(max_scan - 1)
+
+        if np is not None:
+            # np.rint rundet wie Pythons round() zur GERADEN zahl hin, die
+            # stichprobe ist damit dieselbe wie in der schleife unten.
+            idx = np.rint(np.arange(max_scan, dtype=np.float64) * step)
+            idx = idx.astype(np.int64)
+            np.clip(idx, 0, count - 1, out=idx)
+            # Nur AUFEINANDERFOLGENDE wiederholungen fallen weg -- genau das
+            # tut die schleife mit ihrem `last`.
+            keep = np.empty(idx.shape, dtype=bool)
+            keep[0] = True
+            np.not_equal(idx[1:], idx[:-1], out=keep[1:])
+            return idx[keep]
+
         indices = []
         last = -1
         for i in range(max_scan):
@@ -2307,6 +2537,27 @@ class Renderer:
         effective_max_segment = self._effective_max_segment_step(camera)
         max_draw_points = max(2, min(int(self.prediction_sampling_max_points), int(self.prediction_render_max_draw_points)))
 
+        # EIN BUDGET FUER DIE GANZE KETTE. Der zeichenweg hat drei stellen, an
+        # denen er punkte wegwirft (min-schritt-verdichtung, RDP, run-kappung)
+        # und eine, an der er welche setzt (kubische unterteilung). Solange die
+        # wegwerfenden ihre eigene, aelteren zoom-heuristik folgende toleranz
+        # benutzen, macht die eine haelfte zunichte, was die andere aufbaut:
+        # gemessen 1990 m abweichung bei einer zusage von 1000 m, weil die
+        # RDP-toleranz bis 0.25 px gehen darf -- bei 4.4e-5 px/m sind das
+        # 5700 m. Also bekommen alle stufen ihren anteil an DERSELBEN zusage.
+        self._prediction_detail_budget = None
+        if self.prediction_hermite_enabled:
+            budget = self._prediction_error_budget(camera)
+            if budget is not None:
+                self._prediction_detail_budget = budget
+                eps_px = budget[1]
+                # Die anteile addieren sich im schlimmsten fall, also muessen
+                # sie zusammen unter 1 bleiben: 0.5 unterteilung + 0.25 RDP +
+                # 0.1 verdichtung = 0.85. Mit 0.5/0.5/0.25 (summe 1.25) lag die
+                # gemessene abweichung bei 1.12 der zusage -- knapp darueber.
+                effective_tolerance = max(1e-3, min(effective_tolerance, eps_px * 0.25))
+                effective_min_step = max(1e-3, min(effective_min_step, eps_px * 0.1))
+
         cache_key = self._make_prediction_line_cache_key(path_points, input_count, camera, anchor_world)
         if cache_key == self._prediction_line_cache_key_value and self._prediction_line_cache_points is not None:
             sampled_runs = self._prediction_line_cache_points
@@ -2392,6 +2643,29 @@ class Renderer:
         stats['draw_points'] = int(stats['drawn'])
         stats['runs'] = len(sampled_runs)
         self.debug_info['prediction_points_drawn'] = int(stats['drawn'])
+
+        # WAS DIE LINIE WIRKLICH KANN, NICHT WAS SIE VERSPRICHT. Die sprosse
+        # der leiter ist das ziel; der interpolations-boden des predictors
+        # (punktabstand^4 / 384 R^3) kann darueber liegen, und dann ist ER die
+        # erreichte genauigkeit. Beides anzuzeigen ist der einzige weg, eine
+        # zugesagte praezision nicht still zu erfinden.
+        floor = None
+        try:
+            get_floor = getattr(predictor, 'interpolation_error_floor', None)
+            if get_floor is not None:
+                floor = get_floor()
+        except Exception:
+            floor = None
+        stats['detail_floor_m'] = floor
+        eps_m = stats.get('detail_eps_m')
+        if eps_m is not None:
+            achieved = eps_m if floor is None else max(eps_m, floor)
+            stats['detail_achieved_m'] = achieved
+            self.debug_info['prediction_detail_target_m'] = eps_m
+            self.debug_info['prediction_detail_achieved_m'] = achieved
+            self.debug_info['prediction_detail_added'] = int(
+                stats.get('hermite_added', 0))
+
         self._last_prediction_render_stats = stats
 
     def _format_apsis_distance(self, r):
@@ -2555,6 +2829,48 @@ class Renderer:
         except Exception:
             max_world_length = None
 
+        # Schneller weg: alle punkte auf einmal projizieren. Greift nur, wenn
+        # keine weltlaengen-begrenzung aktiv ist (die braucht den laufenden
+        # summenwert und damit die schleife) und der rahmen eine stapel-
+        # transformation anbietet. Sonst faellt es auf die schleife darunter
+        # zurueck -- dieselbe rechnung, nur langsam.
+        batch = None
+        if max_world_length is None:
+            batch = self._project_prediction_batch(
+                path_points, indices, camera, camera_frame_xy, margin_px)
+
+        if batch is not None:
+            screen_points, visible_count, coords = batch
+
+            # ZWISCHEN den groben stuetzstellen kubisch nachlegen -- so fein,
+            # wie der bildschirm es zeigt, und nur dort, wo etwas zu sehen
+            # ist. Schlaegt das fehl (kein tangenten-paar, kein stapel-
+            # rahmen, kein budget), bleibt es bei den groben punkten und die
+            # linie sieht aus wie vorher.
+            budget = getattr(self, '_prediction_detail_budget', None)
+            if budget is not None:
+                eps_m, eps_px, rung = budget
+                stats['detail_eps_m'] = eps_m
+                stats['detail_eps_px'] = eps_px
+                stats['detail_rung'] = rung
+                refined = self._hermite_refine_world(
+                    path_points, indices, coords, camera,
+                    eps_px * 0.5, margin_px,
+                    int(self.prediction_render_max_draw_points), stats)
+                if refined is not None:
+                    dense = self._project_prediction_batch(
+                        refined, np.arange(refined.shape[0], dtype=np.int64),
+                        camera, camera_frame_xy, margin_px)
+                    if dense is not None:
+                        screen_points, visible_count, coords = dense
+
+            stats['scanned'] = stats.get('scanned', 0) + len(screen_points)
+            stats['scanned_points'] = stats.get('scanned_points', 0) + len(screen_points)
+            stats['visible'] = stats.get('visible', 0) + visible_count
+            return self._runs_from_screen_points(
+                screen_points, camera, tolerance_px, min_step_px,
+                max_segment_px, max_points, margin_px, stats, coords=coords)
+
         prev_world = None
         prev_time = None
         world_accum = 0.0
@@ -2618,7 +2934,302 @@ class Renderer:
                 stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + max(0, raw_count - i - 1)
                 break
 
-        runs = self._build_clipped_polyline_runs(screen_points, margin_px)
+        return self._runs_from_screen_points(
+            screen_points, camera, tolerance_px, min_step_px, max_segment_px,
+            max_points, margin_px, stats)
+
+    def _project_prediction_batch(self, path_points, indices, camera,
+                                  camera_frame_xy, margin_px):
+        """Alle stichproben-punkte in EINEM rutsch projizieren.
+
+        Gibt (screen_points, sichtbar_anzahl) zurueck oder None, wenn der
+        schnelle weg nicht anwendbar ist. Rechnerisch identisch zur schleife
+        in _adaptive_prediction_screen_points -- dieselbe rahmen-
+        transformation, derselbe massstab, dieselbe y-spiegelung.
+
+        Motivation: gemessen lag die punktweise projektion bei 5.6 ms je
+        frame, praktisch alles davon Python-aufruf-overhead ueber 3000
+        punkte, von denen am ende 196 gezeichnet werden.
+        """
+        if np is None:
+            return None
+        if not isinstance(path_points, np.ndarray):
+            return None
+        if path_points.ndim != 2 or path_points.shape[1] < 3:
+            return None
+        if len(indices) == 0:
+            return ([], 0)
+
+        frame = self._active_frame()
+        transform = getattr(frame, 'to_this_frame_xy_arrays', None)
+        if transform is None:
+            return None
+
+        idx = np.asarray(indices, dtype=np.int64)
+        sub = path_points[idx]
+        xs = np.ascontiguousarray(sub[:, 0], dtype=np.float64)
+        ys = np.ascontiguousarray(sub[:, 1], dtype=np.float64)
+        ts = np.ascontiguousarray(sub[:, 2], dtype=np.float64)
+
+        try:
+            transformed = transform(ts, xs, ys)
+        except Exception:
+            return None
+        if transformed is None:
+            return None
+        frame_x, frame_y = transformed
+
+        scale = float(camera.scale)
+        sx = self.width * 0.5 + (frame_x - camera_frame_xy[0]) * scale
+        sy = self.height * 0.5 - (frame_y - camera_frame_xy[1]) * scale
+
+        # Gleiche schranke wie _is_on_screen -- rein diagnostisch (stats).
+        margin = float(margin_px)
+        visible = int(np.count_nonzero(
+            (sx >= -margin) & (sx <= self.width + margin)
+            & (sy >= -margin) & (sy <= self.height + margin)))
+        return (list(zip(sx.tolist(), sy.tolist())), visible, (sx, sy))
+
+    # ------------------------------------------------------------------
+    # Aufloesungsgetriebene verfeinerung
+    # ------------------------------------------------------------------
+
+    def _prediction_error_budget(self, camera):
+        """Erlaubte abweichung der gezeichneten linie -- in metern und pixeln.
+
+        Der bildschirm gibt den wunsch vor (`eps_px / view_scale`), die
+        toleranz-leiter quantisiert ihn. Gewaehlt wird die GROESSTE sprosse,
+        die den wunsch noch einhaelt; darunter/darueber wird geklemmt. Damit
+        ist die zugesagte genauigkeit nie schlechter als angefordert, und sie
+        aendert sich nur an wenigen diskreten zoom-schwellen statt stetig.
+
+        Rueckgabe: ``(eps_m, eps_px, rung_index)`` oder ``None``.
+        """
+        try:
+            scale = abs(float(camera.scale))
+        except Exception:
+            return None
+        if not (scale > 0.0) or not math.isfinite(scale):
+            return None
+
+        try:
+            detail = float(self.prediction_detail_scale)
+        except Exception:
+            detail = 1.0
+        detail = max(1e-3, detail)
+        eps_px = 0.3 / detail
+
+        ladder = self.prediction_error_ladder_m
+        try:
+            rungs = sorted(float(v) for v in ladder if float(v) > 0.0)
+        except Exception:
+            rungs = []
+        if not rungs:
+            return (eps_px / scale, eps_px, -1)
+
+        wanted_m = eps_px / scale
+        index = 0
+        for i, rung in enumerate(rungs):
+            if rung <= wanted_m:
+                index = i
+            else:
+                break
+        if wanted_m < rungs[0]:
+            index = 0
+        eps_m = rungs[index]
+        # Die sprosse ist das versprechen; die pixel-toleranz muss sich ihr
+        # beugen, sonst wird feiner gezeichnet als zugesagt (kostet) oder
+        # groeber (bricht das versprechen).
+        return (eps_m, eps_m * scale, index)
+
+    def _hermite_refine_world(self, path_points, indices, coords, camera,
+                              eps_px, margin_px, budget, stats):
+        """Kubische zwischenpunkte setzen -- nur sichtbar, nur so fein wie noetig.
+
+        Arbeitet in WELTKOORDINATEN und gibt ein dichteres ``(m, 3)``-array
+        ``[x, y, t]`` zurueck, das anschliessend durch dieselbe
+        stapel-projektion laeuft wie die groben punkte. In *screen*-space zu
+        unterteilen waere falsch: jeder zwischenpunkt gehoert zu einer eigenen
+        zeit, und ein bewegter oder rotierender plot-rahmen bildet ihn deshalb
+        anders ab als seine nachbarn.
+
+        Die unterteilungszahl je segment kommt aus der flachheits-schranke fuer
+        kubische kurven (siehe unten). Das ist eine heuristik fuer die ANZAHL --
+        die gezeichneten punkte selbst werden einzeln zu ihrer eigenen zeit
+        projiziert und sind damit exakt.
+
+        Rueckgabe: ``(m, 3)``-array oder ``None`` (dann bleibt alles wie bisher).
+        """
+        if np is None or not self.prediction_hermite_enabled:
+            return None
+        if not isinstance(path_points, np.ndarray) or path_points.ndim != 2:
+            return None
+        # Ohne die geschwindigkeits-spalten gibt es keine tangente und damit
+        # nichts zu interpolieren.
+        if path_points.shape[1] < 5:
+            return None
+        if coords is None:
+            return None
+
+        idx = np.asarray(indices, dtype=np.int64)
+        if idx.size < 2:
+            return None
+
+        sx, sy = coords
+        if sx.shape[0] != idx.shape[0]:
+            return None
+
+        sub = path_points[idx]
+        x0 = sub[:-1, 0]; y0 = sub[:-1, 1]; t0 = sub[:-1, 2]
+        x1 = sub[1:, 0];  y1 = sub[1:, 1];  t1 = sub[1:, 2]
+        vx0 = sub[:-1, 3]; vy0 = sub[:-1, 4]
+        vx1 = sub[1:, 3];  vy1 = sub[1:, 4]
+        dt = t1 - t0
+
+        sx0 = sx[:-1]; sy0 = sy[:-1]
+        sx1 = sx[1:];  sy1 = sy[1:]
+
+        third = dt / 3.0
+
+        # Ohne endliche tangente an BEIDEN enden gibt es kein polynom -- der
+        # abschnitt bleibt dann eine gerade. Genau dafuer schreiben die
+        # sehnen-kernel NaN in die geschwindigkeitsspalten.
+        usable = (np.isfinite(vx0) & np.isfinite(vy0)
+                  & np.isfinite(vx1) & np.isfinite(vy1)
+                  & np.isfinite(dt) & (dt > 0.0))
+        if not np.any(usable):
+            return None
+
+        # SICHTBARKEIT ZUERST, DANN RECHNEN. Die flachheits-schaetzung kostet
+        # zwei zusaetzliche rahmen-transformationen je segment -- bei 3000
+        # segmenten gemessen 2.3 ms je frame, waehrend am ende fuenf punkte
+        # dazukamen, weil nur ~200 segmente ueberhaupt im bild lagen. Die
+        # vorauswahl laeuft deshalb allein auf den schon vorhandenen
+        # bildschirm-endpunkten.
+        #
+        # Als grosszuegige schranke fuer die auslenkung dient die sehnenlaenge
+        # selbst: eine kubische kurve liegt in der konvexen huelle ihrer
+        # kontrollpunkte, und die liegen bei einer glatten bahn rund eine
+        # drittel sehne neben den endpunkten.
+        margin = float(margin_px)
+        chord = np.hypot(sx1 - sx0, sy1 - sy0)
+        chord = np.where(np.isfinite(chord), chord, 0.0)
+        lo_x = np.minimum(sx0, sx1) - chord
+        hi_x = np.maximum(sx0, sx1) + chord
+        lo_y = np.minimum(sy0, sy1) - chord
+        hi_y = np.maximum(sy0, sy1) + chord
+        visible = ((hi_x >= -margin) & (lo_x <= self.width + margin)
+                   & (hi_y >= -margin) & (lo_y <= self.height + margin))
+        candidate = visible & usable
+        if not np.any(candidate):
+            return None
+
+        # Zweite differenzen der Bezier-kontrollpunkte
+        # (b0 = p0, b1 = p0 + v0*dt/3, b2 = p1 - v1*dt/3, b3 = p1), ausmultipliziert
+        # -- in WELTKOORDINATEN und dann mit dem massstab in pixel umgerechnet,
+        # statt die kontrollpunkte eigens auf den schirm zu projizieren.
+        #
+        # Das darf man, weil alle plot-rahmen STARR sind (verschiebung plus
+        # drehung): beides laesst laengen unveraendert, und eine zweite
+        # differenz ist eine laenge. Gemessen kostete die eigene projektion
+        # zwei zusaetzliche rahmen-transformationen ueber ~3000 segmente und
+        # damit 1.9 ms je frame -- fuer eine ZAHL, die ohnehin nur die
+        # unterteilungsstufe waehlt.
+        #
+        # Nicht erfasst wird die zusaetzliche kruemmung, die ein ROTIERENDER
+        # rahmen ueber die dauer eines segments selbst erzeugt. Fuer den
+        # Erde-Sonne-richtungsrahmen sind das ~0.14 m gegen 0.83 m echte
+        # woelbung; erst bei sehr schnell drehenden rahmen waere das relevant,
+        # und dort faengt `prediction_sampling_max_segment_px` die luecke ab.
+        d1x = (x1 - x0) - (2.0 * vx0 + vx1) * third
+        d1y = (y1 - y0) - (2.0 * vy0 + vy1) * third
+        d2x = (x0 - x1) + (vx0 + 2.0 * vx1) * third
+        d2y = (y0 - y1) + (vy0 + 2.0 * vy1) * third
+        scale = abs(float(camera.scale))
+        second = np.maximum(np.hypot(d1x, d1y), np.hypot(d2x, d2y)) * scale
+        second = np.where(np.isfinite(second) & candidate, second, 0.0)
+
+        # Wie viele teilstuecke braucht es, damit der polygonzug hoechstens
+        # `tol` von der kurve abweicht?
+        #
+        #   d <= max|B''| / (8 n^2)     und     max|B''| <= 6 M
+        #   =>  d <= 0.75 M / n^2       =>  n = ceil(sqrt(0.75 M / tol))
+        #
+        # Der faktor ist nachgerechnet, nicht geraten: mit dem in vielen
+        # rasterisierern kursierenden sqrt(3)/8 statt 3/4 wird um 1.86 zu
+        # grob unterteilt (n = 4 statt 8), und genau das war messbar -- 1122 m
+        # abweichung bei einer zusage von 1000 m, exakt sehne/n^2.
+        tol = max(1e-4, float(eps_px))
+        n_seg = np.ceil(np.sqrt(0.75 * second / tol))
+        n_seg = np.where(np.isfinite(n_seg), n_seg, 1.0)
+        counts = np.clip(n_seg - 1.0, 0.0,
+                         float(max(0, int(self.prediction_hermite_max_subdiv)))
+                         ).astype(np.int64)
+        counts[~candidate] = 0
+
+        total = int(counts.sum())
+        if total <= 0:
+            return None
+
+        # BUDGET GLEICHMAESSIG DRUECKEN, NIE ABSCHNEIDEN. Wer das budget von
+        # vorn aufbraucht, verliert das ende der linie -- und ein fehlender
+        # horizont macht die anzeige unbrauchbar (Ap/Pe weg, CLOSEST leer),
+        # waehrend eine gleichmaessig groebere linie nur etwas kantiger ist.
+        room = int(budget) - int(idx.shape[0])
+        if room < 0:
+            room = 0
+        if total > room:
+            if room <= 0:
+                return None
+            factor = room / float(total)
+            counts = np.floor(counts * factor).astype(np.int64)
+            total = int(counts.sum())
+            if total <= 0:
+                return None
+            stats['hermite_budget_limited'] = True
+
+        # Auswertungsstellen: je segment `counts[i]` innere parameter.
+        seg_id = np.repeat(np.arange(counts.shape[0], dtype=np.int64), counts)
+        offsets = np.concatenate(([0], np.cumsum(counts)[:-1]))
+        local = np.arange(total, dtype=np.int64) - offsets[seg_id]
+        s = (local + 1).astype(np.float64) / (counts[seg_id] + 1).astype(np.float64)
+
+        s2 = s * s
+        s3 = s2 * s
+        h00 = 2.0 * s3 - 3.0 * s2 + 1.0
+        h10 = s3 - 2.0 * s2 + s
+        h01 = -2.0 * s3 + 3.0 * s2
+        h11 = s3 - s2
+
+        seg_dt = dt[seg_id]
+        ix = (h00 * x0[seg_id] + h10 * seg_dt * vx0[seg_id]
+              + h01 * x1[seg_id] + h11 * seg_dt * vx1[seg_id])
+        iy = (h00 * y0[seg_id] + h10 * seg_dt * vy0[seg_id]
+              + h01 * y1[seg_id] + h11 * seg_dt * vy1[seg_id])
+        it = t0[seg_id] + s * seg_dt
+
+        # Grobe und neue punkte in EINE aufsteigende reihenfolge bringen.
+        n_coarse = int(idx.shape[0])
+        out = np.empty((n_coarse + total, 3), dtype=np.float64)
+        before = np.concatenate(([0], np.cumsum(counts)))
+        coarse_slots = np.arange(n_coarse, dtype=np.int64) + before
+        out[coarse_slots, 0] = sub[:, 0]
+        out[coarse_slots, 1] = sub[:, 1]
+        out[coarse_slots, 2] = sub[:, 2]
+        insert_slots = coarse_slots[seg_id] + 1 + local
+        out[insert_slots, 0] = ix
+        out[insert_slots, 1] = iy
+        out[insert_slots, 2] = it
+
+        stats['hermite_added'] = total
+        stats['hermite_segments'] = int(np.count_nonzero(counts))
+        return out
+
+    def _runs_from_screen_points(self, screen_points, camera, tolerance_px,
+                                 min_step_px, max_segment_px, max_points,
+                                 margin_px, stats, coords=None):
+        runs = self._build_clipped_polyline_runs(screen_points, margin_px,
+                                                 coords=coords)
         stats['runs'] = len(runs)
         stats['clipped_runs'] = len(runs)
         if not runs:
@@ -2634,18 +3245,38 @@ class Renderer:
             )
 
             min_step2 = min_step_px * min_step_px
-            compact = [run[0]]
-            for sx, sy in run[1:]:
-                lx, ly = compact[-1]
-                dx = sx - lx
-                dy = sy - ly
-                if dx * dx + dy * dy >= min_step2:
-                    compact.append((sx, sy))
-            if compact[-1] != run[-1]:
-                compact.append(run[-1])
+            if _LINE_KERNELS_OK and len(run) > 2:
+                # Numba-weg: dieselbe verdichtung und dieselbe RDP-rekursion,
+                # nur nicht mehr punkt fuer punkt in Python (gemessen ~1500
+                # abstands-aufrufe pro frame in der Python-fassung).
+                run_arr = np.asarray(run, dtype=np.float64)
+                rxs = np.ascontiguousarray(run_arr[:, 0])
+                rys = np.ascontiguousarray(run_arr[:, 1])
+                cidx = _compact_min_step_numba(rxs, rys, float(min_step2))
+                cx = rxs[cidx]
+                cy = rys[cidx]
+                compact = list(zip(cx.tolist(), cy.tolist()))
+            else:
+                compact = [run[0]]
+                for sx, sy in run[1:]:
+                    lx, ly = compact[-1]
+                    dx = sx - lx
+                    dy = sy - ly
+                    if dx * dx + dy * dy >= min_step2:
+                        compact.append((sx, sy))
+                if compact[-1] != run[-1]:
+                    compact.append(run[-1])
 
             if len(compact) > 2:
-                keep_indices = self._rdp_indices(compact, tolerance_px)
+                if _LINE_KERNELS_OK:
+                    # cx/cy stammen aus der numba-verdichtung oben -- wenn
+                    # len(compact) > 2, ist dieser weg garantiert gelaufen.
+                    keep_mask = _rdp_keep_numba(
+                        np.ascontiguousarray(cx), np.ascontiguousarray(cy),
+                        float(tolerance_px) * float(tolerance_px))
+                    keep_indices = np.nonzero(keep_mask)[0].tolist()
+                else:
+                    keep_indices = self._rdp_indices(compact, tolerance_px)
                 if run_starts_at_path_origin:
                     preserve_count = min(32, len(compact))
                     forced = set(range(preserve_count))
@@ -2763,6 +3394,16 @@ class Renderer:
         self._draw_hud_quad(x, y, width, height)
 
     def _render_hud(self, camera, predictor=None):
+        """Die alte debug-textwand unten links.
+
+        Seit Phase 4 standardmaessig AUS: ihre werte stehen jetzt im
+        spieler-HUD (spacesim/ui/hud/) bzw. im ImGui-entwicklerpanel (F1).
+        Sie bleibt als schneller rohwert-blick erhalten und laesst sich ueber
+        renderer.show_debug_hud in config.json wieder einschalten.
+        """
+        if not getattr(self, 'show_debug_hud', False):
+            return
+
         # HUD-Texte vorbereiten
         def _fmt_dist(n):
             if n is None:

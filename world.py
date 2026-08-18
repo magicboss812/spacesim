@@ -1,6 +1,16 @@
 import math
 from vec import Vec2
 from bodies import body
+
+try:
+    import numpy as _np
+    import world_kernels as _wk
+    _KERNELS_OK = bool(_wk.NUMBA_AVAILABLE)
+except Exception:                                    # pragma: no cover
+    _np = None
+    _wk = None
+    _KERNELS_OK = False
+
 G = 6.6730831e-11
 
 class world:
@@ -11,6 +21,21 @@ class world:
         self.time = 0.0
         self.integrator_max_step = 30.0
         self.integrator_min_step = 0.01
+        # Zeitraffer-decke fuer die schrittweite. `integrator_max_step` ist die
+        # UNTERGRENZE dieser decke -- in echtzeit bleibt sie exakt 30 s, der
+        # integrator rechnet dort also dieselben floats wie bisher. Erst wenn
+        # set_warp_step_ceiling() eine hoehere decke setzt, darf der schritt
+        # groesser werden. Siehe dort fuer die messung, die das rechtfertigt.
+        self.integrator_max_step_effective = 0.0
+        self.integrator_warp_substep_target = 40.0
+        self.integrator_max_step_ceiling = 1.0e6
+        # Zuletzt angenommene schrittweite. Ohne dieses gedaechtnis faengt
+        # jeder aufruf wieder bei der decke an und arbeitet sich per ablehnung
+        # herunter -- mit angehobener decke ist das der groesste einzelposten
+        # (gemessen 2000-km-orbit bei 1 y/s: 19810 ablehnungen, 629 ms/frame).
+        # Nur aktiv, wenn die decke ueber der konfigurierten liegt, damit der
+        # standardfall bit-identisch bleibt.
+        self._integrator_h_hint = 0.0
         self.integrator_position_tolerance = 1.0
         self.integrator_velocity_tolerance = 0.001
         self.integrator_debug = False
@@ -20,6 +45,12 @@ class world:
         self.integrator_last_min_step_forced = 0
         self.integrator_last_worst_pos_error = 0.0
         self.integrator_last_worst_vel_error = 0.0
+        # Numba-fassung des integrators benutzen, wenn verfuegbar. Gleiche
+        # formeln, gleiche toleranzen, gleiche reihenfolge -- nur ohne
+        # Python-objekte (siehe world_kernels.py). Zum vergleichen der
+        # beiden pfade auf False setzen; die energiedrift muss identisch
+        # bleiben.
+        self.use_fast_integrator = True
         # Epicycle (Ptolemaic) mode state. When enabled, top-level bodies
         # (those with no parent) will be reparented to the chosen center
         # body so that the resulting motion produces epicycles relative
@@ -27,6 +58,88 @@ class world:
         self._epicycle_enabled = False
         self._epicycle_center = None
         self._epicycle_saved = {}
+
+    def characteristic_timescale(self, ship):
+        """Zeitskala der bahnbewegung um den DOMINIERENDEN koerper, in sekunden.
+
+        Fuer eine kreisbahn ist sqrt(r/|g|) genau T/2pi -- die zeit, in der sich
+        der geschwindigkeitsvektor nennenswert dreht. Sie ist die ehrliche
+        obergrenze fuer einen zeitraffer-schritt: rueckt ein frame um mehr als
+        einen bruchteil davon vor, ist die bahn nicht mehr aufgeloest, ganz
+        gleich wie fein der integrator rechnet.
+
+        Warum nicht die umlaufzeit aus dem HUD? Weil die gegen den vom SPIELER
+        gewaehlten bezugskoerper gerechnet wird. Wer im erdorbit die Sonne als
+        bezug einstellt, bekaeme dort ein jahr statt zwei stunden -- die grenze
+        haenge dann an einer anzeigeeinstellung statt an der physik. Der
+        dominierende koerper ist der mit dem groessten G*m/r^2, also der, der
+        die bahn tatsaechlich bestimmt.
+
+        Rueckgabe None, wenn es keinen dominierenden koerper gibt.
+        """
+        if ship is None:
+            return None
+        px = ship.position.x
+        py = ship.position.y
+        best_g = 0.0
+        best_r2 = 0.0
+        total_g = 0.0
+        for b in self.body:
+            if b is ship or getattr(b, 'is_ship', False):
+                continue
+            mass = float(getattr(b, 'mass', 0.0) or 0.0)
+            if mass <= 0.0:
+                continue
+            dx = b.position.x - px
+            dy = b.position.y - py
+            r2 = dx * dx + dy * dy
+            if r2 < 1e-6:
+                continue
+            g = self.G * mass / r2
+            total_g += g
+            if g > best_g:
+                best_g = g
+                best_r2 = r2
+        if best_g <= 0.0 or total_g <= 0.0:
+            return None
+        return math.sqrt(math.sqrt(best_r2) / total_g)
+
+    def set_warp_step_ceiling(self, sim_seconds_per_frame):
+        """Decke fuer die integrator-schrittweite aus der raffung ableiten.
+
+        Die kosten von update_dynamics sind LINEAR in der zahl der teilschritte,
+        und die ist sim-sekunden-pro-frame / schrittweite. Eine feste decke von
+        30 s heisst deshalb: bei 365 d/s 5984 teilschritte je frame, gemessen
+        168.7 ms -- das 30-fache des frame-budgets.
+
+        Statt die decke an der geometrie auszurichten (wie es der predictor mit
+        rkn_adaptive_far_maxdt tut) wird hier direkt eine ZAHL VON TEILSCHRITTEN
+        angepeilt. Das ist zulaessig, weil die schrittweite ohnehin nicht von der
+        decke bestimmt wird, sondern von der fehlerkontrolle: gemessen in einem
+        400-km-orbit aendert eine anhebung der decke von 30 s auf 100 000 s die
+        TATSAECHLICHE schrittweite nur von 27.7 s auf 34.7 s (hoehendrift ueber
+        5 umlaeufe: +0.374 km gegen +0.411 km). Nahe an einem koerper haelt also
+        die toleranz die zuegel, die decke greift nur im fernfeld -- und dort
+        kostet sie das 500-fache.
+
+        Die decke ist damit eine UNTERGRENZE der schrittweite, keine obergrenze
+        der genauigkeit: reicht sie nicht, lehnt die fehlerkontrolle ab und
+        halbiert, es entstehen also mehr teilschritte als angepeilt. Genau so
+        soll es sein.
+
+        Gemessen bei 365 d/s (28 koerper, 180 fps): 168.7 ms -> 0.31 ms.
+        """
+        base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
+        span = abs(float(sim_seconds_per_frame))
+        target = max(float(getattr(self, "integrator_warp_substep_target", 40.0)), 1.0)
+        cap = max(float(getattr(self, "integrator_max_step_ceiling", 1.0e6)), base)
+        self.integrator_max_step_effective = min(max(base, span / target), cap)
+        return self.integrator_max_step_effective
+
+    def effective_max_step(self):
+        """Tatsaechlich benutzte decke -- nie kleiner als die konfigurierte."""
+        base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
+        return max(base, float(getattr(self, "integrator_max_step_effective", 0.0)))
 
     def update_planets(self, dt):
         for body in self.body:
@@ -224,15 +337,25 @@ class world:
         direction = 1.0 if total_dt >= 0.0 else -1.0
         remaining = abs(total_dt)
 
-        max_step = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
+        max_step = self.effective_max_step()
         min_step = max(float(getattr(self, "integrator_min_step", 0.01)), 1e-12)
         pos_tol = max(float(getattr(self, "integrator_position_tolerance", 1.0)), 1e-12)
         vel_tol = max(float(getattr(self, "integrator_velocity_tolerance", 0.001)), 1e-12)
 
+        if self._advance_dynamics_fast(
+            dynamic_bodies, total_dt, max_step, min_step, pos_tol, vel_tol
+        ):
+            self._log_integrator_debug(total_dt)
+            self.time += total_dt
+            return
+
         t = float(self.time)
 
+        hint = self._step_hint(max_step)
+        hint = max_step if hint <= 0.0 else min(hint, max_step)
+
         while remaining > 1e-12:
-            h = min(max_step, remaining) * direction
+            h = min(hint, remaining) * direction
 
             while True:
                 saved_states = [
@@ -276,6 +399,7 @@ class world:
                     self.integrator_last_substeps += 1
                     t += h
                     remaining -= abs(h)
+                    hint = min(abs(h) * 2.0, max_step)
                     break
 
                 for b, p_old, v_old in saved_states:
@@ -301,8 +425,15 @@ class world:
                     self.integrator_last_min_step_forced += 1
                     t += h
                     remaining -= abs(h)
+                    hint = min(abs(h) * 2.0, max_step)
                     break
 
+        self._store_step_hint(max_step, hint)
+        self._log_integrator_debug(total_dt)
+
+        self.time += total_dt
+
+    def _log_integrator_debug(self, total_dt):
         if getattr(self, "integrator_debug", False):
             print(
                 "INTEGRATOR_DBG: "
@@ -314,7 +445,158 @@ class world:
                 f"worst_vel={self.integrator_last_worst_vel_error:.6e}"
             )
 
-        self.time += total_dt
+    # ------------------------------------------------------ schneller pfad
+
+    def _serialize_for_kernel(self, dynamic_bodies):
+        """Koerperzustand in flache arrays. None = fuer den kernel ungeeignet.
+
+        Abgelehnt wird, sobald ein `is_moon_of` auf einen koerper zeigt, der
+        gar nicht in self.body steht: die python-fassung wuerde dessen
+        position trotzdem addieren, der kernel kann sie nicht indizieren.
+        Lieber den langsamen, aber sicher gleichwertigen weg gehen, als in
+        so einem fall still etwas anderes zu rechnen.
+        """
+        bodies = self.body
+        count = len(bodies)
+
+        # Struktur-cache: massen, bahnelemente und eltern-verknuepfungen
+        # aendern sich nur, wenn die KOERPERLISTE selbst umgebaut wird
+        # (release_body, epizykel an/aus) -- und jede dieser aenderungen
+        # aendert die id-tupel unten. Positionen und der Kepler-epoch-
+        # bookmark wandern dagegen mit jedem weltschritt und werden pro
+        # aufruf neu eingetragen. Vorher wurden ALLE elf arrays bei jedem
+        # teilschritt neu gebaut (5-6x pro frame bei hohem zeitraffer).
+        structure_key = (
+            tuple(id(b) for b in bodies),
+            tuple(id(getattr(b, "is_moon_of", None)) for b in bodies),
+        )
+        cached = getattr(self, "_kernel_static_cache", None)
+        if cached is not None and cached[0] == structure_key:
+            (_, index_of, bx, by, bm, k_has, k_a, k_e, k_arg, k_parent,
+             k_ref_theta, k_ref_time, k_mu) = cached
+        else:
+            index_of = {id(b): i for i, b in enumerate(bodies)}
+
+            bx = _np.empty(count, dtype=_np.float64)
+            by = _np.empty(count, dtype=_np.float64)
+            bm = _np.empty(count, dtype=_np.float64)
+            k_has = _np.zeros(count, dtype=_np.int64)
+            k_a = _np.zeros(count, dtype=_np.float64)
+            k_e = _np.zeros(count, dtype=_np.float64)
+            k_arg = _np.zeros(count, dtype=_np.float64)
+            k_parent = _np.full(count, -1, dtype=_np.int64)
+            k_ref_theta = _np.zeros(count, dtype=_np.float64)
+            k_ref_time = _np.zeros(count, dtype=_np.float64)
+            k_mu = _np.zeros(count, dtype=_np.float64)
+
+            for i, b in enumerate(bodies):
+                bm[i] = float(b.mass)
+
+                parent = getattr(b, "is_moon_of", None)
+                if parent is None:
+                    continue
+                parent_index = index_of.get(id(parent))
+                if parent_index is None:
+                    return None
+
+                a = getattr(b, "semi_major_axis", None)
+                if a is None or float(a) == 0.0:
+                    continue
+                mu = self.G * float(getattr(parent, "mass", 0.0) or 0.0)
+                if mu <= 0.0:
+                    continue
+
+                # Genau die bedingungen, unter denen position_at_time rechnet
+                # statt self.position zurueckzugeben.
+                k_has[i] = 1
+                k_a[i] = float(a)
+                k_e[i] = float(getattr(b, "eccentricity", 0.0) or 0.0)
+                k_arg[i] = float(getattr(b, "arg_periapsis", 0.0) or 0.0)
+                k_parent[i] = parent_index
+                k_mu[i] = mu
+
+            self._kernel_static_cache = (
+                structure_key, index_of, bx, by, bm, k_has, k_a, k_e, k_arg,
+                k_parent, k_ref_theta, k_ref_time, k_mu,
+            )
+
+        for i, b in enumerate(bodies):
+            bx[i] = float(b.position.x)
+            by[i] = float(b.position.y)
+            if k_has[i]:
+                k_ref_theta[i] = float(getattr(b, "_kepler_ref_theta", 0.0) or 0.0)
+                k_ref_time[i] = float(getattr(b, "_kepler_ref_time", 0.0) or 0.0)
+
+        dyn = _np.array([index_of[id(b)] for b in dynamic_bodies],
+                        dtype=_np.int64)
+        dyn_px = _np.array([float(b.position.x) for b in dynamic_bodies])
+        dyn_py = _np.array([float(b.position.y) for b in dynamic_bodies])
+        dyn_vx = _np.array([float(b.velocity.x) for b in dynamic_bodies])
+        dyn_vy = _np.array([float(b.velocity.y) for b in dynamic_bodies])
+
+        return (bx, by, bm, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
+                k_ref_time, k_mu, dyn, dyn_px, dyn_py, dyn_vx, dyn_vy)
+
+    def _step_hint(self, max_step):
+        """Startweite fuer den naechsten aufruf -- 0 heisst 'bei der decke'.
+
+        Das gedaechtnis wird NUR benutzt, wenn die decke ueber der
+        konfigurierten liegt, also ausschliesslich im zeitraffer. Im standard-
+        fall gibt es nichts zu gewinnen (dort wurden 0 ablehnungen gemessen),
+        und so bleibt die schrittfolge dort garantiert bit-identisch --
+        tests/energy_test.py muss weiter auf 6.4718e-04 landen.
+        """
+        base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
+        if max_step <= base * (1.0 + 1e-12):
+            return 0.0
+        return float(getattr(self, "_integrator_h_hint", 0.0))
+
+    def _store_step_hint(self, max_step, hint):
+        base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
+        if max_step <= base * (1.0 + 1e-12):
+            self._integrator_h_hint = 0.0
+        else:
+            self._integrator_h_hint = float(hint)
+
+    def _advance_dynamics_fast(self, dynamic_bodies, total_dt, max_step,
+                               min_step, pos_tol, vel_tol):
+        """True, wenn der kernel den schritt uebernommen hat."""
+        if not (_KERNELS_OK and getattr(self, "use_fast_integrator", True)):
+            return False
+        try:
+            packed = self._serialize_for_kernel(dynamic_bodies)
+            if packed is None:
+                return False
+            (bx, by, bm, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
+             k_ref_time, k_mu, dyn, dyn_px, dyn_py, dyn_vx, dyn_vy) = packed
+
+            mode = 1 if getattr(self, "integrator_mode", "rkn4") == "verlet" else 0
+            hint = self._step_hint(max_step)
+            (substeps, rejections, forced, worst_pos, worst_vel,
+             hint_out) = _wk.advance_dynamics(
+                dyn, dyn_px, dyn_py, dyn_vx, dyn_vy,
+                float(self.time), float(total_dt),
+                bx, by, bm, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
+                k_ref_time, k_mu, float(self.G), mode,
+                float(max_step), float(min_step), float(pos_tol), float(vel_tol),
+                float(hint),
+            )
+            self._store_step_hint(max_step, hint_out)
+        except Exception:
+            # Jeder fehler faellt auf die python-fassung zurueck; sie ist die
+            # referenz, der kernel nur die schnelle uebersetzung davon.
+            return False
+
+        for i, b in enumerate(dynamic_bodies):
+            b.position = Vec2(float(dyn_px[i]), float(dyn_py[i]))
+            b.velocity = Vec2(float(dyn_vx[i]), float(dyn_vy[i]))
+
+        self.integrator_last_substeps = int(substeps)
+        self.integrator_last_rejections = int(rejections)
+        self.integrator_last_min_step_forced = int(forced)
+        self.integrator_last_worst_pos_error = float(worst_pos)
+        self.integrator_last_worst_vel_error = float(worst_vel)
+        return True
 
     def enable_epicycles(self, center):
         """epizykel-modus aktivieren mit wurzel in `center`.
