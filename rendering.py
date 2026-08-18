@@ -265,7 +265,6 @@ class Renderer:
         self._prediction_frame_transform_debug_key = None
         self._current_body_index_by_id = {}
         self.current_reference_body = None
-        self.ship_velocity_vector_length_px = 70.0
 
         # Körper-icon-schwelle (bildschirm-pixel). Sobald der ECHTE bildschirm-
         # radius eines (nicht-schiff-)körpers unter diesen wert fällt, wird der
@@ -1541,7 +1540,6 @@ class Renderer:
                 ship_body, ship_control, reference_body, prediction_points, real_dt
             )
             self._draw_body(ship_body, camera)
-            self.draw_ship_velocity_vector(ship_body, camera, reference_body=reference_body)
             self.draw_ship_thrust_vector(ship_body, camera)
             self.draw_ship_orientation_debug_vectors(
                 ship_body, camera, reference_body=reference_body,
@@ -1581,47 +1579,6 @@ class Renderer:
             start = getattr(self, '_render_t0', None)
             if start is not None:
                 timings['frame_ms'] = (time.perf_counter() - start) * 1000.0
-
-    def draw_ship_velocity_vector(self, ship, camera, reference_body=None):
-        if ship is None:
-            return
-
-        try:
-            vx = float(ship.velocity.x)
-            vy = float(ship.velocity.y)
-            if reference_body is None:
-                reference_body = getattr(self, "current_reference_body", None)
-            if reference_body is not None:
-                try:
-                    ref_vx = float(reference_body.velocity.x)
-                    ref_vy = float(reference_body.velocity.y)
-                except Exception:
-                    ref_vx = float(getattr(getattr(reference_body, "velocity", None), "x", 0.0) or 0.0)
-                    ref_vy = float(getattr(getattr(reference_body, "velocity", None), "y", 0.0) or 0.0)
-                vx -= ref_vx
-                vy -= ref_vy
-
-            frame = self._active_frame()
-            try:
-                vx, vy = frame.to_this_frame_vector_xy(self._frame_time_s, vx, vy)
-            except Exception:
-                pass
-
-            mag = math.hypot(vx, vy)
-            if mag <= 1e-12:
-                return
-
-            dir_x = vx / mag
-            dir_y = vy / mag
-
-            sx, sy = self._world_to_screen_xy(float(ship.position.x), float(ship.position.y), camera)
-            length_px = max(20.0, min(90.0, float(getattr(self, "ship_velocity_vector_length_px", 70.0))))
-            ex = sx + dir_x * length_px
-            ey = sy - dir_y * length_px
-
-            self._draw_polyline([(sx, sy), (ex, ey)], color=(0.2, 0.8, 1.0, 0.9), width=2.0)
-        except Exception:
-            return
 
     def draw_ship_thrust_vector(self, ship, camera):
         if ship is None:

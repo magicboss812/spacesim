@@ -453,7 +453,15 @@ def main():
         """Horizont neu setzen, wenn sich basis*manuell*raffung geaendert hat."""
         if predictor.num_points <= 0:
             return
-        wanted = PREDICTOR_BASE_LENGTH * predictor_manual_mult * predictor_warp_length_mult()
+        drawn = PREDICTOR_BASE_LENGTH * predictor_manual_mult
+        wanted = drawn * predictor_warp_length_mult()
+        # GEZEICHNET wird immer nur der un-geraffte horizont. Ohne das wickelt
+        # sich die linie im zeitraffer mehrfach um die bahn, waehrend sie in
+        # echtzeit einen einzigen bogen zeigt -- und die Ap/Pe-fahnen stapeln
+        # sich uebereinander. GERECHNET wird trotzdem die volle laenge, weil
+        # genau die den halt am leben haelt (siehe predictor_warp_length_mult).
+        if hasattr(predictor, 'set_display_length'):
+            predictor.set_display_length(drawn if wanted > drawn else None)
         current = predictor.length
         if current is not None and abs(current - wanted) <= wanted * 1e-9:
             return

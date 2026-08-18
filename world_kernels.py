@@ -144,8 +144,8 @@ def _rkn4_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_has, k_a, k_e,
                                 k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
                                 k_ref_time, k_mu, G)
 
-    p3x = px + vx * (h * 0.5) + a2x * (hh * 0.125)
-    p3y = py + vy * (h * 0.5) + a2y * (hh * 0.125)
+    p3x = px + vx * (h * 0.5) + a1x * (hh * 0.125)
+    p3y = py + vy * (h * 0.5) + a1y * (hh * 0.125)
     a3x, a3y = _acceleration_at(target, p3x, p3y, t0 + h * 0.5, bx, by, bm,
                                 k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
                                 k_ref_time, k_mu, G)

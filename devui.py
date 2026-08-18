@@ -657,8 +657,6 @@ def draw_dev_panels(c: "DevContext"):
             _checkbox("prediction bypasses FXAA", r, 'prediction_bypass_fxaa')
             _slider("apsis marker px", r, 'apsis_marker_radius_px', 1.0, 20.0, "%.1f")
             _slider("body icon px", r, 'body_icon_radius_px', 1.0, 20.0, "%.1f")
-            _slider("velocity vector px", r, 'ship_velocity_vector_length_px',
-                    10.0, 300.0, "%.0f")
 
             imgui.separator_text("prediction sampling")
             _slider("tolerance px", r, 'prediction_sampling_tolerance_px',

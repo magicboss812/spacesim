@@ -1284,9 +1284,16 @@ for _ms in (30.0, 100000.0):
 
 _step_low, _alt_low = _eff[30.0]
 _step_high, _alt_high = _eff[100000.0]
-check(_step_high < _step_low * 2.0,
+# Die schranke war 2.0, solange RKN4 faelschlich 3. ordnung war (27.7 -> 34.7 s).
+# Seit dem koeffizienten-fix (world.py:226 / world_kernels.py:147) erlaubt
+# dieselbe 1-m-toleranz groessere schritte, gemessen 27.7 -> 69.3 s. Die aussage
+# bleibt dieselbe: die schrittweite setzt die fehlerkontrolle, nicht die decke --
+# 69.3 s liegen 1443x unter den 100 000 s. Die eigentliche sicherheitsaussage
+# steht im naechsten check (die bahn darf nicht wandern).
+check(_step_high < _step_low * 3.0 and _step_high < 0.01 * 100000.0,
       "im 400-km-orbit aendert eine 3300x hoehere decke die schrittweite kaum",
-      f"{_step_low:.1f} s -> {_step_high:.1f} s")
+      f"{_step_low:.1f} s -> {_step_high:.1f} s "
+      f"(decke 100000 s, also faktor {100000.0 / _step_high:.0f} darunter)")
 check(abs(_alt_high - 400.0) < 5.0 and abs(_alt_low - 400.0) < 5.0,
       "und die bahn bleibt in beiden faellen stehen",
       f"hoehe nach 5 umlaeufen: {_alt_low:.3f} km / {_alt_high:.3f} km")
@@ -1310,6 +1317,154 @@ check(_tchar_far / 3.0 * 180.0 > 31557600.0,
 check(_tchar / 3.0 * 180.0 < 86400.0,
       "im 400-km-orbit sperrt er dagegen alles ab 1 d/s",
       f"grenze {_tchar / 3.0 * 180.0:.3e} s/s")
+
+
+
+# ══════════════════════════ 17. stufenwechsel blockiert den hauptthread nicht
+
+print()
+print("17. Der wechsel der zeitraffer-stufe haelt den hauptthread nicht an")
+
+# WARUM. Die stufe bestimmt ueber predictor_warp_length_mult() den horizont
+# (1x/4x/16x/64x ab 7d/s). Jeder wechsel ruft set_length(), das den halt
+# entwertet -- und der halt-zweig in update() beantwortete das mit einem
+# SYNCHRONEN _compute_full im hauptthread. Gemessen mit dem vollen
+# sonnensystem bei 180 fps: 44 ms auf 7d/s->30d/s, 34 ms auf 30d/s->100d/s,
+# 45 ms auf 100d/s->1y/s und 75-82 ms auf dem rueckweg -- gegen 0.4 ms in den
+# nachbar-frames. Das ist der ruckler beim umschalten.
+#
+# Richtig ist dieselbe antwort wie beim schub (siehe _request_thrust_recompute):
+# die neue laenge wird ANGEFORDERT, nicht erzwungen. Die alte kurve ist
+# geometrisch weiterhin gueltig -- sie ist nur zu kurz bzw. zu lang -- also
+# wird sie weiter gehalten, bis das asynchrone ergebnis da ist.
+#
+# Gemessen wird deshalb dreierlei, und alles drei ist eine GROESSE, keine
+# implementierung: (a) die zeit im hauptthread auf dem wechsel-frame,
+# (b) dass die linie waehrend des wechsels nie leer wird, (c) dass die neue
+# laenge auch wirklich ankommt (der wechsel darf nicht verschluckt werden).
+
+_W17_TICK = 180.0
+_W17_FRAME_DT = 1.0 / _W17_TICK
+_W17_BASE = None
+
+
+def _w17_mult(rate):
+    """predictor_warp_length_mult() aus test.py."""
+    ratio = rate / 604800.0
+    if ratio <= 1.0:
+        return 1.0
+    return float(1 << min(6, max(0, int(round(math.log2(ratio))))))
+
+
+def _w17_step(w, sim_seconds):
+    """step_simulation() aus test.py."""
+    if sim_seconds <= 0.0:
+        return
+    ceiling = w.set_warp_step_ceiling(sim_seconds)
+    chunk = max(MAX_SUBSTEP, ceiling)
+    steps = max(1, int(math.ceil(sim_seconds / chunk)))
+    sub = sim_seconds / steps
+    for _ in range(steps):
+        w.update_planets(sub)
+        w.update_dynamics(sub)
+
+
+def _w17_frame(w, ship, p, rate):
+    """Ein frame der hauptschleife -- nur der zeitraffer-relevante teil."""
+    drawn = _W17_BASE
+    wanted = drawn * _w17_mult(rate)
+    changed = False
+    if hasattr(p, 'set_display_length'):
+        p.set_display_length(drawn if wanted > drawn else None)
+    if p.length is None or abs(p.length - wanted) > wanted * 1e-9:
+        p.set_length(wanted)
+        changed = True
+    _w17_step(w, rate * _W17_FRAME_DT)
+    p.set_hold(rate > 60.0 * 1.001)
+    p.set_view_scale(2e-9)
+    t0 = time.perf_counter()
+    p.update(ship, w)
+    return (time.perf_counter() - t0) * 1000.0, changed
+
+
+def _w17_transition(w, ship, p, from_rate, to_rate, settle=25, after=140):
+    """Auf from_rate einschwingen, dann auf to_rate wechseln.
+
+    Rueckgabe: (ms auf dem wechsel-frame, ruhe-median davor, kleinste
+    punktzahl danach, frames bis die neue laenge gezeichnet wird).
+    """
+    quiet = []
+    for _ in range(settle):
+        ms, _c = _w17_frame(w, ship, p, from_rate)
+        quiet.append(ms)
+    quiet_median = sorted(quiet)[len(quiet) // 2]
+
+    switch_ms = None
+    min_points = None
+    min_drawn = None
+    arrived = None
+    for i in range(after):
+        ms, changed = _w17_frame(w, ship, p, to_rate)
+        # Der teure frame ist der erste nach dem wechsel -- egal ob ihn der
+        # horizont ausloest (set_length) oder der halt selbst (set_hold).
+        if switch_ms is None:
+            switch_ms = ms
+        if switch_ms is not None:
+            n = int(p.points.shape[0]) if p.points is not None else 0
+            min_points = n if min_points is None else min(min_points, n)
+            # Was der spieler SIEHT: die gezeichnete bogenlaenge, gemessen
+            # gegen den un-geraften basis-horizont. Sie darf waehrend des
+            # wechsels nicht einbrechen und zurueckspringen.
+            drawn_arc = arc_length(p.get_points())
+            frac = drawn_arc / _W17_BASE
+            min_drawn = frac if min_drawn is None else min(min_drawn, frac)
+            # Die neue laenge ist angekommen, sobald die gerechnete kurve den
+            # neuen bogen wirklich ueberspannt (nicht nur die punktzahl).
+            if arrived is None and p.points is not None and n >= 4:
+                if arc_length(p.points) >= 0.9 * float(p.length):
+                    arrived = i
+    return switch_ms, quiet_median, min_points, min_drawn, arrived
+
+
+# 10m/s -> 1h/s ist der schritt, bei dem der HALT anspringt (ueber
+# realtime_warp_max). Der horizont aendert sich dort nicht -- gemessen wurden
+# trotzdem 14.1 ms, weil set_hold() die kurve hart entwertete.
+_UP = [(600.0, 3600.0, "10m/s -> 1h/s (halt springt an)"),
+       (604800.0, 2592000.0, "7d/s -> 30d/s"),
+       (2592000.0, 8640000.0, "30d/s -> 100d/s"),
+       (8640000.0, 31557600.0, "100d/s -> 1y/s")]
+_DOWN = [(31557600.0, 8640000.0, "1y/s -> 100d/s"),
+         (8640000.0, 2592000.0, "100d/s -> 30d/s"),
+         (2592000.0, 604800.0, "30d/s -> 7d/s")]
+
+for _from, _to, _label in _UP + _DOWN:
+    _w17, _ship17, _p17 = build(async_compute=True)
+    _W17_BASE = float(_p17.length)
+    try:
+        _sw, _quiet, _minpts, _mindrawn, _arrived = _w17_transition(_w17, _ship17, _p17, _from, _to)
+        # (a) Der wechsel-frame darf nicht aus der reihe fallen. Die schranke
+        #     ist grosszuegig (10 ms gegen 34-82 ms vorher), damit sie nicht
+        #     auf die tagesform der maschine reagiert.
+        check(_sw is not None and _sw < 10.0,
+              f"{_label}: wechsel-frame bleibt im hauptthread billig",
+              f"{_sw:.1f} ms (ruhe-median {_quiet:.1f} ms)")
+        # (b) Die linie darf waehrend des wechsels weder verschwinden noch
+        #     pulsieren. Ohne den festgehaltenen fortsetzungs-zustand
+        #     (_hold_resume_context) schrumpfte sie auf 61 % und sprang beim
+        #     einwechseln zurueck -- kein ruckler, aber auch nicht nahtlos.
+        check(_minpts is not None and _minpts >= 4,
+              f"{_label}: die linie bleibt waehrend des wechsels stehen",
+              f"kleinste punktzahl {_minpts}")
+        check(_mindrawn is not None and _mindrawn >= 0.95,
+              f"{_label}: der gezeichnete horizont pulsiert nicht",
+              f"kleinster gezeichneter anteil {_mindrawn * 100:.1f} %")
+        # (c) ... und die neue laenge muss ankommen, nicht verschluckt werden.
+        check(_arrived is not None,
+              f"{_label}: die neue laenge kommt an",
+              f"nach {_arrived} frames" if _arrived is not None
+              else f"nie erreicht (laenge {_p17.length:.3e} m)")
+    finally:
+        _p17.close()
 
 
 print()

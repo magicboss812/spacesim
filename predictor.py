@@ -2558,6 +2558,15 @@ class Predictor:
         # unterste stufe geht.
         self.hold_enabled = False
         self._hold_invalidated = False
+        # WEICHE entwertung: die gehaltene kurve ist nicht falsch, sondern nur
+        # ueberholt (horizont/punktabstand verstellt). Sie darf weiterlaufen,
+        # waehrend die neue im hintergrund entsteht -- siehe _hold_advance.
+        self._hold_soft_invalidated = False
+        # Laeuft gerade so ein hintergrund-auftrag fuer den halt?
+        self._hold_pending_swap = False
+        # Fortsetzungs-zustand der GEHALTENEN kurve, solange der wechsel
+        # unterwegs ist (siehe _request_hold_recompute).
+        self._hold_resume_context = None
         # Ob points[0] der selbst vorangestellte kopf ist (siehe
         # _hold_advance) -- er muss vor der naechsten suche wieder weg.
         self._hold_synthetic_head = False
@@ -2567,6 +2576,17 @@ class Predictor:
         self.hold_refresh_fraction = 0.25
         # Ueber wie viele punkte die kopf-korrektur abklingt.
         self.hold_taper_points = 64
+        # GERECHNETE laenge und GEZEICHNETE laenge sind nicht dasselbe.
+        # Im zeitraffer muss die kurve viel weiter reichen, als man sieht --
+        # sonst laeuft der halt leer (bei 1 y/s frisst EIN frame den ganzen
+        # basis-horizont). Sichtbar soll die linie aber ueberall gleich lang
+        # sein, sonst wickelt sie sich im zeitraffer mehrfach um die bahn,
+        # waehrend sie in echtzeit einen einzigen bogen zeigt.
+        # None = alles zeichnen. Siehe set_display_length().
+        self.display_length = None
+        self._display_view = None
+        self._display_view_base = None
+        self._display_view_limit = -1
 
         if self.async_compute and not self.rolling_mode:
             self._ensure_executor()
@@ -2753,6 +2773,12 @@ class Predictor:
         self._clear_apsis_markers()
         # Der halt haelt eine kurve fest, die es nach dem reset nicht mehr gibt.
         self._hold_synthetic_head = False
+        # Eine WEICHE entwertung setzt darauf, dass die alte kurve noch da ist
+        # -- nach dem reset ist sie es nicht. Sonst wuerde der halt beim
+        # naechsten frame auf einer leeren kurve weiterhalten wollen.
+        self._hold_soft_invalidated = False
+        self._hold_pending_swap = False
+        self._hold_resume_context = None
         self._resume_context = None
         # WICHTIG: auch den vermerk loeschen, WELCHER zustand die punkte erzeugt
         # hat. Er wird nur beim einwechseln eines ergebnisses gesetzt, nach dem
@@ -3508,23 +3534,61 @@ class Predictor:
     # ------------------------------------------------------ zeitraffer-halt
 
     def set_hold(self, enabled):
-        """Zeitraffer-halt ein/aus. Ausschalten erzwingt eine neuberechnung."""
+        """Zeitraffer-halt ein/aus. Ausschalten erzwingt eine neuberechnung.
+
+        Die beiden richtungen sind NICHT symmetrisch.
+
+        AUSSCHALTEN (zurueck in die echtzeit) entwertet hart: der spieler darf
+        von da an sofort wieder schub geben, und die gehaltene kurve weiss
+        davon nichts.
+
+        EINSCHALTEN dagegen uebernimmt eine kurve, die der asynchrone weg bis
+        zum vorigen frame in jedem frame frisch gehalten hat -- sie ist also
+        genau so gut wie eine neu gerechnete. Hart zu entwerten kostete dort
+        gemessen 14.1 ms im hauptthread beim schritt 10m/s -> 1h/s (der
+        stufe, bei der der halt anspringt), gegen 0.2 ms in den nachbarn.
+        Also weich: neu ANFORDERN und derweil weiterhalten, wie beim
+        stufenwechsel (siehe _request_hold_recompute).
+        """
         enabled = bool(enabled)
         if enabled == getattr(self, 'hold_enabled', False):
             return
         self.hold_enabled = enabled
         self._hold_synthetic_head = False
-        self._resume_context = None
-        # Beim verlassen muss die kurve einmal frisch gerechnet werden: der
-        # spieler darf sofort wieder schub geben, und die gehaltene kurve
-        # weiss davon nichts.
+        self._hold_pending_swap = False
         self._hold_invalidated = True
+        if enabled:
+            self._hold_soft_invalidated = True
+            # `_resume_context` stammt vom letzten asynchronen lauf und gehoert
+            # damit zur kurve, die jetzt gehalten wird -- stehen lassen, sonst
+            # kann sie waehrend des anlaufens nicht nachlegen. Festgehalten
+            # wird er in _request_hold_recompute, dem einzigen besitzer.
+        else:
+            self._hold_soft_invalidated = False
+            self._resume_context = None
+            self._hold_resume_context = None
 
-    def invalidate_hold(self):
-        """Die gehaltene kurve ist ueberholt (schub, rahmenwechsel, ...)."""
+    def invalidate_hold(self, soft=False):
+        """Die gehaltene kurve ist ueberholt (schub, rahmenwechsel, ...).
+
+        `soft=True` heisst: die kurve ist GEOMETRISCH weiterhin richtig, nur
+        ihre parameter stimmen nicht mehr (horizont oder punktabstand
+        verstellt). Das schiff sitzt weiter auf ihr, sie reicht weiter in die
+        zukunft -- sie ist bloss zu kurz oder zu lang. Ein solcher wechsel
+        darf deshalb NACHGEREICHT werden, statt den hauptthread anzuhalten;
+        siehe _hold_advance und _request_hold_recompute.
+
+        Der harte weg bleibt fuer alles, was die kurve wirklich unbrauchbar
+        macht: sprung, reparenting, rahmenwechsel, ende des halts.
+        """
         self._hold_invalidated = True
+        self._hold_soft_invalidated = bool(soft) and not self.rolling_mode
         self._hold_synthetic_head = False
-        self._resume_context = None
+        if not soft:
+            # Weiterrechnen geht nur auf einer kurve, die noch gilt.
+            self._resume_context = None
+            self._hold_resume_context = None
+            self._hold_pending_swap = False
 
     def _hold_active(self):
         if not bool(getattr(self, 'hold_enabled', False)):
@@ -3568,9 +3632,23 @@ class Predictor:
         kann also nicht auslaufen.
         """
         if getattr(self, '_hold_invalidated', False):
-            self._hold_invalidated = False
-            self._hold_synthetic_head = False
-            return False
+            # WEICHE entwertung -> ANFORDERN statt anhalten. Die kurve, die
+            # hier steht, ist geometrisch weiterhin richtig; nur ihr horizont
+            # bzw. punktabstand ist ueberholt. Sie darf also weiterlaufen,
+            # waehrend die neue im hintergrund entsteht. Gelingt das nicht
+            # (kein async, keine kurve, kein worker frei), bleibt der harte
+            # weg -- die zusicherung "update() baut synchron eine, wenn keine
+            # da ist" gilt unveraendert.
+            if (getattr(self, '_hold_soft_invalidated', False)
+                    and self._request_hold_recompute(ship, world)):
+                self._hold_invalidated = False
+                self._hold_soft_invalidated = False
+                # und weiter unten ganz normal verbrauchen
+            else:
+                self._hold_invalidated = False
+                self._hold_soft_invalidated = False
+                self._hold_synthetic_head = False
+                return False
         if ship is None or world is None or np is None:
             return False
         points = self.points
@@ -3708,7 +3786,14 @@ class Predictor:
         wanted = int(wanted)
         if wanted <= 0 or np is None:
             return 0
-        context = getattr(self, '_resume_context', None)
+        # Waehrend ein stufenwechsel unterwegs ist, gehoert `_resume_context`
+        # bereits zur NEUEN kurve (der worker setzt ihn beim fertigwerden).
+        # Angesetzt werden muss aber an die kurve, die gerade gehalten wird.
+        context = None
+        if getattr(self, '_hold_pending_swap', False):
+            context = getattr(self, '_hold_resume_context', None)
+        if not context:
+            context = getattr(self, '_resume_context', None)
         if not context:
             return 0
         if _compute_distance_points_rkn_numba is None:
@@ -4652,6 +4737,75 @@ class Predictor:
                 return False
         return True
 
+    def _request_hold_recompute(self, ship, world):
+        """Neue horizont-/abstands-kurve ANFORDERN, ohne den halt aufzugeben.
+
+        Dasselbe muster wie `_request_thrust_recompute`, fuer den anderen
+        ausloeser: den WECHSEL DER ZEITRAFFER-STUFE. Die stufe bestimmt ueber
+        `predictor_warp_length_mult()` den horizont (1x/4x/16x/64x ab 7d/s),
+        jeder wechsel ruft `set_length()`, und der halt-zweig in `update()`
+        hat das bisher mit einem synchronen `_compute_full` beantwortet.
+        Gemessen mit dem vollen sonnensystem bei 180 fps, gegen 0.3-0.5 ms in
+        den nachbar-frames:
+
+            7d/s -> 30d/s     47.6 ms      1y/s  -> 100d/s   30.6 ms
+            30d/s -> 100d/s   31.1 ms      100d/s -> 30d/s   48.2 ms
+            100d/s -> 1y/s    40.6 ms      30d/s  -> 7d/s    14.9 ms
+
+        Das ist der ruckler beim umschalten -- und er ist unnoetig, denn die
+        gehaltene kurve ist zu diesem zeitpunkt nicht falsch. Sie ist bloss
+        zu kurz (hoch) oder zu lang (runter). Zu kurz heisst nur, dass sie
+        frueher nachgerechnet werden muss; bis dahin zeigt sie dieselbe bahn.
+        Zu lang heisst gar nichts -- `set_display_length()` zeichnet ohnehin
+        nur den un-geraffen anteil.
+
+        Also: genau EINEN auftrag abschicken und den halt normal weiterlaufen
+        lassen. `update()` wechselt das ergebnis ein, sobald es da ist (siehe
+        `_hold_pending_swap`). Ein zweiter auftrag brauchte es nicht -- unter
+        dem halt aendert sich der schiffszustand nicht sprunghaft, ein
+        laufender auftrag ist also immer schon der richtige.
+
+        Rueckgabe: True = angefordert, der aufrufer haelt weiter. False = der
+        aufrufer muss den harten (synchronen) weg gehen.
+        """
+        if world is None or ship is None:
+            return False
+        if self.rolling_mode or not self.async_compute:
+            return False
+        if self.num_points <= 0:
+            return False
+        # Ohne kurve gibt es nichts zu halten -- dann gilt weiterhin die
+        # zusicherung, dass update() synchron eine baut.
+        try:
+            if self._points_count() <= 0:
+                return False
+        except Exception:
+            return False
+        # WICHTIG: den fortsetzungs-zustand der ALTEN kurve festhalten, nicht
+        # wegwerfen. Ohne ihn kann `_hold_extend_tail` waehrend der wartezeit
+        # nicht mehr nachlegen, die gehaltene kurve wird also nur noch von
+        # vorn verbraucht -- gemessen 10 000 -> 6 075 punkte ueber 16 frames
+        # beim wechsel 7d/s -> 30d/s, also eine um 39 % kuerzere linie, die
+        # beim einwechseln zurueckspringt. Genau dieses pulsieren beseitigt
+        # `_hold_extend_tail` ja.
+        #
+        # Er wird GESONDERT gehalten, weil der worker `self._resume_context`
+        # schon beim fertigwerden ueberschreibt -- also ein bis zwei frames
+        # bevor das ergebnis eingewechselt ist. Mit dem waere der schwanz mit
+        # dem NEUEN punktabstand angesetzt worden, waehrend der rest noch den
+        # alten traegt; ein solcher sprung im abstand macht sowohl den
+        # index-anteil in `_display_point_count` als auch die mindest-sehne
+        # der tangente falsch (beide setzen festen abstand voraus).
+        self._hold_resume_context = getattr(self, '_resume_context', None)
+        try:
+            self._submit_async_compute(
+                ship, world, self._get_target_point_cap(), max_in_flight=1,
+            )
+        except Exception:
+            return False
+        self._hold_pending_swap = True
+        return True
+
     def _submit_async_compute(self, ship, world, max_points, max_in_flight=1):
         pending = getattr(self, "_pending_futures", [])
 
@@ -4707,7 +4861,7 @@ class Predictor:
         self._next_job_id += 1
         self._jobs_submitted += 1
 
-    def _swap_ready_result(self, current_ship=None, current_world=None):
+    def _swap_ready_result(self, current_ship=None, current_world=None, allow_rebase=True):
         pending = getattr(self, "_pending_futures", [])
 
         if not pending:
@@ -4907,6 +5061,7 @@ class Predictor:
                     if (
                         reject_reason == "wall_age"
                         and self.force_sync_on_stale
+                        and allow_rebase
                         and current_world is not None
                     ):
                         self._compute_full(current_ship, current_world)
@@ -4919,7 +5074,18 @@ class Predictor:
                 # Rebase the whole curve to the current ship position (corrects
                 # for motion during compute). The per-frame anchor in update()
                 # keeps the start glued to the ship between swaps.
-                needs_rebase = pos_delta > 1e-9 and math.isfinite(pos_delta)
+                #
+                # UNTER DEM HALT NICHT. Dort ist genau diese starre
+                # verschiebung der fehler, den der halt beseitigt: bei 30 d/s
+                # rueckt das schiff waehrend der rechnung um ~1.3 tage bahn
+                # vor, und die kurve um diesen sehnen-vektor quer zu schieben
+                # legt sie neben die bahn. Richtig ist, sie in absoluter lage
+                # UND zeit stehen zu lassen -- `_hold_advance` wirft danach
+                # die punkte weg, deren zeit vergangen ist, und stellt dem
+                # rest das schiff als kopf voran. Das ist dieselbe mechanik,
+                # die den halt ueberhaupt traegt.
+                needs_rebase = (allow_rebase and pos_delta > 1e-9
+                                and math.isfinite(pos_delta))
                 if needs_rebase:
                     points = self._rebase_points_to_current_snapshot(points, snapshot, current_ship)
                     self._log_snapshot_result(True, "rebased", snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
@@ -5184,8 +5350,31 @@ class Predictor:
         # alle 40 frames an -- deterministisch, statt jeden frame ein
         # bisschen.
         if self._hold_active():
+            # Ein angeforderter stufenwechsel wird eingewechselt, sobald er da
+            # ist -- OHNE starre verschiebung (siehe _request_hold_recompute
+            # und der `allow_rebase`-zweig in _swap_ready_result). Das ist die
+            # einzige stelle, an der der halt ein asynchrones ergebnis
+            # uebernimmt: nicht jeden frame, sondern genau einmal je wechsel.
+            # Jeden frame einzuwechseln waere wieder das zittern, das der halt
+            # beseitigt.
+            if getattr(self, '_hold_pending_swap', False):
+                if self._swap_ready_result(ship, world, allow_rebase=False):
+                    self._hold_pending_swap = False
+                    self._hold_resume_context = None
+                    # Die neue kurve traegt keinen selbst vorangestellten kopf.
+                    self._hold_synthetic_head = False
+                elif not self._async_jobs_in_flight():
+                    # Verworfen (version/zoom/rahmen) und nichts mehr
+                    # unterwegs: nicht ewig warten, sondern den harten weg
+                    # wieder zulassen.
+                    self._hold_pending_swap = False
+                    self._hold_resume_context = None
+                    self._hold_invalidated = True
+                    self._hold_soft_invalidated = False
             if not self._hold_advance(ship, world):
                 self._cancel_pending_job()
+                self._hold_pending_swap = False
+                self._hold_resume_context = None
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship, world)
                 self._view_scale_changed = False
@@ -5380,8 +5569,98 @@ class Predictor:
                 pass
         self._computed_since_last_update = 0
 
+    def set_display_length(self, metres):
+        """Wie viel von der gerechneten kurve GEZEICHNET wird, in metern.
+
+        None oder >= der gerechneten laenge heisst: alles. Betrifft nur, was
+        get_points() herausgibt -- der halt, das anstueckeln und die
+        fortsetzung arbeiten unveraendert auf der vollen kurve (self.points).
+        """
+        if metres is None:
+            self.display_length = None
+        else:
+            value = float(metres)
+            self.display_length = value if value > 0.0 else None
+        self._clear_display_view()
+
+    def _clear_display_view(self):
+        self._display_view = None
+        self._display_view_base = None
+        self._display_view_limit = -1
+
+    def _display_point_count(self):
+        """Zahl der zu zeichnenden fuehrenden punkte, oder None fuer alle.
+
+        Ueber den INDEXANTEIL, nicht ueber die aufsummierte bogenlaenge: der
+        kernel legt seine stuetzstellen auf festen abstand, der anteil ist
+        also der laengenanteil -- und er kostet O(1) statt O(n) je frame.
+
+        Der abstand wird an den GESPEICHERTEN punkten gemessen, nicht aus
+        `self.length` erschlossen. Das ist derselbe O(1)-griff, aber er fragt
+        die kurve, die wirklich da liegt, statt die zuletzt ANGEFORDERTE
+        laenge fuer sie zu halten. Beim zeitraffer-stufenwechsel fallen die
+        beiden fuer ein paar frames auseinander: `set_length()` stellt schon
+        auf 4x, waehrend der halt noch die alte 1x-kurve zeigt (die neue
+        entsteht im hintergrund, siehe _request_hold_recompute). Mit
+        `self.length` als bezug waeren davon 1/4 gezeichnet worden -- die
+        linie waere auf 25 % zusammengefallen und beim einwechseln wieder
+        aufgesprungen. Gemessen: 25.0 % / 24.9 % / 24.8 % auf den drei
+        aufwaerts-wechseln.
+
+        Gemessen wird in der MITTE der kurve: points[0] ist im halt das
+        schiff selbst und traegt ein absichtlich verkuerztes erstes
+        teilstueck (siehe _hold_advance), waere als massstab also zu klein.
+        """
+        limit = self.display_length
+        if limit is None:
+            return None
+        pts = self.points
+        if np is None or not isinstance(pts, np.ndarray):
+            return None
+        n = int(pts.shape[0])
+        if n <= 2:
+            return None
+
+        mid = n // 2
+        spacing = math.hypot(float(pts[mid, 0]) - float(pts[mid - 1, 0]),
+                             float(pts[mid, 1]) - float(pts[mid - 1, 1]))
+        if spacing > 0.0 and math.isfinite(spacing):
+            if limit >= spacing * (n - 1):
+                return None
+            count = int(math.ceil(limit / spacing)) + 1
+            return max(2, min(n, count))
+
+        # Entartete kurve (stillstand, NaN) -- alter weg als rueckfall.
+        total = self.length
+        if total is None or total <= 0.0:
+            total = float(self.num_points) * float(self.precision)
+        if total <= 0.0 or limit >= total:
+            return None
+        count = int(math.ceil(n * (limit / total)))
+        return max(2, min(n, count))
+
     def get_points(self):
-        return self.points
+        """Die zu ZEICHNENDE kurve (siehe set_display_length).
+
+        Der ausschnitt wird gemerkt und nur neu gebildet, wenn sich das
+        zugrundeliegende array oder die zahl aendert. Das ist kein geiz:
+        Renderer._make_prediction_line_cache_key nimmt `id(path_points)` in
+        den schluessel auf, ein frisch erzeugter view je aufruf wuerde den
+        cache also in JEDEM frame verfehlen.
+        """
+        count = self._display_point_count()
+        if count is None:
+            self._clear_display_view()
+            return self.points
+        # `is` statt id(): so haelt der vergleich eine referenz und kann nicht
+        # auf eine wiederverwendete id hereinfallen.
+        if (self._display_view_base is not self.points
+                or self._display_view_limit != count
+                or self._display_view is None):
+            self._display_view = self.points[:count]
+            self._display_view_base = self.points
+            self._display_view_limit = count
+        return self._display_view
 
     def get_apsis_markers(self):
         """Apoapsis/Periapsis-Marker der aktuellen Prädiktionslinie.
@@ -5397,7 +5676,9 @@ class Predictor:
         """
         if not self.apsis_markers_enabled:
             return self._empty_apsis_array()
-        pts = self.points
+        # Bewusst die GEZEICHNETE kurve: marker jenseits des sichtbaren
+        # endes haetten keine linie unter sich.
+        pts = self.get_points()
         if np is None or not isinstance(pts, np.ndarray) or pts.shape[0] < 3:
             return self._empty_apsis_array()
         snapshot = self._last_swapped_snapshot
@@ -5570,7 +5851,11 @@ class Predictor:
         # Die gehaltene kurve traegt den ALTEN punktabstand. Ohne diesen
         # vermerk schluckt der zeitraffer-halt die umstellung vollstaendig --
         # gemessen: punktzahl und richtung aendern sich um exakt 0.
-        self.invalidate_hold()
+        #
+        # WEICH: der abstand ist kosmetisch, die kurve bleibt bis zum
+        # eintreffen der neuen richtig. Kein grund, den hauptthread
+        # anzuhalten (siehe invalidate_hold).
+        self.invalidate_hold(soft=True)
         if self.rolling_mode:
             self.reset()
         elif self.async_compute:
@@ -5591,7 +5876,12 @@ class Predictor:
         self.length = meters
         # Der horizont steuert ueber _horizon_spacing_floor() auch den
         # punktabstand -- die gehaltene kurve passt danach nicht mehr.
-        self.invalidate_hold()
+        #
+        # WEICH: sie ist deswegen aber nicht falsch, sondern nur zu kurz bzw.
+        # zu lang. Genau das ist der zeitraffer-stufenwechsel, bei dem
+        # apply_predictor_horizon() den faktor 1x/4x/16x/64x umstellt -- der
+        # harte weg hat dort 34-82 ms im hauptthread gekostet.
+        self.invalidate_hold(soft=True)
         if self.rolling_mode:
             self.reset()
         elif self.async_compute:

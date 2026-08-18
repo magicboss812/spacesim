@@ -100,7 +100,6 @@
     "show_apsis_markers": true,
     "apsis_marker_radius_px": 5.0,
     "body_icon_radius_px": 4.0,
-    "ship_velocity_vector_length_px": 70.0,
     "reference_trajectories_enabled": true,
     "reference_trajectories_max_points": 300,
     "reference_trajectories_sample_step_s": 300.0,

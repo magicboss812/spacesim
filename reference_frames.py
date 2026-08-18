@@ -82,6 +82,84 @@ _MIN_TANGENT_CHORD_FRACTION = 0.25
 _TANGENT_SCAN_LIMIT = 16
 
 
+def _tangent_from_stored_velocity(frame, points, limit):
+    """Frame-raum-tangente aus der GESPEICHERTEN geschwindigkeit des kopfes.
+
+    Die punkte-spalten 3/4 tragen die tangente, die der kernel ohnehin
+    ausrechnet -- sie ist die ableitung DESSELBEN Hermite-polynoms, mit dem er
+    die stuetzstelle plaziert, und im halt ist der kopf das schiff, also traegt
+    er dessen echte geschwindigkeit (predictor._hold_advance setzt das
+    ausdruecklich so).
+
+    Warum das die sehne schlaegt. Die sehne misst kopf -> naechste stuetzstelle
+    und setzt damit voraus, dass das schiff AUF der kurve liegt. Es liegt aber
+    nie ganz darauf: welt und predictor propagieren die planeten leicht
+    verschieden, es bleibt ein versatz -- und der ist nicht nur quer, sondern
+    auch LAENGS der bahn. Faellt die restzeit bis zur naechsten stuetzstelle
+    unter die zeit, die dieser laengsversatz ausmacht, liegt die stuetzstelle
+    raeumlich HINTER dem schiff und die sehne zeigt rueckwaerts.
+
+    Gemessen auf einer kreisbahn, deren umfang 1/16 des horizonts ist
+    (16 umlaeufe in der linie), 400 frames bei 1h/s: 3 frames mit einem
+    fehler von -177.8 Grad. Der ausloeser ist jedesmal derselbe -- eine
+    stuetzstelle nur 0.17 s voraus, 2.5e5 m dahinter, und eine sehne, die die
+    mindestlaenge um 0.2 % ueberschreitet und deshalb angenommen wird. Die
+    gespeicherte tangente war in genau diesen frames auf 0.001 Grad richtig.
+
+    Die umrechnung in den rahmen laeuft ueber eine kurze geradlinige
+    fortsetzung (position jetzt gegen position gleich darauf) -- dieselbe
+    technik, die apparent_orbital_directions im rueckfall schon benutzt. Sie
+    faengt die drehung des rahmens mit ein, was eine reine vektor-drehung
+    nicht taete.
+
+    Gibt None zurueck, wenn keine brauchbare tangente vorliegt: kernels, die
+    ihre stuetzstellen linear auf die schrittsehne legen (ASPI, einfaches
+    RK4), schreiben dort ABSICHTLICH NaN.
+    """
+    try:
+        if points is None or len(points) < 1:
+            return None
+        if points.shape[1] < 5:
+            return None
+    except Exception:
+        return None
+
+    # Zeitmassstab fuer die fortsetzung: der stuetzstellen-abstand. Der kopf
+    # bleibt aussen vor, dessen abstand schrumpft im halt gegen null.
+    dt = 0.0
+    for i in range(1, min(len(points), limit) - 1):
+        try:
+            step = float(points[i + 1][2]) - float(points[i][2])
+        except Exception:
+            continue
+        if step > 0.0 and step == step:
+            dt = step
+            break
+    if dt <= 0.0:
+        dt = 1.0
+
+    for i in range(0, min(len(points), limit)):
+        try:
+            vx = float(points[i][3])
+            vy = float(points[i][4])
+        except Exception:
+            continue
+        if vx != vx or vy != vy:          # NaN -> dieser kernel liefert keine
+            continue
+        if vx == 0.0 and vy == 0.0:
+            continue
+        try:
+            t = float(points[i][2])
+            x = float(points[i][0])
+            y = float(points[i][1])
+            ax, ay = frame.to_this_frame_xy(t, x, y)
+            bx, by = frame.to_this_frame_xy(t + dt, x + vx * dt, y + vy * dt)
+        except Exception:
+            return None
+        return _unit_or_none(bx - ax, by - ay)
+    return None
+
+
 def _prograde_from_line(frame, points):
     """Frame-space tangent of the *actual* predictor polyline at its start.
 
@@ -123,6 +201,15 @@ def _prograde_from_line(frame, points):
         return None
 
     limit = min(n, _TANGENT_SCAN_LIMIT)
+
+    # ZUERST die gespeicherte tangente -- sie ist exakt und haengt weder an
+    # der stuetzweite noch daran, ob das schiff genau auf der kurve liegt.
+    # Die sehnen-suche darunter bleibt als rueckfall fuer kernels, die keine
+    # tangente schreiben (NaN), und ist dort unveraendert.
+    stored = _tangent_from_stored_velocity(frame, points, limit)
+    if stored is not None:
+        return stored
+
     cache = {}
 
     def frame_xy(index):

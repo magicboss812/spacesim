@@ -223,7 +223,7 @@ class world:
         p2 = p0 + v0 * (h * 0.5) + a1 * (h * h * 0.125)
         a2 = self.acceleration_at(body, p2, t0 + h * 0.5)
 
-        p3 = p0 + v0 * (h * 0.5) + a2 * (h * h * 0.125)
+        p3 = p0 + v0 * (h * 0.5) + a1 * (h * h * 0.125)
         a3 = self.acceleration_at(body, p3, t0 + h * 0.5)
 
         p4 = p0 + v0 * h + a3 * (h * h * 0.5)

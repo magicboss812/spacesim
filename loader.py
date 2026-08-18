@@ -403,7 +403,6 @@ class ConfigLoader:
             ('show_apsis_markers', 'show_apsis_markers', bool),
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
             ('body_icon_radius_px', 'body_icon_radius_px', float),
-            ('ship_velocity_vector_length_px', 'ship_velocity_vector_length_px', float),
             ('reference_trajectories_enabled', 'reference_trajectories_enabled', bool),
             ('reference_trajectories_max_points', 'reference_trajectories_max_points', int),
             ('reference_trajectories_sample_step_s', 'reference_trajectories_sample_step_s', float),
