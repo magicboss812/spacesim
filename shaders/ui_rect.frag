@@ -48,10 +48,36 @@ float rounded_box(vec2 p, vec2 half_size, float radius) {
     return min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))) - radius;
 }
 
+// NEGATIVER RADIUS = FASE (45-grad-schnitt) STATT RUNDUNG.
+//
+// Das ist die formsprache dieser oberflaeche: KSP2 -- und die hausschrift
+// SB Liquid selbst -- schneiden ecken ab, statt sie zu runden, und zwar oft
+// nur EINIGE ecken. Genau diese asymmetrie liest sich als konstruiert statt
+// als dekoriert. Die vier eckwerte in v_radius tragen dafuer bereits vier
+// freie floats; ein negatives vorzeichen kostet also weder ein attribut
+// noch einen zweiten shader.
+//
+// Die fase ist der schnitt des rechtecks mit einer um 45 grad gedrehten
+// halbebene: |x| + |y| <= hx + hy - c. Beide teil-SDFs sind konvex und
+// 1-Lipschitz, max() ist damit weiterhin ein pixel-abstand -- smoothstep
+// ueber +-0.5 px glaettet die schraege genauso sauber wie die geraden.
+float chamfer_box(vec2 p, vec2 half_size, float cut) {
+    float box = rounded_box(p, half_size, 0.0);
+    float diagonal = (abs(p.x) + abs(p.y)
+                      - (half_size.x + half_size.y - cut)) * 0.70710678;
+    return max(box, diagonal);
+}
+
 float shape_distance(vec2 p) {
     float limit = min(v_half.x, v_half.y);
-    float radius = clamp(corner_radius(p), 0.0, limit);
-    return rounded_box(p, v_half, radius);
+    float radius = corner_radius(p);
+    // Der schnitt-term ist ueber abs() symmetrisch, GEWAEHLT wird er aber
+    // nur im quadranten dieser ecke -- eine ecke kann also gefast sein,
+    // waehrend die daneben rund oder scharf bleibt.
+    if (radius < 0.0) {
+        return chamfer_box(p, v_half, clamp(-radius, 0.0, limit));
+    }
+    return rounded_box(p, v_half, clamp(radius, 0.0, limit));
 }
 
 // Winkelmaske fuer kreisboegen. Die weiche kante wird ueber den radius

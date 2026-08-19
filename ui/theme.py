@@ -1,20 +1,37 @@
-"""Farbpalette, typo-stufen, abstaende und radien des spieler-HUDs.
+"""Farbpalette, typo-stufen, abstaende und eckformen des spieler-HUDs.
 
-Uebertragen aus dem entwurf "Spacesim 2D gameplay GUI mockup"
-(claude.ai/design, projekt 8790e76e). Alle groessen sind DESIGN-EINHEITEN
-und entsprechen 1:1 den pixelwerten des entwurfs; die umrechnung auf echte
-pixel passiert ausschliesslich ueber UIContext.px().
+FORMSPRACHE: FASE STATT RUNDUNG. Die vorlage ist die instrumententafel aus
+Kerbal Space Program 2 -- und, was die entscheidung erst zwingend macht, die
+hausschrift SB Liquid selbst: beide schneiden ecken unter 45 grad ab, statt
+sie zu runden, und oft nur EINIGE ecken. Diese asymmetrie ist der
+eigentliche traeger des eindrucks "konstruiert" statt "dekoriert".
+Umgesetzt ist sie im SDF-shader ueber ein VORZEICHEN -- ein negativer
+eckwert ist eine fase (siehe shaders/ui_rect.frag, chamfer_box) --, also
+ohne zusaetzliches attribut und ohne zweiten shader.
 
-KERNIDEE DES ENTWURFS: die oberflaeche zieht ihre farbe aus GENAU VIER
-werten. Jede rolle -- ring, geschwindigkeit, schub, ziel, schiff, rahmen,
-snap, bahn -- greift auf eine davon zu. Der grund steht im entwurf selbst:
-"The ground stays dark; the palette only tints chrome, glow and data."
-Ein palettenwechsel faerbt damit das gesamte HUD um, ohne dass eine einzige
-widget-datei angefasst werden muss.
+ZWEI SCHRIFTEN, ZWEI AUFGABEN. `display` ist SB Liquid: eine gefaste
+pixelschrift, gerastert OHNE kantenglaettung und auf ein vielfaches von
+fuenf pixel gerundet -- so bleiben die stege ueberall gleich breit und die
+kanten hart. Sie traegt beschriftungen, messwerte und knopftexte, also
+alles, was nach instrument aussehen soll. `text` ist Oxanium: dieselben
+quadratischen grundformen, aber mit weich gerundeten ecken und echter
+kantenglaettung. Sie traegt namen, gemischte schreibung und alles, was
+gelesen statt abgelesen wird. Beide haben bei gleicher nenngroesse
+praktisch dieselbe versalhoehe und dieselbe laufweite (gemessen: 7 bzw.
+8 px versalhoehe und 68 bzw. 64 px vorschub bei groesse 10), lassen sich
+also in einer zeile mischen, ohne dass eine der beiden herausfaellt.
 
-Die vier farben sind fuer FLAECHEN gewaehlt, nicht fuer text. Duenne striche
-und schrift laufen deshalb durch readable(): das hellt eine farbe so lange
-richtung weiss auf, bis sie auf dem dunklen grund ~4.5:1 erreicht.
+TYPO-KONTRAST TRAEGT DIE HIERARCHIE, NICHT DIE FARBE: gesperrte
+10-px-beschriftungen gegen 25-30-px-messwerte. Das ist der auffaelligste
+einzelzug der vorlage und der grund, warum dort kaum farbe noetig ist.
+
+DIE PALETTE IST FESTGELEGT. Vier farben, jede mit EINER bedeutung --
+cyan = daten, magenta = zweite achse/ziel, amber = achtung und energie,
+gruen = eingerastet/bereit. Der frueher hier moegliche palettenwechsel ist
+entfallen: eine farbe, die sich neu verteilen laesst, kann nichts bedeuten.
+
+Alle groessen sind DESIGN-EINHEITEN; die umrechnung auf echte pixel passiert
+ausschliesslich ueber UIContext.px().
 """
 
 import colorsys
@@ -101,89 +118,96 @@ def shift_hue(color, degrees):
     return (r, g, b, color[3])
 
 
-# ------------------------------------------------------------ palettensaetze
 
-PALETTE_SETS = (
-    ('Baltic', ('#22577a', '#38a3a5', '#57cc99', '#80ed99')),
-    ('Ember', ('#3d2b56', '#c1462f', '#e0803c', '#f2c14e')),
-    ('Ion', ('#2b3a67', '#496ddb', '#8b5cf6', '#c2b0ff')),
+
+# ----------------------------------------------------------------- palette
+
+#: DIE vier farben. Kein zweiter satz, kein wechselknopf -- siehe modulkopf.
+#: Reihenfolge = bedeutung, nicht helligkeit.
+SCHEME_NAME = 'Kerbin'
+SCHEME = (
+    '#17b2c4',   # 0 CYAN    -- daten: bahn, ring, geschwindigkeit, rahmen
+    '#d9519f',   # 1 MAGENTA -- zweite achse: normal/antinormal, ziel
+    '#eda63c',   # 2 AMBER   -- energie und achtung: schub, hoehe, zeitraffer
+    '#48d97c',   # 3 GRUEN   -- eingerastet / bereit: autopilot, schiff
 )
 
-# Welche der vier farben welche rolle traegt. Der entwurf verteilt das per
-# zufallsseed neu ("SHUFFLE DISTRIBUTION"), was zum ERKUNDEN gedacht ist --
-# im spiel ist eine feste, bewusst gewaehlte zuordnung richtig, sonst
-# bedeutet dieselbe farbe von sitzung zu sitzung etwas anderes.
-#
-# Index 0 ist die dunkelste, 3 die hellste farbe des satzes.
+#: Rolle -> index in SCHEME. Fest, weil eine farbe sonst nichts bedeutet.
 ROLE_INDEX = {
-    'body': 0,        # himmelskoerper-fuellung, dunkelste
-    'orbit': 1,       # bahnlinien, system-map
-    'ring': 1,        # attitude-ring und teilstriche
+    'body': 0,        # himmelskoerper-fuellung
+    'orbit': 0,       # bahnlinien, system-map
+    'ring': 0,        # attitude-ring und teilstriche
+    'elem': 0,        # bahnelemente
+    'velocity': 0,    # geschwindigkeitsnadel und -wert
+    'frame': 0,       # bezugsrahmen-auswahl
+    'target': 1,      # ziel
+    'normal': 1,      # normal-/antinormal-achse
     'warp': 2,        # zeitraffer
-    'frame': 2,       # bezugsrahmen-auswahl
-    'snap': 2,        # orientierungs-autopilot
     'throttle': 2,    # schub
-    'elem': 2,        # bahnelemente
-    'velocity': 3,    # geschwindigkeitsnadel, hellste
-    'target': 3,      # ziel
+    'altitude': 2,    # hoehe ueber dem bezugskoerper
+    'star': 2,        # zentralgestirn
+    'snap': 3,        # orientierungs-autopilot
     'ship': 3,        # schiff
-    'star': 3,        # zentralgestirn
 }
 
 
 class Palette:
-    """Die vier palettenfarben plus die feste, dunkle grundierung.
+    """Die vier bedeutungsfarben plus die feste, dunkle grundierung.
 
     Der grund (panel, kante, schrift) ist BEWUSST nicht teil der palette:
-    er muss unter jeder palette gleich lesbar bleiben, und ein mitgefaerbter
+    er muss unter jeder farbe gleich lesbar bleiben, und ein mitgefaerbter
     hintergrund wuerde die vier akzente entwerten.
     """
 
-    def __init__(self, colors=None, name='Baltic'):
+    def __init__(self, colors=None, name=SCHEME_NAME):
         self.name = name
-        self.set_colors(colors or PALETTE_SETS[0][1])
+        self.set_colors(colors or SCHEME)
 
     # ------------------------------------------------------ feste grundierung
 
-    # Flaechen. Der entwurf setzt panels auf rgba(10,15,22,.70) ueber einem
-    # #07090d-grund; pillen liegen etwas dichter, popups fast deckend.
-    ground = rgba('#07090d')
-    panel = rgba('#0a0f16', 0.70)
-    panel_pill = rgba('#0a0f16', 0.76)
-    panel_popup = rgba('#0a0f16', 0.92)
-    panel_sunken = rgba('#ffffff', 0.09)
-    ring_face = rgba('#080c12', 0.82)
+    # Flaechen. Deutlich dunkler und BLAEULICHER als zuvor: die vorlage setzt
+    # ihre instrumente auf ein sehr dunkles marineblau, nicht auf neutrales
+    # schwarz -- das ist es, was die cyan-daten darauf leuchten laesst.
+    ground = rgba('#04070c')
+    panel = rgba('#080f18', 0.88)
+    panel_pill = rgba('#0a1420', 0.92)
+    panel_popup = rgba('#0a1420', 0.97)
+    panel_sunken = rgba('#000308', 0.75)
+    ring_face = rgba('#061019', 0.94)
+    #: Innenflaeche eines doppelt gerahmten blocks (aussenlinie, spalt, kern).
+    panel_core = rgba('#0c1826', 0.94)
 
-    # Kanten. Weisse hairlines statt farbiger raender -- so bleibt die kante
-    # unter jeder palette gleich stark.
-    edge = rgba('#ffffff', 0.12)
-    edge_strong = rgba('#ffffff', 0.18)
-    edge_inner = rgba('#ffffff', 0.07)
+    # Kanten. Die vorlage rahmt DOPPELT: eine haarfeine aussenlinie, ein
+    # schmaler spalt, dann der kern. edge ist die aussenlinie, edge_inner die
+    # innere; edge_strong traegt den aktiven zustand.
+    edge = rgba('#7fb4cc', 0.34)
+    edge_strong = rgba('#a8d8ea', 0.55)
+    edge_inner = rgba('#7fb4cc', 0.16)
 
     # Schrift.
-    text = rgba('#e8eef5')
-    text_muted = rgba('#8b9cb0')
-    text_dim = rgba('#7f8fa3')
-    text_dimmer = rgba('#5c6c80')
-    text_inverse = rgba('#07090d')
+    text = rgba('#dceaf4')
+    text_muted = rgba('#8fa8bc')
+    text_dim = rgba('#6f8698')
+    text_dimmer = rgba('#4c5f70')
+    text_inverse = rgba('#04070c')
 
     # Interaktionszustaende.
-    hover = rgba('#ffffff', 0.08)
-    active = rgba('#ffffff', 0.16)
-    idle_fill = rgba('#ffffff', 0.05)
-    disabled = rgba('#ffffff', 0.04)
-    shadow = rgba('#000000', 0.55)
+    hover = rgba('#a8d8ea', 0.10)
+    active = rgba('#a8d8ea', 0.20)
+    idle_fill = rgba('#a8d8ea', 0.045)
+    disabled = rgba('#a8d8ea', 0.03)
+    shadow = rgba('#000000', 0.70)
 
     # Aliase, die die allgemeinen widgets aus ui/widgets/ erwarten.
-    panel_raised = rgba('#131b26', 0.86)
-    divider = rgba('#ffffff', 0.08)
+    panel_raised = rgba('#101d2c', 0.94)
+    divider = rgba('#7fb4cc', 0.14)
     border = edge
     border_strong = edge_strong
-    warning = rgba('#f5c451')
-    danger = rgba('#ff6b6b')
+    warning = rgba('#eda63c')
+    danger = rgba('#ff5f6b')
 
     def set_colors(self, colors):
-        """Setzt die vier palettenfarben und leitet alle rollen neu ab."""
+        """Setzt die vier farben und leitet alle rollen neu ab."""
         self.colors = [rgba(c) if isinstance(c, str) else tuple(c) for c in colors]
         while len(self.colors) < 4:
             self.colors.append(self.colors[-1])
@@ -201,16 +225,22 @@ class Palette:
         raise AttributeError(name)
 
     def raw_of(self, role):
-        """Ungehellte palettenfarbe -- fuer flaechen, nie fuer schrift."""
-        return self.raw.get(role, self.colors[2])
+        """Ungehellte farbe -- fuer flaechen, nie fuer schrift."""
+        return self.raw.get(role, self.colors[0])
 
     def glow(self, role, intensity=0.6):
-        """Der farbige schein um ein panel. Im entwurf ein box-shadow;
-        hier eine sehr schwache, weiche fuellung hinter dem panel."""
-        return with_alpha(self.role.get(role, self.colors[2]), 0.28 * float(intensity))
+        """Der farbige schein hinter einem block -- ein schlagschatten mit
+        versatz null und weiter weichzeichnung.
+
+        DEUTLICH SCHWAECHER als frueher (0.28 -> 0.13): der schein war das,
+        was die alte oberflaeche nach "jedes element schwebt einzeln"
+        aussehen liess. Er soll einen block vom sternenfeld abheben, nicht
+        ihn zum leuchtobjekt machen.
+        """
+        return with_alpha(self.role.get(role, self.colors[0]), 0.13 * float(intensity))
 
     def accent_for(self, role):
-        return self.role.get(role, self.colors[2])
+        return self.role.get(role, self.colors[0])
 
     # Namen, die ui/widgets/ generisch benutzt.
     @property
@@ -233,65 +263,88 @@ class Palette:
 class Role:
     """Eine typo-rolle: groesse, laufweite, strichstaerke, schriftfamilie.
 
-    LAUFWEITE ist hier keine feinheit, sondern traegt den entwurf: die
-    abschnitts-beschriftungen laufen auf .18em, die zahlen-einheiten auf
-    .24em. Ohne sperrung sieht die oberflaeche voellig anders aus.
+    FAMILIE ist hier die eigentliche entscheidung: 'display' ist die gefaste
+    pixelschrift (hart gerastert, groesse auf fuenferschritte gerundet),
+    'text' die weich gerundete leseschrift. Siehe modulkopf.
+
+    LAUFWEITE traegt den entwurf: versal-beschriftungen laufen auf .16em,
+    einheiten auf .20em. Ohne sperrung sieht die oberflaeche voellig anders
+    aus.
     """
 
-    __slots__ = ('size', 'tracking', 'bold', 'mono')
+    __slots__ = ('size', 'tracking', 'bold', 'family')
 
-    def __init__(self, size, tracking=0.0, bold=False, mono=False):
+    def __init__(self, size, tracking=0.0, bold=False, family='display'):
         self.size = float(size)
         self.tracking = float(tracking)   # in em
         self.bold = bool(bold)
-        self.mono = bool(mono)
+        self.family = str(family)
+
+    @property
+    def mono(self):
+        """Rueckwaertskompatibler alias -- die pixelschrift IST dicktengleich."""
+        return self.family == 'display'
 
 
 class TypeScale:
-    """Rollen, nicht groessen -- widgets fragen nach 'section', nicht nach 9."""
+    """Rollen, nicht groessen -- widgets fragen nach 'section', nicht nach 10.
 
-    # Abschnitts-ueberschriften in panels ("ORBITAL ELEMENTS", "TARGET").
-    section = Role(9, tracking=0.18)
-    # Schluessel einer messwert-zeile ("AP", "PE", "ECC").
-    key = Role(11, tracking=0.06)
-    # Wert einer messwert-zeile. Tabellenziffern: eine zahl, die sich jeden
-    # frame aendert, darf die spaltenbreite nicht verschieben.
-    value = Role(13, tracking=0.0, bold=True, mono=True)
+    Die groessen der display-rollen liegen bewusst auf der FUENFER-LEITER
+    (10/15/20/25/30). Die pixelschrift wird auf das naechste vielfache von
+    fuenf gerundet gerastert; wer hier 11 oder 13 einsetzt, bekommt denselben
+    pixelwert wie ein nachbar und verliert die stufe.
+    """
 
-    # Schiffs-plakette oben links.
-    badge = Role(13, tracking=0.05, bold=True)
-    badge_sub = Role(11, tracking=0.12)
-    # Ziel-name.
-    title = Role(16, tracking=0.02, bold=True)
-    # "LOCKED"-marke.
-    pill = Role(9, tracking=0.10)
+    # -------------------------------------------------- instrument (display)
+    #: Die notch-tabs auf der panelkante: ORBITAL.INFO, SNAP.CONTROL.
+    tab = Role(10, tracking=0.16)
+    #: Abschnitts-beschriftung im panel.
+    section = Role(10, tracking=0.16)
+    #: Kleinstbeschriftung unter einem knopf oder neben einem wert.
+    caption = Role(10, tracking=0.12)
+    #: Einheit hinter einem messwert.
+    unit = Role(10, tracking=0.20)
+    #: Wert einer messwert-zeile.
+    value = Role(15, tracking=0.02)
+    #: Der grosse messwert in den navball-flanken (KSP2: 01527 / 00876).
+    gauge = Role(25, tracking=0.02)
+    #: Der grosse wert unter dem instrument.
+    readout = Role(25, tracking=0.02)
+    #: Kurs ueber dem ring (KSP2: 357 grad).
+    heading_big = Role(20, tracking=0.04)
+    #: Zeitraffer-stufen, kurs-nabe, timer.
+    warp = Role(10, tracking=0.06)
+    hdg = Role(10, tracking=0.10)
+    #: Knopfbeschriftungen.
+    button = Role(10, tracking=0.14)
+    button_sm = Role(10, tracking=0.12)
+    #: Teilung und marker des rings.
+    ring_caption = Role(10, tracking=0.20)
+    ring_unit = Role(10, tracking=0.20)
+    ring_tick = Role(10, tracking=0.06)
+    ring_marker = Role(10, tracking=0.0)
+    throttle_value = Role(15, tracking=0.02)
+    glyph = Role(15, tracking=0.0)
 
-    # Bedienelemente.
-    button = Role(11, tracking=0.12, bold=True)
-    button_sm = Role(10, tracking=0.12, bold=True)
-    warp = Role(11, tracking=0.0, bold=True, mono=True)
-    glyph = Role(14, tracking=0.0, bold=True)
-    caption = Role(9, tracking=0.10)
-
-    # Attitude-ring.
-    ring_caption = Role(9, tracking=0.24)
-    ring_speed = Role(30, tracking=-0.015, bold=True, mono=True)
-    ring_unit = Role(10, tracking=0.24)
-    # Der grosse messwert in der geschwindigkeits-plakette unter dem ring.
-    readout = Role(24, tracking=-0.01, bold=True, mono=True)
-    ring_tick = Role(11, tracking=0.09, bold=True)
-    ring_marker = Role(9, tracking=0.0, bold=True)
-    hdg = Role(11, tracking=0.11, bold=True, mono=True)
-
-    # Schub.
-    throttle_value = Role(14, tracking=0.0, bold=True, mono=True)
+    # ------------------------------------------------------- lesetext (text)
+    #: Schluessel einer messwert-zeile (AP, PE, ECC) -- gemischt lesbar.
+    key = Role(11, tracking=0.10, family='text')
+    #: Schiffs-plakette und ihr untertitel.
+    badge = Role(13, tracking=0.06, bold=True, family='text')
+    badge_sub = Role(11, tracking=0.10, family='text')
+    #: Ziel-/koerpername.
+    title = Role(16, tracking=0.02, bold=True, family='text')
+    #: Marke wie LOCKED.
+    pill = Role(10, tracking=0.10, family='text')
+    #: Eintraege der koerperliste.
+    body = Role(12, tracking=0.01, family='text')
+    label = Role(11, tracking=0.04, family='text')
+    heading = Role(15, tracking=0.02, bold=True, family='text')
 
     # Von den allgemeinen widgets erwartete namen.
-    body = Role(13, tracking=0.0)
-    label = Role(11, tracking=0.06)
-    heading = Role(16, tracking=0.02, bold=True)
-    mono_readout = Role(13, tracking=0.0, bold=True, mono=True)
-    display = Role(30, tracking=-0.015, bold=True)
+    mono_readout = Role(15, tracking=0.02)
+    display = Role(30, tracking=0.02)
+    ring_speed = Role(25, tracking=0.02)
 
 
 class Spacing:
@@ -309,14 +362,49 @@ class Spacing:
 
 
 class Radius:
-    """Eckradien in design-einheiten, direkt aus dem entwurf."""
+    """Eckformen in design-einheiten.
+
+    NEGATIV = FASE, positiv = rundung (siehe modulkopf und
+    shaders/ui_rect.frag). Die oberflaeche benutzt bis auf echte kreise
+    ausschliesslich fasen -- durchgaengige rundung war der staerkste
+    einzelne "das hat eine maschine entworfen"-hinweis der alten fassung.
+    """
 
     none = 0
-    sm = 6
-    md = 12       # snap-kacheln
-    lg = 16       # panels
-    xl = 18       # popups, fensterrahmen
-    pill = 999    # wird im shader auf die halbe kante geklemmt
+    #: Kleine fase an knoepfen und kacheln.
+    cut_sm = -4
+    #: Regelfase an panels und rahmen.
+    cut = -7
+    #: Grosse fase an den tragenden bloecken.
+    cut_lg = -11
+    #: Sanfte rundung -- nur dort, wo etwas ausdruecklich weich sein soll.
+    sm = 3
+    md = 5
+    #: Vollkreis; wird im shader auf die halbe kante geklemmt.
+    pill = 999
+
+    # Alte namen, damit die allgemeinen widgets weiterlaufen. Sie zeigen
+    # jetzt auf FASEN -- eine rundung soll nirgends mehr versehentlich
+    # zurueckkommen.
+    lg = -7
+    xl = -11
+
+
+def cut_corners(size, top_left=True, top_right=True,
+                bottom_right=True, bottom_left=True):
+    """Eckwert-tupel, bei dem NUR die gewaehlten ecken gefast sind.
+
+    Die vorlage fast fast nie alle vier ecken -- genau die asymmetrie laesst
+    einen block konstruiert wirken. Beispiel: ein panel mit notch-tab oben
+    links laesst diese ecke scharf und fast die drei anderen.
+    """
+    cut = -abs(float(size))
+    return (
+        cut if top_left else 0.0,
+        cut if top_right else 0.0,
+        cut if bottom_right else 0.0,
+        cut if bottom_left else 0.0,
+    )
 
 
 class Motion:
@@ -338,7 +426,7 @@ class Theme:
         self.palette = palette if palette is not None else Palette()
         self.glow_intensity = float(glow_intensity)
         # Unter dieser fensterbreite klappen die seitenpanels zu schmalen
-        # leisten zusammen. Der wert kommt aus dem entwurf.
+        # leisten zusammen.
         self.compact_breakpoint = float(compact_breakpoint)
 
     type_scale = TypeScale
@@ -347,25 +435,31 @@ class Theme:
     motion = Motion
 
     # Standard-metriken.
-    control_height = 26
-    control_height_sm = 20
-    control_height_lg = 34
-    panel_padding = 14
-    panel_width = 196
+    control_height = 24
+    control_height_sm = 18
+    control_height_lg = 32
+    panel_padding = 12
+    panel_width = 190
     border_width = 1.0
+    #: Breite des spalts zwischen aussen- und innenlinie eines doppelrahmens.
+    frame_gap = 3
     shadow_offset = (0.0, -4.0)   # ortho-konvention: negativ = nach unten
     shadow_softness = 14.0
 
-    # Schrift-familien in prioritaetsreihenfolge. Der entwurf benutzt
-    # "Chakra Petch" -- eine Google-schrift, die auf Windows nicht
-    # vorinstalliert ist. ui/text.py nimmt sie, WENN sie installiert ist,
-    # sonst die naechste der liste. Eine datei in ui/assets/ui-sans.ttf
-    # (bzw. ui-sans-bold.ttf) hat vorrang vor allem hier.
-    font_family = ('Chakra Petch', 'Segoe UI', 'Inter', 'Roboto', 'DejaVu Sans', 'Arial')
-    font_family_mono = ('Chakra Petch', 'Consolas', 'DejaVu Sans Mono', 'Courier New')
+    # Schrift-familien. Die beiden TTF in ui/assets/ sind die vorgabe; die
+    # systemnamen dahinter greifen nur, wenn eine datei fehlt.
+    #: SB Liquid -- gefaste pixelschrift, OHNE kantenglaettung gerastert.
+    font_family_display = ('Consolas', 'DejaVu Sans Mono', 'Courier New')
+    #: Oxanium -- quadratisch mit weichen ecken.
+    font_family_text = ('Oxanium', 'Chakra Petch', 'Segoe UI', 'DejaVu Sans')
+
+    # Rueckwaertskompatible namen.
+    font_family = font_family_text
+    font_family_mono = font_family_display
 
     def palette_sets(self):
-        return PALETTE_SETS
+        """Nur noch der EINE satz -- der wechselknopf ist entfallen."""
+        return ((SCHEME_NAME, SCHEME),)
 
     def set_palette_colors(self, colors, name=None):
         self.palette.set_colors(colors)

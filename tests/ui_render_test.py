@@ -13,6 +13,10 @@ Geprueft wird:
   4. Verankerung ueber einen resize hinweg
   5. Trefferflaeche == gezeichnete flaeche
   6. Maus-vorfahrt (wants_mouse) und klick-weiterleitung
+  7. Regler und schalter unter der maus
+  8. ui_scale skaliert layout und schrift
+  9. Fase statt rundung -- das vorzeichen im eckradius
+ 10. Die pixelschrift bleibt hart gerastert und auf der fuenfer-leiter
 
 Aufruf: python tests/ui_render_test.py
 """
@@ -34,7 +38,7 @@ import pygame
 from pygame.locals import DOUBLEBUF, OPENGL, RESIZABLE
 
 from ui import TOP_LEFT, TOP_RIGHT, UIContext, UIRoot
-from ui.theme import DEFAULT_THEME, rgba
+from ui.theme import DEFAULT_THEME, cut_corners, rgba
 from ui.widgets import Button, Label, Panel, Slider, Toggle
 
 W, H = 800, 500
@@ -285,6 +289,131 @@ draw_frame(root)
 check(abs(panel.rect.w - 600.0) < 1.5, 'panelbreite verdoppelt sich',
       f"{panel.rect.w:.1f}px")
 root.resize(W, H, ui_scale=1.0)
+
+print()
+print("9. Fase statt rundung (negativer eckradius)")
+
+# Die FORMSPRACHE der oberflaeche haengt an einem vorzeichen: ein negativer
+# eckwert ist eine 45-grad-fase statt einer rundung (shaders/ui_rect.frag,
+# chamfer_box). Geprueft wird an dem punkt, an dem sich beide am staerksten
+# unterscheiden.
+#
+# Fase der groesse c: die schnittkante laeuft von (c, 0) nach (0, c), alles
+# mit x + y < c liegt DRAUSSEN. Rundung mit radius c: der bogenmittelpunkt
+# liegt bei (c, c), und (0.35c, 0.35c) hat davon den abstand
+# 0.65c*sqrt(2) = 0.92c < c, liegt also DRINNEN. Derselbe punkt entscheidet
+# damit zwischen beiden formen. (0.3c waere zu knapp: 0.99c faellt genau in
+# die geglaettete kante und misst einen halbwert.)
+CUT = 24
+FILL_RGB = (255, 200, 0)
+
+
+def corner_probe(radius):
+    """Zeichnet ein rechteck bei (100, 100) und tastet seine linke obere ecke ab."""
+    root2 = UIRoot(UIContext(gl, W, H, ui_scale=1.0))
+    panel2 = root2.add(Panel(anchor=TOP_LEFT, offset=(100, 100), size=(200, 160),
+                             radius=radius, fill=rgba('#ffc800'), border=None,
+                             shadow=False))
+    panel2.blocks_mouse = False
+    pixels = draw_frame(root2)
+    # (0.3c, 0.3c) und (0.8c, 0.8c) relativ zur ecke bei (100, 100)
+    near = pixels[100 + int(CUT * 0.35), 100 + int(CUT * 0.35)]
+    far = pixels[100 + int(CUT * 0.8), 100 + int(CUT * 0.8)]
+    middle = pixels[180, 180]
+    return near, far, middle
+
+
+def lit(pixel):
+    return int(pixel[0]) > 100
+
+
+near_cut, far_cut, mid_cut = corner_probe(-CUT)
+near_round, far_round, mid_round = corner_probe(CUT)
+
+check(lit(mid_cut) and lit(mid_round), 'beide formen sind in der mitte gefuellt',
+      f"fase {tuple(int(v) for v in mid_cut)}, rundung {tuple(int(v) for v in mid_round)}")
+check(not lit(near_cut), 'FASE: der punkt bei 0.35c liegt ausserhalb',
+      f"gemessen {tuple(int(v) for v in near_cut)}")
+check(lit(near_round), 'RUNDUNG: derselbe punkt liegt innerhalb',
+      f"gemessen {tuple(int(v) for v in near_round)} -- das ist der unterschied, "
+      f"den das vorzeichen macht")
+check(lit(far_cut), 'FASE: der punkt bei 0.8c liegt innerhalb',
+      f"gemessen {tuple(int(v) for v in far_cut)}")
+
+# ASYMMETRIE: theme.cut_corners() laesst einzelne ecken scharf. Genau das --
+# nicht die fase an sich -- laesst einen block konstruiert statt dekoriert
+# wirken, und es ist der grund, warum die vier eckwerte einzeln gesetzt werden.
+root3 = UIRoot(UIContext(gl, W, H, ui_scale=1.0))
+panel3 = root3.add(Panel(anchor=TOP_LEFT, offset=(100, 100), size=(200, 160),
+                         radius=cut_corners(CUT, top_left=False),
+                         fill=rgba('#ffc800'), border=None, shadow=False))
+panel3.blocks_mouse = False
+px3 = draw_frame(root3)
+tl = px3[102, 102]                     # oben links: soll SCHARF sein
+tr = px3[102, 100 + 200 - 3]           # oben rechts: soll gefast sein
+check(lit(tl), 'cut_corners: die ausgenommene ecke bleibt scharf',
+      f"oben links {tuple(int(v) for v in tl)}")
+check(not lit(tr), 'cut_corners: die uebrigen ecken sind gefast',
+      f"oben rechts {tuple(int(v) for v in tr)}")
+
+
+print()
+print("10. Die pixelschrift bleibt pixelig, nicht unscharf")
+
+# SB Liquid ist auf einem pixelraster gezeichnet. Zwei dinge muessen stimmen,
+# damit sie so aussieht, wie sie gedacht ist -- und beide sind unsichtbar,
+# wenn man nur hinschaut, aber messbar:
+#
+# 1. OHNE kantenglaettung gerastert. Mit glaettung traegt jede glyphe einen
+#    halbdeckenden saum; das ist der unterschied zwischen "pixelig" und
+#    "unscharf pixelig", den diese oberflaeche gerade nicht haben soll.
+# 2. Auf ein VIELFACHES VON FUENF gerundet. Dazwischen faellt die stegbreite
+#    unterschiedlich aus (gemessen bei 11-13 px: stege von 1 UND 2 px
+#    nebeneinander), was die schrift trotz harter kanten unruhig macht.
+text_ctx = UIContext(gl, W, H, ui_scale=1.0)
+scale = text_ctx.theme.type_scale
+
+check(scale.section.family == 'display' and scale.key.family == 'text',
+      'die beiden familien sind getrennt vergeben',
+      f"section={scale.section.family}, key={scale.key.family}")
+
+for role in ('tab', 'section', 'value', 'gauge'):
+    check(not text_ctx.text._role_antialias(role),
+          f"'{role}' wird ohne kantenglaettung gerastert")
+for role in ('key', 'title', 'body'):
+    check(text_ctx.text._role_antialias(role),
+          f"'{role}' wird mit kantenglaettung gerastert")
+
+for ui_scale in (1.0, 1.25, 1.44, 2.0):
+    probe = UIContext(gl, W, H, ui_scale=ui_scale)
+    sizes = [probe.text._role_pixel_size(r)
+             for r in ('tab', 'section', 'value', 'gauge')]
+    check(all(size % 5 == 0 and size >= 10 for size in sizes),
+          f"ui_scale {ui_scale}: pixelgroessen liegen auf der fuenfer-leiter",
+          f"{sizes}")
+
+# Der eigentliche beweis: die gerasterte flaeche darf nur ZWEI alphawerte
+# tragen. Alles dazwischen ist saum.
+probe = UIContext(gl, W, H, ui_scale=1.0)
+font = probe.text.font('value')
+surface = probe.text._render_tracked(
+    'ORBITAL.INFO 0123', font, probe.text.tracking_px('value'), False
+)
+alpha = pygame.surfarray.pixels_alpha(surface).astype(int)
+partial = float(((alpha > 8) & (alpha < 247)).sum()) / alpha.size * 100.0
+check(partial == 0.0, 'kein einziger teildeckender pixel in der pixelschrift',
+      f"{partial:.2f} % teildeckend, {len(np.unique(alpha))} alphawerte")
+
+# Gegenprobe an der leseschrift: die MUSS einen saum haben, sonst waere sie
+# ebenfalls hart gerastert und die unterscheidung liefe ins leere.
+font = probe.text.font('title')
+surface = probe.text._render_tracked(
+    'Erde', font, probe.text.tracking_px('title'), True
+)
+alpha = pygame.surfarray.pixels_alpha(surface).astype(int)
+soft = float(((alpha > 8) & (alpha < 247)).sum()) / alpha.size * 100.0
+check(soft > 3.0, 'die leseschrift wird dagegen geglaettet',
+      f"{soft:.2f} % teildeckend")
 
 print()
 if FAILURES:

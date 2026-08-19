@@ -173,6 +173,8 @@ from schiff import schiffcontrol
 from ui import UIContext, UIRoot, UIState
 from ui.hud import Hud
 from ui.hud.layout import WARP_STEPS
+from ui.hud.navball import GAUGE_RADIUS, THROTTLE_ARC
+from ui import units
 from world import world as World
 
 config = ConfigLoader(None)
@@ -202,20 +204,20 @@ hud = Hud(root, world, sim_ship, control, camera, renderer, predictor, state,
           tick_rate=60.0)
 
 
-def frame(width=None, height=None):
+def frame(width=None, height=None, dt=1 / 60):
     if width is not None:
         root.resize(width, height, ui_scale=1.0)
     hud.update()
-    root.begin_frame(1 / 60)
+    root.begin_frame(dt)
 
 
 frame()
 
 GROUPS = {
-    'badge': hud.badge, 'warp': hud.warp, 'palette': hud.palette_button,
-    'koerperliste': hud.body_browser, 'elements': hud.elements,
-    'target': hud.target, 'throttle': hud.throttle, 'frames': hud.frames,
-    'ring': hud.ring, 'snaps': hud.snaps, 'zoom': hud.zoom,
+    'badge': hud.badge, 'warp': hud.warp,
+    'koerperliste': hud.body_browser, 'target': hud.target,
+    'navball': hud.navball, 'frames': hud.frames,
+    'snaps': hud.snaps, 'zoom': hud.zoom,
 }
 
 for name, widget in GROUPS.items():
@@ -231,8 +233,10 @@ for i, a_name in enumerate(names):
     for b_name in names[i + 1:]:
         a = GROUPS[a_name].rect
         b = GROUPS[b_name].rect
-        overlap = (a.x < b.right and b.x < a.right
-                   and a.y < b.bottom and b.y < a.bottom)
+        # Ein pixel toleranz: navball-block und snap-rosette sind bewusst
+        # aneinander GEDOCKT, ihre kanten duerfen sich beruehren.
+        overlap = (a.x < b.right - 1.0 and b.x < a.right - 1.0
+                   and a.y < b.bottom - 1.0 and b.y < a.bottom - 1.0)
         if overlap:
             check(False, f"'{a_name}' ueberlappt '{b_name}'", f"{a} / {b}")
 check(not any(f.startswith("'") and 'ueberlappt' in f for f in FAILURES),
@@ -286,19 +290,21 @@ print()
 print("4. Responsive umschaltung")
 frame(1280, 800)
 check(hud._wide, 'bei 1280 breit: volles layout')
-check(hud.elements.visible and not hud.elements_rail.visible,
-      'breit: bahnelemente als panel, nicht als leiste')
+check(hud.target.visible and not hud.target_rail.visible,
+      'breit: ziel als panel, nicht als leiste')
 
 frame(820, 620)
 check(not hud._wide, 'bei 820 breit: kompaktes layout')
-check(hud.elements_rail.visible and not hud.elements.visible,
-      'schmal: bahnelemente als leiste')
+check(hud.target_rail.visible and not hud.target.visible,
+      'schmal: ziel als leiste')
 check(hud.body_browser.visible, 'schmal: koerperliste bleibt erreichbar')
-check(hud.throttle_compact.visible and not hud.throttle.visible,
-      'schmal: schubregler hochkant')
-for name, widget in (('leiste links', hud.elements_rail),
-                     ('leiste rechts', hud.target_rail),
-                     ('ring', hud.ring), ('snaps kompakt', hud.snaps_compact)):
+check(hud.navball.visible,
+      'schmal: der navball-block bleibt -- ohne ihn kann man nicht fliegen')
+check(hud.snaps_compact.visible and not hud.snaps.visible,
+      'schmal: snap-rosette geschrumpft')
+for name, widget in (('leiste rechts', hud.target_rail),
+                     ('navball', hud.navball), ('ring', hud.ring),
+                     ('snaps kompakt', hud.snaps_compact)):
     r = widget.rect
     check(r.x >= -0.5 and r.right <= 820.5 and r.y >= -0.5 and r.bottom <= 620.5,
           f"schmal: '{name}' liegt im bild", f"{r}")
@@ -374,55 +380,21 @@ hud._set_view_mode(1)
 check(state.view_mode() == 1 and not state.target_overlay_enabled,
       'ORBITAL schaltet zurueck auf nicht rotierend')
 
-# --- palettenknopf: aufklappen und ZEICHNEN -------------------------------
-# Regression: die saetze in theme.PALETTE_SETS stehen als hex-ZEICHENKETTEN
-# da (damit sie in theme.py lesbar bleiben), der zeichenpfad will aber
-# float-tupel. Das popup starb deshalb beim oeffnen mit
-# "could not convert string to float: '#'". Nur das oeffnen zu pruefen
-# genuegt nicht -- der fehler schlaegt erst beim zeichnen zu.
-hud.palette_button.open = True
-frame()
-try:
-    gl.screen.use()
-    gl.clear(0.0, 0.0, 0.0, 1.0)
-    root.render()
-    popup_ok, popup_error = True, ''
-except Exception as exc:
-    popup_ok, popup_error = False, f"{type(exc).__name__}: {exc}"
-check(popup_ok, 'geoeffnete palettenauswahl laesst sich zeichnen', popup_error)
-
-# Klick auf eine satz-zeile uebernimmt den satz und schliesst das popup.
-hud.palette_button.open = True
-frame()
-rx, ry, rw, rh = hud.palette_button._set_row_rect(ui, 1)
-row_pos = (int(rx + rw * 0.5), int(ry + rh * 0.5))
-root._mouse_pos = (float(row_pos[0]), float(row_pos[1]))
-root.begin_frame(1 / 60)
-# DOWN und UP: UIRoot leitet ein loslassen nur an das widget weiter, das
-# beim druecken aktiv wurde -- ein einzelnes MOUSEBUTTONUP verpufft.
-root.handle_event(pygame.event.Event(
-    pygame.MOUSEBUTTONDOWN, {'pos': row_pos, 'button': 1}))
-root.handle_event(pygame.event.Event(
-    pygame.MOUSEBUTTONUP, {'pos': row_pos, 'button': 1}))
-check(ui.theme.palette.name == 'Ember', 'klick auf eine satz-zeile uebernimmt ihn',
-      f"aktiv: {ui.theme.palette.name}")
-check(not hud.palette_button.open, 'popup schliesst nach der auswahl')
+# --- die palette liegt fest ----------------------------------------------
+# Der frueher hier gepruefte palettenwechsel ist ENTFALLEN: eine farbe, die
+# sich neu verteilen laesst, kann nichts bedeuten (siehe theme.py). Geprueft
+# wird stattdessen, dass es genau einen satz gibt und dass jede rollenfarbe
+# auf dem dunklen grund noch lesbar ist -- das war der eigentliche zweck der
+# aufhellung in theme.readable().
+check(len(ui.theme.palette_sets()) == 1, 'es gibt genau EINEN farbsatz',
+      f"{[name for name, _ in ui.theme.palette_sets()]}")
+for role in ('ring', 'velocity', 'target', 'warp', 'throttle', 'snap', 'ship'):
+    color = ui.theme.palette.accent_for(role)
+    check(max(color[:3]) > 0.35,
+          f"rollenfarbe '{role}' bleibt auf dunklem grund lesbar",
+          f"{tuple(round(c, 3) for c in color)}")
 check(all(isinstance(c, tuple) for c in ui.theme.palette.colors),
-      'palette haelt nach dem wechsel float-tupel, keine zeichenketten')
-
-# --- palette --------------------------------------------------------------
-# Auf Baltic zuruecksetzen: der klick-test oben hat bereits auf Ember
-# gestellt, sonst pruefte der wechsel unten gegen sich selbst.
-ui.theme.set_palette_colors(('#22577a', '#38a3a5', '#57cc99', '#80ed99'), name='Baltic')
-first = tuple(ui.theme.palette.colors[0])
-ui.theme.set_palette_colors(('#3d2b56', '#c1462f', '#e0803c', '#f2c14e'), name='Ember')
-check(tuple(ui.theme.palette.colors[0]) != first, 'palettenwechsel aendert die farben')
-check(ui.theme.palette.name == 'Ember', 'palettenname uebernommen')
-ring_color = ui.theme.palette.ring
-check(max(ring_color[:3]) > 0.35,
-      'aufgehellte rollenfarbe bleibt auf dunklem grund lesbar',
-      f"ring = {tuple(round(c, 3) for c in ring_color)}")
-ui.theme.set_palette_colors(('#22577a', '#38a3a5', '#57cc99', '#80ed99'), name='Baltic')
+      'palette haelt float-tupel, keine zeichenketten')
 
 # --- kursbeschriftung weicht markern aus ---------------------------------
 print()
@@ -549,9 +521,16 @@ check(len(build_hierarchy([a, b_])) == 2, 'is_moon_of-zyklus haengt nicht auf')
 browser = hud.body_browser
 frame(1280, 800)
 browser.open = True
-frame(1280, 800)
+# AUSKLAPPEN LAUFEN LASSEN. Seit die liste animiert aufgeht, reicht ihre
+# trefferflaeche nur so weit, wie sie auch gezeichnet ist -- ein klick auf
+# eine zeile, die noch gar nicht sichtbar ist, darf nicht wirken. Ein
+# einzelner frame genuegt dafuer nicht mehr.
+for _ in range(30):
+    frame(1280, 800)
 browser.draw(ui)          # muss zeichenbar sein (vgl. palette-absturz)
 check(True, 'geoeffnete koerperliste laesst sich zeichnen')
+check(browser._open_t > 0.98, 'und ist dann voll ausgeklappt',
+      f"_open_t = {browser._open_t:.4f}")
 
 mars_row = next(i for i, (_idx, b, _d) in enumerate(browser.rows())
                 if b.name == 'Mars')
@@ -569,6 +548,314 @@ check(state.reference_index == mars_index,
 check(not browser.open, 'die liste schliesst nach der wahl')
 
 state.set_reference_index(bodies.index(earth))
+
+# ═══════════════════════════════════ 9. die liste klappt nach UNTEN auf
+
+print()
+print("9. Die koerperliste klappt nach unten auf, nicht von der seite herein")
+
+browser.open = False
+for _ in range(30):
+    frame()
+
+full_height = browser._panel_rect(ui)[3]
+browser.open = True
+heights, lefts, widths, tops = [], [], [], []
+for _ in range(30):
+    frame()
+    ax, ay, aw, ah = browser._panel_rect_open(ui)
+    heights.append(ah)
+    lefts.append(ax)
+    widths.append(aw)
+    tops.append(ay)
+
+check(all(b >= a - 1e-6 for a, b in zip(heights, heights[1:])),
+      'die hoehe waechst monoton',
+      f"{heights[0]:.1f} -> {heights[-1]:.1f} von {full_height:.1f} px")
+check(heights[0] < full_height * 0.5 and heights[-1] > full_height * 0.98,
+      'sie faengt klein an und erreicht die volle hoehe')
+# DAS ist die eigentliche forderung: x und breite duerfen sich NICHT
+# bewegen, sonst faehrt die liste seitlich ein statt aufzuklappen.
+check(len(set(round(v, 3) for v in lefts)) == 1
+      and len(set(round(v, 3) for v in widths)) == 1,
+      'x und breite bleiben fest -- sie kommt nicht von der seite',
+      f"x = {lefts[0]:.1f}, breite = {widths[0]:.1f}")
+check(len(set(round(v, 3) for v in tops)) == 1
+      and abs(tops[0] - browser.rect.bottom) < ui.px(12) + 1.0,
+      'die oberkante haengt an der unterkante des knopfes',
+      f"panel bei y = {tops[0]:.1f}, knopf endet bei {browser.rect.bottom:.1f}")
+
+browser.open = False
+closing = []
+for _ in range(30):
+    frame()
+    closing.append(browser._panel_rect_open(ui)[3])
+check(all(b <= a + 1e-6 for a, b in zip(closing, closing[1:]))
+      and closing[-1] == 0.0,
+      'beim schliessen laeuft dieselbe bewegung rueckwaerts bis genau null',
+      f"{closing[0]:.1f} -> {closing[-1]:.1f} px")
+
+
+def _open_progress(dt, steps):
+    browser.open = False
+    browser._open_t = 0.0
+    frame(dt=dt)
+    browser.open = True
+    for _ in range(steps):
+        frame(dt=dt)
+    return browser._open_t
+
+
+# Framerate-unabhaengig, wie jede andere bewegung im projekt: doppelte
+# bildrate, doppelt so viele frames, derselbe fortschritt.
+slow = _open_progress(1 / 60.0, 10)
+fast = _open_progress(1 / 120.0, 20)
+check(abs(slow - fast) < 0.02, 'die bewegung ist framerate-unabhaengig',
+      f"60 fps / 10 frames = {slow:.4f}, 120 fps / 20 frames = {fast:.4f}")
+browser.open = False
+for _ in range(30):
+    frame()
+
+
+# ═════════════════════════ 10. der ring faengt nur in seinem KREIS
+
+print()
+print("10. Trefferflaeche des lagemessers: rund, nicht quadratisch")
+
+navball = hud.navball
+ring = hud.ring
+cx, cy = navball._center(ui)
+outer = ring.rect.w / 220.0 * 103.0
+
+for label, (sx, sy) in (('oben links', (-1, -1)), ('oben rechts', (1, -1)),
+                        ('unten links', (-1, 1)), ('unten rechts', (1, 1))):
+    x = ring.rect.center_x + sx * ring.rect.w * 0.47
+    y = ring.rect.center_y + sy * ring.rect.h * 0.47
+    check(not ring.hit_test(ui, x, y),
+          f"die ecke '{label}' des quadrats gehoert dem ring nicht",
+          f"abstand {math.hypot(x - cx, y - cy):.1f} px, radius {outer:.1f}")
+check(ring.hit_test(ui, cx, cy) and ring.hit_test(ui, cx + outer * 0.9, cy),
+      'der kreis selbst gehoert ihm weiterhin')
+
+# Die konkrete folge, wegen der das ueberhaupt auffiel: der schubbogen liegt
+# ausserhalb des rings, seine enden aber INNERHALB von dessen quadrat. Mit
+# quadratischer trefferflaeche verschluckte der ring genau diese klicks, und
+# der schub liess sich im oberen drittel nicht stellen.
+low, high = THROTTLE_ARC
+for label, fraction in (('unteres ende', 0.04), ('mitte', 0.5),
+                        ('oberes ende', 0.96)):
+    compass = low + (high - low) * fraction
+    angle = math.radians(compass - 90.0)
+    x = cx + math.cos(angle) * ui.px(GAUGE_RADIUS)
+    y = cy + math.sin(angle) * ui.px(GAUGE_RADIUS)
+    root._mouse_pos = (x, y)
+    frame()
+    picked = root.hovered_widget
+    level = navball._throttle_from_point(ui, x, y)
+    check(picked is navball and level is not None,
+          f"schubbogen, {label}: der zeiger gehoert dem navball-block",
+          f"getroffen: {type(picked).__name__ if picked else None}, "
+          f"stufe {None if level is None else round(level, 3)}")
+
+# Gegenprobe -- ohne sie koennte diese pruefung unbemerkt leerlaufen, falls
+# der bogen einmal so weit nach aussen wandert, dass er das quadrat verlaesst.
+compass = low + (high - low) * 0.96
+angle = math.radians(compass - 90.0)
+probe = (cx + math.cos(angle) * ui.px(GAUGE_RADIUS),
+         cy + math.sin(angle) * ui.px(GAUGE_RADIUS))
+check(ring.rect.contains(*probe),
+      'und dieser punkt liegt wirklich im quadrat des rings',
+      f"({probe[0]:.0f}, {probe[1]:.0f}) in {ring.rect}")
+
+
+# ═════════════════════ 11. tabellenziffern -- der zaehler zuckt nicht
+
+print()
+print("11. Zaehler und messwerte wechseln die breite nicht")
+
+# SB Liquid ist NICHT dicktengleich: die '1' ist schmaler als jede andere
+# ziffer. Bei einem rechtsbuendigen countdown wandert damit die linke kante
+# jedes mal, wenn eine '1' hinein- oder herauslaeuft -- im sekundentakt.
+font = ui.text.font('value')
+raw_widths = {font.size(str(d))[0] for d in range(10)}
+check(len(raw_widths) > 1,
+      'die schrift selbst ist nicht dicktengleich (sonst pruefte das hier nichts)',
+      f"rohe ziffernbreiten {sorted(raw_widths)}")
+
+for role in ('value', 'gauge', 'readout', 'warp'):
+    seconds = {ui.text.measure(f"T-06:24:{s:02d}", role)[0] for s in range(60)}
+    hours = {ui.text.measure(f"T-{h:02d}:24:19", role)[0] for h in range(24)}
+    check(len(seconds) == 1 and len(hours) == 1,
+          f"'{role}': gleiche breite bei jedem ziffernstand",
+          f"sekunden {sorted(seconds)}, stunden {sorted(hours)}")
+
+check(len({ui.text.measure(str(d) * 6, 'value')[0] for d in range(10)}) == 1,
+      'auch jede ziffer einzeln belegt dieselbe breite')
+# Die LESESCHRIFT bleibt davon unberuehrt -- dort waeren feste ziffern-
+# breiten in gemischtem text nur eine luecke.
+check(not ui.text._role_tabular('body'),
+      'die leseschrift setzt weiterhin proportional')
+
+
+# ═══════════ 12. der massstab der geschwindigkeitsnadel kommt aus der bahn
+
+print()
+print("12. Die geschwindigkeitsnadel misst gegen die bahn, nicht gegen "
+      "eine feste zahl")
+
+# Frueher stand im ring ein fester vollausschlag von 2600 m/s -- eine zahl,
+# die zu keinem koerper gehoert. Jetzt ist der massstab v_flucht = sqrt(2) *
+# sqrt(mu/r) an diesem ort, und eine kreisbahn liegt damit an JEDEM koerper
+# auf derselben nadellaenge.
+fractions = []
+for body_name, altitude in (('Erde', 4.0e5), ('Mond', 1.0e5),
+                            ('Jupiter', 1.0e6), ('Sonne', 1.496e11)):
+    body = next((b for b in bodies if b.name == body_name), None)
+    if body is None:
+        continue
+    state.set_reference_index(bodies.index(body))
+    radius = float(getattr(body, 'radius', 0.0)) + altitude
+    mu_body = G * float(body.mass)
+    base = hud.telemetry.body_velocity(body)
+    sim_ship.position.x = float(body.position.x) + radius
+    sim_ship.position.y = float(body.position.y)
+    sim_ship.velocity.x = base[0]
+    sim_ship.velocity.y = base[1] + math.sqrt(mu_body / radius)
+    frame()
+    fractions.append((body_name, hud.telemetry.velocity_fraction()))
+
+check(all(abs(f - fractions[0][1]) < 1e-3 for _n, f in fractions),
+      'eine kreisbahn ergibt an jedem koerper dieselbe nadellaenge',
+      ', '.join(f"{n} {f:.4f}" for n, f in fractions))
+check(abs(fractions[0][1] - 1.0 / math.sqrt(2.0)) < 1e-3,
+      'und zwar bei 1/sqrt(2) des vollausschlags',
+      f"{fractions[0][1]:.4f}")
+
+# Obergrenze: der vollausschlag IST die fluchtgeschwindigkeit.
+state.set_reference_index(bodies.index(earth))
+radius = float(earth.radius) + 4.0e5
+mu_earth = G * float(earth.mass)
+base = hud.telemetry.body_velocity(earth)
+sim_ship.position.x = float(earth.position.x) + radius
+sim_ship.position.y = float(earth.position.y)
+for factor, label in ((math.sqrt(2.0), 'genau fluchtgeschwindigkeit'),
+                      (3.0, 'weit darueber')):
+    sim_ship.velocity.x = base[0]
+    sim_ship.velocity.y = base[1] + math.sqrt(mu_earth / radius) * factor
+    frame()
+    value = hud.telemetry.velocity_fraction()
+    check(abs(value - 1.0) < 1e-3, f"{label}: nadel am anschlag, nicht darueber",
+          f"{value:.4f}")
+
+sim_ship.velocity.x = base[0]
+sim_ship.velocity.y = base[1]
+frame()
+check(hud.telemetry.velocity_fraction() < 1e-6,
+      'ruhe relativ zum bezugskoerper: nadel auf null')
+
+# Ohne bezugskoerper darf nichts sterben -- die richtung stimmt dann noch,
+# der massstab nicht, und der ring zeichnet eine halbe nadel. Ueber UIState
+# ist dieser zustand NICHT erreichbar (set_reference_index(None) ist dort
+# ein no-op -- es gibt immer einen bezugskoerper); Telemetry laesst
+# ui_state=None aber ausdruecklich zu, und genau dieser pfad wird geprueft.
+saved_state = hud.telemetry.ui_state
+hud.telemetry.ui_state = None
+try:
+    check(hud.telemetry.velocity_fraction() is None
+          and hud.telemetry.circular_speed_fraction() is None,
+          'ohne bezugskoerper liefert der massstab None statt zu stuerzen',
+          f"{hud.telemetry.orbital_speed_scale()}")
+finally:
+    hud.telemetry.ui_state = saved_state
+state.set_reference_index(bodies.index(earth))
+frame()
+
+# ═══════ 13. der zahlenstreifen laeuft bei keiner steigrate ueber
+
+print()
+print("13. Die zahlenstreifen unter den flanken laufen nicht ueber")
+
+# Ihr inhalt haengt an der GROESSENORDNUNG des messwerts: '+14.41km/s'
+# belegte in 15 px genau die volle streifenbreite und schob sich ueber das
+# 'V/S' davor. Die ausweichstufe auf die kleine rolle allein reicht dafuer
+# nicht -- die pixelschrift rastet ihre groesse auf fuenferschritte, ist
+# also nicht ueberall proportional kleiner.
+from ui.hud.navball import BOX_W as _BOX_W
+
+MAGNITUDES = (0.0, 0.4, 7.0, 99.0, 109.0, 999.0, 1234.0, 14410.0,
+              99900.0, 250000.0, 4.2e6)
+
+
+def _strip_width(probe, caption, text):
+    """Bildet NavballCluster._strip nach: drei stufen, wert gewinnt."""
+    available = (probe.px(_BOX_W) - 2.0 * probe.px(3)) - 2.0 * probe.px(9)
+    gap = probe.px(6)
+    caption_w = probe.text.measure(caption, 'caption')[0]
+    for candidate in ('throttle_value', 'caption'):
+        width = caption_w + gap + probe.text.measure(text, candidate)[0]
+        if width <= available:
+            return width, available, True
+    return probe.text.measure(text, 'caption')[0], available, False
+
+
+worst = 0.0
+labelled = 0
+for probe_scale in (1.0, 1.25, 1.44, 2.0):
+    probe = UIContext(gl, W, H, ui_scale=probe_scale)
+    for magnitude in MAGNITUDES:
+        for sign in (1.0, -1.0):
+            radial = magnitude * sign
+            value, unit = units.split_speed(abs(radial), digits=1)
+            text = f"{'+' if radial >= 0.0 else '-'}{value}{unit}"
+            width, available, with_caption = _strip_width(probe, 'V/S', text)
+            labelled += 1 if with_caption else 0
+            worst = max(worst, width / available)
+            if width > available + 0.01:
+                check(False, 'streifen laeuft ueber',
+                      f"ui_scale {probe_scale}, {text!r}: "
+                      f"{width:.1f} von {available:.1f} px")
+    for text in ('0%', '100%', 'HOLD'):
+        width, available, _ = _strip_width(probe, 'THR', text)
+        if width > available + 0.01:
+            check(False, 'THR-streifen laeuft ueber',
+                  f"ui_scale {probe_scale}, {text!r}")
+
+check(worst <= 1.0 + 1e-6,
+      'kein zahlenstreifen laeuft ueber -- ueber alle groessenordnungen '
+      'und vier ui_scales',
+      f"engster fall belegt {worst * 100:.1f} % des platzes")
+# Gegenprobe: die beschriftung darf nicht IMMER wegfallen, sonst waere die
+# pruefung erfuellt, ohne dass man je 'V/S' zu sehen bekaeme.
+check(labelled > 0.5 * len(MAGNITUDES) * 2 * 4,
+      'und die beschriftung bleibt im regelfall stehen',
+      f"{labelled} von {len(MAGNITUDES) * 2 * 4} faellen mit beschriftung")
+
+# Der bogen daneben misst gegen die geschwindigkeit RELATIV ZUM
+# BEZUGSKOERPER. Gegen frame_speed waere er vom gewaehlten plotting-rahmen
+# abhaengig -- eine anzeige, die sich neu skaliert, weil jemand die ANSICHT
+# umstellt.
+# Erst eine bahn mit ECHTER radialrate herstellen -- steht das schiff
+# still, sind beide werte null und die pruefung liefe leer.
+base_v = hud.telemetry.body_velocity(earth)
+radius = float(earth.radius) + 4.0e5
+sim_ship.position.x = float(earth.position.x) + radius
+sim_ship.position.y = float(earth.position.y)
+speed = math.sqrt(G * float(earth.mass) / radius)
+sim_ship.velocity.x = base_v[0] + speed * 0.6      # radial, nach aussen
+sim_ship.velocity.y = base_v[1] + speed * 0.8
+frame()
+check(abs(hud.telemetry.radial_fraction() or 0.0) > 0.1,
+      'die probe hat eine echte radialrate (sonst prueft das folgende nichts)',
+      f"anteil {hud.telemetry.radial_fraction():.4f}")
+
+hud.telemetry.frame_speed = 1.0e9
+loose = hud.telemetry.radial_fraction()
+hud.telemetry.frame_speed = 1.0
+tight = hud.telemetry.radial_fraction()
+check(loose is not None and tight is not None and abs(loose - tight) < 1e-9,
+      'der steigraten-bogen haengt nicht an frame_speed',
+      f"{loose:.6f} gegen {tight:.6f}")
+frame()
 
 print()
 if FAILURES:

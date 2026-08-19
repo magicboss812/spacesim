@@ -1,41 +1,61 @@
 """Die konkreten HUD-elemente.
 
-Umgesetzt nach dem entwurf "Spacesim 2D gameplay GUI mockup"
-(claude.ai/design, projekt 8790e76e, datei "Spacesim HUD.dc.html").
+Die formsprache ist die instrumententafel aus Kerbal Space Program 2
+(referenzbilder in "screenshots for debugging/ksp2 original.png" und
+"krb09rzxst661.jpg"). Uebernommen wurden davon fuenf dinge, und zwar genau
+die fuenf, die den eindruck tragen:
 
-    telemetry.py     datenschicht -- rechnet alle anzeigewerte einmal pro frame
-    attitude.py      der lagemesser (2D-ring, keine navball-kugel)
-    panels.py        bahnelemente, ziel, schiffs-plakette
+    chrome.py        die bauteile: FASE statt rundung, doppelter rahmen,
+                     notch-tab auf der kante, teilung, zellenbogen
+    navball.py       der navball-block -- kurs, geschwindigkeit, hoehe,
+                     schub, steigrate und AP/PE in EINEM instrument
+    attitude.py      der kompassring darin (2D, keine navball-kugel)
+    controls.py      zeitraffer als pegel, snap-rosette, zoom
+    panels.py        schiffs-plakette und ziel-block
     body_browser.py  ausklappliste der koerper -> wahl des bezugskoerpers
-    controls.py      zeitraffer, rahmenwahl, autopilot, schub, zoom, palette
+    telemetry.py     datenschicht -- rechnet alle anzeigewerte einmal pro frame
     layout.py        verankerung des ganzen und die responsive umschaltung
 
 Einstieg ist Hud(...) aus layout.py: es baut den widget-baum in eine
 bestehende UIRoot und wird pro frame mit update() aktuell gehalten.
 
-WAS DER ENTWURF NICHT VORGIBT und hier entschieden wurde:
+WAS DIE VORLAGE NICHT VORGIBT und hier entschieden wurde:
 
-- **Zeitraffer-stufen.** Der entwurf zeigt 1x/5x/50x/1k/10k. Fuer bahn-
-  mechanik ist das zu fein -- bei 50x dauert ein erdumlauf noch anderthalb
-  stunden. Hier stehen stattdessen ACHT stufen, beschriftet als sim-zeit je
-  echtsekunde: 1m/s, 10m/s, 1h/s, 1d/s, 7d/s, 30d/s, 100d/s, 1y/s.
-  Die genaue liste steht in WARP_STEPS (layout.py), nicht hier.
+- **Kein horizont, keine kugel.** Die simulation kennt GENAU EINEN
+  orientierungswinkel (schiff.theta) -- nick und roll gibt es in dieser
+  physik nicht. Eine schattierte kugel wuerde also achsen anzeigen, die
+  nicht existieren; in einer Seminararbeit waeren das erfundene daten.
+- **Kein tank, kein RCS, keine SAS-modi, keine dritte raumachse.** Nichts
+  davon hat eine entsprechung in der simulation. Die snap-rosette hat vier
+  richtungen statt sechs, weil es in 2D vier gibt.
+- **Zeitraffer-stufen als sim-zeit je echtsekunde.** Ein vielfaches
+  ("10000x") sagt bei bahnmechanik nichts; "1h/s" beantwortet die frage
+  sofort. ACHT stufen von 1m/s bis 1y/s, liste in WARP_STEPS (layout.py).
+  Gezeichnet als PEGEL -- alle stufen bis zur aktuellen sind gefuellt --,
+  weil die vorlage ihre raffung ebenso als reihe von winkeln zeigt.
+- **Die rechte flanke zeigt die RADIALGESCHWINDIGKEIT.** In der vorlage
+  steht dort die senkrechtgeschwindigkeit gegen den boden. Ohne
+  oberflaechennormale ist v . r_dach die ehrliche entsprechung, und sie ist
+  an Ap und Pe genau null.
 - **Ziel = bezugskoerper.** Die simulation kennt keine eigene zielauswahl.
   Der bezugskoerper ist der koerper, auf den sich ohnehin alle bahnwerte
   beziehen, und damit die ehrliche entsprechung.
-- **Schubregler = schubstufe.** Es gibt keinen dauerschub, nur impulse pro
-  frame. Der regler skaliert schiffcontrol.thrust_acc und ist damit wirksam,
-  keine attrappe.
+- **Schub = schubstufe.** Es gibt keinen dauerschub, nur impulse pro frame.
+  Der bogen skaliert schiffcontrol.thrust_acc und ist damit wirksam, keine
+  attrappe. Im zeitraffer ist er gesperrt und beschriftet sich mit HOLD --
+  ohne das drueckt der spieler 'Up', nichts passiert, und nichts auf dem
+  schirm sagt warum.
 - **Symbole gezeichnet, nicht gesetzt.** ◉ und ⊗ (U+25C9 / U+2297) fehlen in
   vielen oberflaechen-schriften; als vektoren stimmen sie immer.
-- **Keine palette-verwuerfelung.** Der entwurf verteilt die vier farben per
-  zufallsseed neu ("SHUFFLE DISTRIBUTION"). Das ist ein erkundungswerkzeug --
-  im spiel muss dieselbe farbe dauerhaft dasselbe bedeuten, deshalb liegt
-  die rollenzuordnung in theme.ROLE_INDEX fest.
+- **Eine festgelegte palette.** Vier farben mit je EINER bedeutung, kein
+  wechselknopf: eine farbe, die sich neu verteilen laesst, kann nichts
+  bedeuten. Die zuordnung liegt in theme.ROLE_INDEX.
 """
 
 from .attitude import AttitudeRing
 from .layout import WARP_STEPS, Hud
+from .navball import NavballCluster
 from .telemetry import Telemetry, compass_from_theta
 
-__all__ = ['AttitudeRing', 'Hud', 'Telemetry', 'WARP_STEPS', 'compass_from_theta']
+__all__ = ['AttitudeRing', 'Hud', 'NavballCluster', 'Telemetry', 'WARP_STEPS',
+           'compass_from_theta']

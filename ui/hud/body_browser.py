@@ -27,12 +27,20 @@ geprueft.
 
 import math
 
-from ..core import Widget
+from ..core import Widget, ease
 from ..theme import readable, with_alpha
+from . import chrome
 from .. import units
 
 # Entwurfseinheiten, wie ueberall im HUD -- niemals pixel.
+#
+# Der knopf ist so BREIT wie das ziel-panel darunter und die plakette
+# darueber. Er war einmal ein 34x34-quadrat mit einem symbol darin und sass
+# damit als einzelnes kleines kaestchen zwischen zwei breiten bloecken -- die
+# linke spalte las sich als drei zufaellig gestapelte teile statt als eine
+# spalte. Gleiche breite ist hier die ganze arbeit.
 _BUTTON = 34.0
+_BUTTON_WIDTH = 190.0
 _PANEL_WIDTH = 214.0
 _ROW_HEIGHT = 26.0
 _PADDING = 12.0
@@ -132,7 +140,7 @@ class BodyBrowser(Widget):
     """
 
     def __init__(self, telemetry, ui_state, side='left', **kwargs):
-        kwargs.setdefault('size', (_BUTTON, _BUTTON))
+        kwargs.setdefault('size', (_BUTTON_WIDTH, _BUTTON))
         kwargs.setdefault('z', 150)
         super().__init__(**kwargs)
         self.telemetry = telemetry
@@ -140,6 +148,10 @@ class BodyBrowser(Widget):
         self.side = side
         self.blocks_mouse = True
         self.open = False
+        # Aufklapp-fortschritt, 0..1. Getrennt von `open`, weil `open` das
+        # ZIEL ist und dieser wert der gezeichnete zustand -- beim schliessen
+        # laeuft die bewegung damit rueckwaerts, statt einfach zu verschwinden.
+        self._open_t = 0.0
         self._hover_row = -1
         self._rows = None
         self._rows_source = None
@@ -176,6 +188,18 @@ class BodyBrowser(Widget):
         max_height = max(ctx.px(_ROW_HEIGHT), ctx.height - y - ctx.px(14))
         return (x, y, width, min(height, max_height))
 
+    def _panel_rect_open(self, ctx):
+        """Das panel in seiner MOMENTANEN aufklapp-hoehe.
+
+        Es waechst aus der unterkante des knopfes NACH UNTEN heraus: x, y
+        und breite bleiben fest, nur die hoehe laeuft. Ein einflug von der
+        seite haette so ausgesehen, als kaeme die liste von woanders her --
+        sie gehoert aber zu genau diesem knopf, und das soll die bewegung
+        sagen.
+        """
+        x, y, w, h = self._panel_rect(ctx)
+        return (x, y, w, h * self._open_t)
+
     def _row_rect(self, ctx, index):
         px, py, pw, _ph = self._panel_rect(ctx)
         pad = ctx.px(_PADDING)
@@ -187,9 +211,12 @@ class BodyBrowser(Widget):
             return False
         if self.rect.contains(x, y):
             return True
+        # Nur die AUFGEKLAPPTE flaeche faengt, und nur solange die liste
+        # offen sein SOLL: eine zuklappende liste ist noch sichtbar, darf
+        # aber keine klicks mehr verschlucken.
         if not self.open:
             return False
-        px, py, pw, ph = self._panel_rect(ctx)
+        px, py, pw, ph = self._panel_rect_open(ctx)
         return px <= x < px + pw and py <= y < py + ph
 
     # ------------------------------------------------------------------ eingabe
@@ -229,80 +256,125 @@ class BodyBrowser(Widget):
             self._hover_row = -1
         return True
 
+    def update(self, ctx, dt):
+        super().update(ctx, dt)
+        # Dieselbe framerate-unabhaengige formel wie ueberall sonst
+        # (1 - exp(-rate * dt)); ein fester schritt je frame waere bei
+        # 180 fps eine andere bewegung als bei 60.
+        # motion.normal, nicht .fast: bei rate 22 springt der erste frame um
+        # 30 % der hoehe, und die bewegung liest sich als schnappen statt als
+        # aufklappen. Rate 14 sind ~0.21 s bis 95 % -- lang genug, dass man
+        # die richtung sieht, kurz genug, dass niemand darauf wartet.
+        self._open_t = ease(self._open_t, 1.0 if self.open else 0.0,
+                            ctx.theme.motion.normal, dt)
+        if not self.open and self._open_t < 0.004:
+            self._open_t = 0.0
+
     # ----------------------------------------------------------------- zeichnen
 
     def draw(self, ctx):
         palette = ctx.theme.palette
-        radius = self.rect.h * 0.5
         active = self.open or self.hovered
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, self.rect.h,
-            fill=palette.panel_pill, radius=radius,
-            border_color=palette.accent_for('target') if self.open else palette.edge,
-            border_width=ctx.theme.border_width,
-            shadow=ctx.theme.glow('target') if active else None,
-            shadow_offset=(0.0, 0.0), shadow_softness=ctx.px(18.0),
+        # OBEN LINKS SCHARF -- dort sitzt die schiffs-plakette darueber, die
+        # ihre untere linke ecke aus demselben grund scharf laesst. Die
+        # beiden lesen sich damit als eine spalte, nicht als zwei kaesten.
+        chrome.plate(
+            ctx, self.rect.x, self.rect.y, self.rect.w, self.rect.h,
+            fill=palette.panel_pill,
+            line=palette.accent_for('target') if active else palette.edge,
+            corners=(False, True, True, True),
         )
         self._draw_icon(ctx)
-        if self.open:
+        # Gezeichnet wird nach _open_t, nicht nach `open` -- sonst
+        # verschwaende das zuklappen ohne bewegung.
+        if self._open_t > 0.004:
             self._draw_panel(ctx)
 
     def _draw_icon(self, ctx):
-        """Ein system in klein: zentralkoerper, bahn, trabant.
+        """Symbol, beschriftung und der aufklapp-winkel.
 
-        Gezeichnet statt gesetzt -- dieselbe entscheidung wie bei den
-        bahnmarkern des rings. Ein passendes zeichen (U+1F784 o. ae.) fehlt
-        in den meisten oberflaechen-schriften; ein vektor stimmt immer.
+        Das systemsymbol (zentralkoerper, bahn, trabant) ist GEZEICHNET,
+        nicht gesetzt -- dieselbe entscheidung wie bei den bahnmarkern des
+        rings. Ein passendes zeichen (U+1F784 o. ae.) fehlt in den meisten
+        oberflaechen-schriften; ein vektor stimmt immer.
         """
         palette = ctx.theme.palette
-        cx, cy = self.rect.center_x, self.rect.center_y
+        middle = self.rect.center_y
         color = readable(palette.accent_for('target'))
         tint = color if self.open or self.hovered else palette.text_dim
-        ctx.draw.circle(cx, cy, ctx.px(3.0), fill=tint)
+
         orbit = ctx.px(9.0)
-        ctx.draw.ring(cx, cy, orbit, max(1.0, ctx.px(1.2)), with_alpha(tint, 0.75))
-        ctx.draw.circle(cx + orbit * 0.707, cy - orbit * 0.707, ctx.px(2.0),
-                        fill=tint)
+        cx = self.rect.x + ctx.px(_PADDING) + orbit
+        ctx.draw.circle(cx, middle, ctx.px(3.0), fill=tint)
+        ctx.draw.ring(cx, middle, orbit, max(1.0, ctx.px(1.2)),
+                      with_alpha(tint, 0.75))
+        ctx.draw.circle(cx + orbit * 0.707, middle - orbit * 0.707,
+                        ctx.px(2.0), fill=tint)
+
+        # Der knopf sagt jetzt selbst, was er tut. Vorher stand hier nur das
+        # symbol, und der einzige hinweis auf den bezugskoerper war das
+        # kuerzel in der plakette darueber.
+        ctx.text.draw('REFERENCE', cx + orbit + ctx.px(11), middle,
+                      role='caption', color=palette.text_dim, valign='middle')
+        arrow = self.rect.right - ctx.px(_PADDING)
+        span = ctx.px(4.0)
+        # Winkel nach unten (zu) bzw. nach oben (offen).
+        direction = -1.0 if self.open else 1.0
+        ctx.draw.line(arrow - span * 2.0, middle - span * 0.5 * direction,
+                      arrow - span, middle + span * 0.5 * direction, tint,
+                      width=max(1.0, ctx.px(1.4)), cap='round')
+        ctx.draw.line(arrow, middle - span * 0.5 * direction,
+                      arrow - span, middle + span * 0.5 * direction, tint,
+                      width=max(1.0, ctx.px(1.4)), cap='round')
 
     def _draw_panel(self, ctx):
         palette = ctx.theme.palette
-        px, py, pw, ph = self._panel_rect(ctx)
-        ctx.draw.rect(
-            px, py, pw, ph, fill=palette.panel_popup, radius=ctx.px(16),
-            border_color=palette.edge_strong, border_width=ctx.theme.border_width,
-            shadow=palette.shadow, shadow_offset=(0.0, ctx.px(-6)),
-            shadow_softness=ctx.px(20),
-        )
+        px, py, pw, ph = self._panel_rect_open(ctx)
+        chrome.frame(ctx, px, py, pw, ph, fill=palette.panel_popup,
+                     line=palette.edge_strong, glow_role='target')
         pad = ctx.px(_PADDING)
-        ctx.text.draw('REFERENCE BODY', px + pad, py + pad, role='section',
-                      color=palette.text_dim)
+        if ph > pad + ctx.px(_HEADER):
+            ctx.text.draw('REFERENCE BODY', px + pad, py + pad, role='section',
+                          color=with_alpha(palette.text_dim,
+                                           min(1.0, self._open_t * 2.5)))
 
         reference = self.ui_state.reference_index if self.ui_state else None
         bottom = py + ph
+        row_h = ctx.px(_ROW_HEIGHT)
         for row_index, (body_index, body, depth) in enumerate(self.rows()):
             bx, by, bw, bh = self._row_rect(ctx, row_index)
-            if by + bh > bottom:
-                # Ueber die begrenzte hoehe hinaus wird nicht gezeichnet --
+            if by >= bottom:
+                # Ueber die momentane hoehe hinaus wird nicht gezeichnet --
                 # sonst laege die zeile ausserhalb des panels in der luft.
                 break
+            # Jede zeile blendet GENAU DANN auf, wenn die wachsende
+            # unterkante sie ueberstreicht. Ohne das erschiene sie
+            # schlagartig, und das waere das einzige an der bewegung, was
+            # noch ruckelt.
+            reveal = max(0.0, min(1.0, (bottom - by) / max(row_h, 1e-6)))
             selected = body_index == reference
+            cut = -ctx.px(4.0)
             if selected:
                 ctx.draw.rect(bx, by, bw, bh,
-                              fill=with_alpha(palette.accent_for('target'), 0.20),
-                              radius=bh * 0.5)
-            elif row_index == self._hover_row:
-                ctx.draw.rect(bx, by, bw, bh, fill=palette.hover,
-                              radius=bh * 0.5)
+                              fill=with_alpha(palette.accent_for('target'),
+                                              0.20 * reveal),
+                              radius=(cut, 0.0, cut, 0.0))
+            elif row_index == self._hover_row and self.open:
+                ctx.draw.rect(bx, by, bw, bh,
+                              fill=with_alpha(palette.hover,
+                                              palette.hover[3] * reveal),
+                              radius=(cut, 0.0, cut, 0.0))
 
             middle = by + bh * 0.5
             dot_x = bx + ctx.px(10.0) + ctx.px(_INDENT) * depth
             ctx.draw.circle(dot_x, middle, ctx.px(_DOT_RADIUS),
-                            fill=_body_dot_color(body))
+                            fill=with_alpha(_body_dot_color(body), reveal))
 
             name = str(getattr(body, 'name', '?'))
             ctx.text.draw(
                 name, dot_x + ctx.px(11.0), middle, role='body',
-                color=palette.text if selected else palette.text_muted,
+                color=with_alpha(
+                    palette.text if selected else palette.text_muted, reveal),
                 valign='middle',
             )
 
@@ -315,6 +387,7 @@ class BodyBrowser(Widget):
             if a and math.isfinite(a) and a > 0.0:
                 ctx.text.draw(
                     units.distance(a, digits=1), bx + bw - ctx.px(10.0), middle,
-                    role='caption', color=palette.text_dimmer,
+                    role='caption',
+                    color=with_alpha(palette.text_dimmer, reveal),
                     align='right', valign='middle',
                 )

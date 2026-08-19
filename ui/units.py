@@ -199,3 +199,35 @@ def time_warp(factor, placeholder='--'):
     if number == int(number):
         return f"{int(number):,}x".replace(',', ' ')
     return f"{number:.1f}x"
+
+
+# --------------------------------------------------- wert und einheit getrennt
+
+def _split_scaled(value, digits, ladder, base_unit, base_digits=0):
+    magnitude = abs(value)
+    for threshold, suffix in ladder:
+        if magnitude >= threshold:
+            return (f"{value / threshold:.{digits}f}", suffix)
+    return (f"{value:.{base_digits}f}", base_unit)
+
+
+def split_distance(meters, digits=2, placeholder='--'):
+    """('5.36', 'Gm') statt '5.36Gm'.
+
+    Die instrumententafel setzt zahl und einheit in VERSCHIEDENEN groessen
+    -- ein 25-px-messwert neben einer 10-px-einheit. Genau dieser kontrast
+    macht die anzeige ablesbar; zusammengesetzt liesse er sich nicht
+    herstellen, ohne die zeichenkette wieder auseinanderzunehmen.
+    """
+    value = _finite(meters)
+    if value is None:
+        return (placeholder, '')
+    return _split_scaled(value, digits, _DISTANCE_LADDER, 'm')
+
+
+def split_speed(meters_per_second, digits=2, placeholder='--'):
+    """('11.69', 'km/s') statt '11.69km/s'."""
+    value = _finite(meters_per_second)
+    if value is None:
+        return (placeholder, '')
+    return _split_scaled(value, digits, _SPEED_LADDER, 'm/s', base_digits=0)

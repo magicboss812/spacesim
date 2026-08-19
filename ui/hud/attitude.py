@@ -40,11 +40,22 @@ _MARKER_RADIUS = 76.0
 _LABEL_HIDE_DEG = 16.0
 _INNER_RADIUS = 74.0
 
+# Laengenbereich der geschwindigkeitsnadel, in denselben viewBox-einheiten.
+# Die obergrenze bleibt INNERHALB der teilung (_TICK_RADIUS = 92), damit
+# eine fluchtbahn die nadel nicht in den kursring laufen laesst.
+_NEEDLE_MIN = 22.0
+_NEEDLE_MAX = 66.0
+
+# Die farbe folgt der ACHSE, nicht der reihenfolge: prograde und retrograde
+# sind dieselbe achse und tragen deshalb dieselbe farbe, normal und
+# antinormal ebenso. Vier verschiedene farben fuer zwei achsenpaare haetten
+# die zusammengehoerigkeit gerade verdeckt -- und dieselbe zuordnung
+# benutzt die snap-rosette (controls.SnapRosette.MODES).
 _MARKER_ORDER = (
     ('prograde', 'PRO', 'velocity'),
-    ('retrograde', 'RETRO', 'snap'),
-    ('normal_in', 'NORM', 'throttle'),
-    ('antinormal_out', 'ANTI', 'target'),
+    ('retrograde', 'RETRO', 'velocity'),
+    ('normal_in', 'NORM', 'normal'),
+    ('antinormal_out', 'ANTI', 'normal'),
 )
 
 
@@ -72,7 +83,8 @@ class AttitudeRing(Widget):
     pfeiltasten aus.
     """
 
-    def __init__(self, telemetry, ship_control=None, size=(212, 212), **kwargs):
+    def __init__(self, telemetry, ship_control=None, size=(212, 212),
+                 hub_only=False, **kwargs):
         super().__init__(size=size, **kwargs)
         self.telemetry = telemetry
         self.ship_control = ship_control
@@ -80,6 +92,10 @@ class AttitudeRing(Widget):
         self._manual_heading = None
         self._drag_offset = 0.0
         self._display_heading = 0.0
+        # Im navball-block steht der kurs in einer plakette UEBER der kugel
+        # (so wie in der vorlage); die ringmitte traegt dann nur noch eine
+        # kleine nabe, die das innerste stueck der nadel abdeckt.
+        self.hub_only = bool(hub_only)
 
     # --------------------------------------------------------------- geometrie
 
@@ -90,6 +106,23 @@ class AttitudeRing(Widget):
         return (self.rect.center_x, self.rect.center_y)
 
     # ----------------------------------------------------------------- eingabe
+
+    def hit_test(self, ctx, x, y):
+        """RUND, nicht quadratisch.
+
+        Das widget ist ein quadrat, der ring darin ein kreis -- die vier
+        ecken des quadrats sind leer, gehoerten der trefferpruefung aber
+        trotzdem. Da der ring im navball-block VOR den zellenbogen liegt,
+        verschluckte er damit genau die klicks auf deren obere und untere
+        enden: der schub liess sich in seinem oberen drittel nicht stellen,
+        obwohl der bogen sichtbar frei lag. Eine ecke, die nichts zeichnet,
+        darf auch nichts fangen.
+        """
+        if not self.visible:
+            return False
+        cx, cy = self._center()
+        outer = _OUTER_RADIUS * self._scale(ctx)
+        return math.hypot(float(x) - cx, float(y) - cy) <= outer
 
     def _cursor_compass(self, x, y):
         cx, cy = self._center()
@@ -193,21 +226,23 @@ class AttitudeRing(Widget):
 
         outer = _OUTER_RADIUS * scale
 
-        # Grundflaeche und die beiden aussenringe.
-        ctx.draw.circle(
-            cx, cy, outer,
-            fill=palette.ring_face,
-            border_color=palette.edge_strong,
-            border_width=max(1.0, 1.5 * scale),
-            shadow=palette.shadow,
-            shadow_offset=(0.0, -4.0 * scale),
-            shadow_softness=16.0 * scale,
-        )
+        # DOPPELTER RAHMEN, wie an jedem block der tafel: eine haarfeine
+        # aussenlinie, ein spalt, dann die flaeche. Ein einzelner kreis mit
+        # fuellung sieht aus wie ein widget, zwei sehen aus wie ein geraet.
         ctx.draw.ring(
-            cx, cy, outer, max(1.0, 2.0 * scale),
-            with_alpha(palette.ring, 0.5),
+            cx, cy, outer, max(1.0, 1.0 * scale), palette.edge,
+        )
+        ctx.draw.circle(
+            cx, cy, outer - 3.0 * scale,
+            fill=palette.ring_face,
+            border_color=with_alpha(palette.ring, 0.55),
+            border_width=max(1.0, 1.4 * scale),
+            shadow=palette.shadow,
+            shadow_offset=(0.0, -3.0 * scale),
+            shadow_softness=14.0 * scale,
         )
 
+        self._draw_grid(ctx, cx, cy, scale)
         self._draw_ticks(ctx, cx, cy, scale, heading)
         self._draw_tick_labels(ctx, cx, cy, scale, heading)
 
@@ -220,6 +255,26 @@ class AttitudeRing(Widget):
         self._draw_velocity_needle(ctx, cx, cy, scale, heading)
         self._draw_readout(ctx, cx, cy, scale)
         self._draw_nose(ctx, cx, cy, scale, outer)
+
+    def _draw_grid(self, ctx, cx, cy, scale):
+        """Das schwache polargitter auf der ringflaeche.
+
+        Es macht die flaeche zu einem instrument statt zu einer scheibe --
+        und es ist, anders als eine schattierte kugel, KEINE erfundene
+        angabe: speichen und kreise sind nur das koordinatennetz derselben
+        kompassebene, die der ring ohnehin zeigt.
+        """
+        palette = ctx.theme.palette
+        spoke = with_alpha(palette.ring, 0.13)
+        radius = _INNER_RADIUS * scale
+        for index in range(6):        # alle 30 grad, gegenueberliegend
+            deg = index * 30.0
+            x0, y0 = _polar(cx, cy, radius, deg)
+            x1, y1 = _polar(cx, cy, radius, deg + 180.0)
+            ctx.draw.line(x0, y0, x1, y1, spoke, width=max(1.0, 1.0 * scale))
+        for fraction in (0.34, 0.67):
+            ctx.draw.ring(cx, cy, radius * fraction,
+                          max(1.0, 1.0 * scale), spoke)
 
     def _draw_ticks(self, ctx, cx, cy, scale, heading):
         palette = ctx.theme.palette
@@ -325,12 +380,29 @@ class AttitudeRing(Widget):
         compass = self.telemetry.marker_headings.get('prograde')
         if compass is None:
             return
-        speed = self.telemetry.frame_speed or 0.0
-        # Laengen-kennlinie aus dem entwurf: 26 bis 78 einheiten. Die nadel
-        # zeigt die RICHTUNG genau und den betrag nur grob -- ein linearer
-        # massstab waere ueber die auftretenden groessenordnungen nutzlos.
-        span = min(speed / 2600.0, 1.0) if speed > 0.0 else 0.0
-        length = (26.0 + span * 52.0) * scale
+        # MASSSTAB AUS DER BAHN, nicht fest: die nadel misst gegen das
+        # kreisbahn- und das fluchttempo AN DIESEM ORT (siehe
+        # Telemetry.orbital_speed_scale). Vorher stand hier ein fester
+        # vollausschlag von 2600 m/s, der zu keinem koerper gehoerte -- im
+        # Erdorbit klebte die nadel am anschlag, um einen kleinen mond
+        # schlug sie gar nicht aus.
+        span = self.telemetry.velocity_fraction()
+        if span is None:
+            # Kein bezugskoerper: die richtung stimmt trotzdem, also wird
+            # die nadel mit halber laenge und ohne massstab gezeichnet.
+            span = 0.5
+        length = (_NEEDLE_MIN + span * (_NEEDLE_MAX - _NEEDLE_MIN)) * scale
+
+        # Die bezugsmarke fuer die KREISBAHN. Ohne sie ist eine skalierte
+        # nadel nur ein zappelnder strich -- mit ihr liest man auf einen
+        # blick ab, ob die bahn gerade unter, auf oder ueber der kreisbahn
+        # liegt, und das ist beim zirkularisieren genau die frage.
+        circular = self.telemetry.circular_speed_fraction()
+        if circular is not None:
+            mark = (_NEEDLE_MIN + circular * (_NEEDLE_MAX - _NEEDLE_MIN)) * scale
+            ctx.draw.ring(cx, cy, mark, max(1.0, 1.0 * scale),
+                          with_alpha(palette.velocity, 0.22))
+
         x, y = _polar(cx, cy, length, compass - heading)
         ctx.draw.line(cx, cy, x, y, palette.velocity,
                       width=max(1.5, 3.0 * scale), cap='round')
@@ -350,13 +422,20 @@ class AttitudeRing(Widget):
         stueck ab -- das liest sich als nabe, nicht als fehler.
         """
         palette = ctx.theme.palette
+        if self.hub_only:
+            # Nur die nabe. Der kurs steht im navball-block darueber.
+            ctx.draw.circle(cx, cy, 7.0 * scale, fill=palette.ring_face,
+                            border_color=with_alpha(palette.ring, 0.7),
+                            border_width=max(1.0, 1.4 * scale))
+            ctx.draw.circle(cx, cy, 2.2 * scale, fill=palette.ring)
+            return
         pill_w = 92.0 * scale
         pill_h = 22.0 * scale
         pill_x = cx - pill_w * 0.5
         pill_y = cy - pill_h * 0.5
         ctx.draw.rect(
             pill_x, pill_y, pill_w, pill_h,
-            fill=palette.panel_popup, radius=pill_h * 0.5,
+            fill=palette.panel_popup, radius=-6.0 * scale,
             border_color=with_alpha(palette.frame, 0.5),
             border_width=ctx.theme.border_width,
         )

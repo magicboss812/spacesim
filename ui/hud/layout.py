@@ -1,17 +1,25 @@
 """Aufbau des kompletten HUDs und die verankerung seiner gruppen.
 
-Die anker und abstaende stammen 1:1 aus dem entwurf (16 px zu den seiten,
-14 px oben und unten). Verankert wird IMMER an einer ecke oder kante, nie
-an absoluten koordinaten -- das ist der grund, warum das layout eine freie
-fenstergroesse ueberhaupt ueberlebt.
+VIER BLOECKE, VIER ECKEN -- und die mitte bleibt frei. Das ist die
+eigentliche aenderung gegenueber der ersten fassung, in der acht einzelne
+elemente ueber den schirm verteilt lagen und die untere bildmitte so hoch
+baute, dass sie auf der bahn sass:
 
-RESPONSIVES VERHALTEN: unterhalb von theme.compact_breakpoint (900 design-
-einheiten breite) klappen die beiden seitenpanels zu 46 px schmalen leisten
-zusammen, der schubregler stellt sich hochkant und snap- wie zoomknoepfe
-schrumpfen auf reine symbolflaechen. Der attitude-ring in der mitte bleibt
-in jeder groesse -- er ist das einzige element, ohne das man nicht fliegen
-kann; die koerperliste bleibt, weil sie der einzige mausweg zum
-bezugskoerper ist.
+    oben links   schiffs-plakette, koerperwaehler, ziel-block
+    oben rechts  zeitraffer mit missionsuhr
+    unten mitte  der navball-block (kurs, schub, steigrate, AP/PE)
+                 und rechts daneben, angedockt, die snap-rosette
+    unten links  bezugsrahmen und zoom
+
+Verankert wird IMMER an einer ecke oder kante, nie an absoluten
+koordinaten -- das ist der grund, warum das layout eine freie fenstergroesse
+ueberhaupt ueberlebt.
+
+RESPONSIVES VERHALTEN: unterhalb von theme.compact_breakpoint klappt der
+ziel-block zu einer schmalen leiste zusammen und die snap-rosette
+schrumpft. Der navball-block bleibt in jeder groesse -- er ist das einzige
+element, ohne das man nicht fliegen kann; die koerperliste bleibt, weil sie
+der einzige mausweg zum bezugskoerper ist.
 """
 
 import math
@@ -19,36 +27,23 @@ import math
 from ..core import (
     BOTTOM_CENTER,
     BOTTOM_LEFT,
-    BOTTOM_RIGHT,
     CENTER_LEFT,
-    CENTER_RIGHT,
     TOP_LEFT,
     TOP_RIGHT,
 )
 from ..widgets import Stack
-from .attitude import AttitudeRing, VelocityReadout
 from .body_browser import BodyBrowser
-from .controls import PaletteButton, SegmentBar, SnapGrid, ThrottleControl, ZoomButtons
-from .panels import (
-    IconRail,
-    ShipBadge,
-    build_elements_panel,
-    build_target_panel,
-)
+from .controls import SegmentBar, SnapRosette, WarpBar, ZoomButtons
+from .navball import WIDTH as NAVBALL_WIDTH, NavballCluster
+from .panels import IconRail, ShipBadge, build_target_panel
 from .telemetry import Telemetry
+from . import chrome
 
 # Zeitraffer-stufen als SIM-ZEIT JE ECHTSEKUNDE.
 #
-# Der entwurf beschriftet die stufen mit 1x/5x/50x/1k/10k. Das waere hier aus
-# zwei gruenden falsch:
-#
-# 1. "1x" ist gar nicht erreichbar. Die simulation rueckt pro tick um
-#    camera.sim_dt sim-sekunden vor, und config.json setzt min_sim_dt = 1.0.
-#    Bei 60 ticks/s ist die LANGSAMSTE einstellung damit bereits 60-fache
-#    echtzeit -- ein knopf mit der aufschrift "1x" wuerde schlicht luegen.
-# 2. Ein vielfaches sagt bei bahnmechanik nichts. "10000x" beantwortet die
-#    eigentliche frage nicht; "1h/s" (eine simulierte stunde je echtsekunde)
-#    beantwortet sie sofort, weil man umlaufzeiten in stunden und tagen denkt.
+# Ein vielfaches ("10000x") sagt bei bahnmechanik nichts; "1h/s" -- eine
+# simulierte stunde je echtsekunde -- beantwortet die eigentliche frage
+# sofort, weil man umlaufzeiten in stunden und tagen denkt.
 #
 # Die erste stufe entspricht genau min_sim_dt bei 60 fps und ist damit immer
 # erreichbar; _set_warp klemmt zusaetzlich auf die kamera-grenzen.
@@ -72,7 +67,15 @@ WARP_STEPS = (
     (31557600.0, '1y/s'),
 )
 
-VIEW_MODES = ('SURFACE', 'ORBITAL', 'TARGET')
+VIEW_MODES = ('SRF', 'ORB', 'TGT')
+
+#: Rand zum bildschirm. Ein wert, ueberall -- ungleiche raender sind das,
+#: was eine oberflaeche "irgendwie zusammengeschoben" aussehen laesst.
+MARGIN = 16
+
+#: Abstand zwischen navball-block und snap-rosette. Klein genug, dass die
+#: beiden als EINE instrumentenreihe gelesen werden.
+DOCK_GAP = 12
 
 
 class Hud:
@@ -93,8 +96,8 @@ class Hud:
             world, ship, ship_control, camera, renderer, predictor, ui_state,
             tick_rate=tick_rate,
         )
-        # Schwelle, ab der der schub gesperrt ist -- der schubregler zeigt
-        # das an (siehe ThrottleControl.draw).
+        # Schwelle, ab der der schub gesperrt ist -- der schubbogen im
+        # navball-block zeigt das an.
         self.telemetry.realtime_warp_max = float(realtime_warp_max)
         # Dieselbe zahl wie der riegel in test.py -- sonst blendet das HUD
         # andere stufen ab als die hauptschleife zulaesst.
@@ -107,11 +110,10 @@ class Hud:
     def _build(self, ship_control):
         root = self.root
         telemetry = self.telemetry
-        theme = self.ctx.theme
 
-        # --- oben links: schiffs-plakette, darunter die koerperliste -----
+        # --- oben links: plakette, koerperwaehler, ziel ------------------
         self.badge = root.add(ShipBadge(
-            telemetry, anchor=TOP_LEFT, offset=(16, 14),
+            telemetry, anchor=TOP_LEFT, offset=(MARGIN, MARGIN),
         ))
         # Die koerperliste sitzt direkt unter der plakette, weil dort auch
         # der aktive bezugskoerper steht -- knopf und angezeigter wert
@@ -120,75 +122,64 @@ class Hud:
         # der taste R wechseln.
         self.body_browser = root.add(BodyBrowser(
             telemetry, self.ui_state, side='left',
-            anchor=TOP_LEFT, offset=(16, 56),
+            anchor=TOP_LEFT, offset=(MARGIN, MARGIN + 40),
+        ))
+        self.target = root.add(build_target_panel(
+            telemetry, anchor=TOP_LEFT, offset=(MARGIN, MARGIN + 82),
+        ))
+        self.target_rail = root.add(IconRail(
+            [{'key': 'TG'}, {'key': 'D'}, {'key': 'V'}],
+            color_role='target', anchor=CENTER_LEFT, offset=(MARGIN, 0),
         ))
 
-        # --- oben rechts: zeitraffer + palette ---------------------------
-        top_right = root.add(Stack(
-            gap=9, align='end', anchor=TOP_RIGHT, offset=(16, 14), z=10,
-        ))
-        warp_row = top_right.add(Stack(gap=8, horizontal=True, align='center'))
-        self.warp = warp_row.add(SegmentBar(
+        # --- oben rechts: zeitraffer + missionsuhr -----------------------
+        self.warp = root.add(WarpBar(
+            telemetry,
             options=[label for _, label in WARP_STEPS],
             value=self._warp_index,
             on_select=self._set_warp,
             enabled=self._warp_step_enabled,
-            color_role='warp', caption='WARP', role='warp',
-            min_option_width=30, pad_x=6, pad_y=7, gap=2, container_pad=6,
-        ))
-        self.palette_button = warp_row.add(PaletteButton(theme))
-
-        # --- seitenpanels (breit) bzw. leisten (schmal) ------------------
-        self.elements = root.add(build_elements_panel(
-            telemetry, anchor=CENTER_LEFT, offset=(16, 0),
-        ))
-        self.target = root.add(build_target_panel(
-            telemetry, anchor=CENTER_RIGHT, offset=(16, 0),
-        ))
-        self.elements_rail = root.add(IconRail(
-            [{'key': 'AP'}, {'key': 'PE'}, {'key': 'E'}, {'key': 'T'}],
-            color_role='elem', anchor=CENTER_LEFT, offset=(16, 0),
-        ))
-        self.target_rail = root.add(IconRail(
-            [{'key': 'TG'}, {'key': 'D'}, {'key': 'V'}],
-            color_role='target', anchor=CENTER_RIGHT, offset=(16, 0),
+            color_role='warp', caption=chrome.tab_text('TIME', 'WARP'),
+            role='warp', min_option_width=34, cumulative=True,
+            anchor=TOP_RIGHT, offset=(MARGIN, MARGIN), z=10,
         ))
 
-        # --- unten links: schub -----------------------------------------
-        self.throttle = root.add(ThrottleControl(
-            telemetry, anchor=BOTTOM_LEFT, offset=(16, 14),
+        # --- unten mitte: der navball-block ------------------------------
+        self.navball = root.add(NavballCluster(
+            telemetry, ship_control, anchor=BOTTOM_CENTER,
+            offset=(0, MARGIN),
         ))
-        self.throttle_compact = root.add(ThrottleControl(
-            telemetry, compact=True, anchor=BOTTOM_LEFT, offset=(16, 14),
+        # Die rosette dockt RECHTS an den block an. Verankert ist sie an
+        # derselben unteren mitte, nur um die halbe blockbreite plus den
+        # dock-abstand nach rechts geschoben -- so bleibt der navball
+        # bildschirmmittig und die rosette klebt trotzdem an ihm.
+        snap_offset = NAVBALL_WIDTH * 0.5 + DOCK_GAP + SnapRosette.SIZE * 0.5
+        self.snaps = root.add(SnapRosette(
+            telemetry, ship_control, anchor=BOTTOM_CENTER,
+            offset=(snap_offset, MARGIN + 22),
+        ))
+        # Bequemer durchgriff: der ring ist ein KIND des blocks, aber
+        # tastatur-tests und die hauptschleife wollen ihn direkt.
+        self.ring = self.navball.ring
+        self.snaps_compact = root.add(SnapRosette(
+            telemetry, ship_control, compact=True, anchor=BOTTOM_CENTER,
+            offset=(NAVBALL_WIDTH * 0.5 + DOCK_GAP
+                    + SnapRosette.SIZE * 0.76 * 0.5, MARGIN + 22),
         ))
 
-        # --- unten mitte: rahmenwahl ueber dem lagemesser ----------------
-        center = root.add(Stack(
-            gap=9, align='center', anchor=BOTTOM_CENTER, offset=(0, 14),
+        # --- unten links: bezugsrahmen und zoom --------------------------
+        self.left_stack = root.add(Stack(
+            gap=8, align='start', anchor=BOTTOM_LEFT, offset=(MARGIN, MARGIN),
         ))
-        self.frames = center.add(SegmentBar(
+        self.frames = self.left_stack.add(SegmentBar(
             options=VIEW_MODES,
             value=self.ui_state.view_mode,
             on_select=self._set_view_mode,
             color_role='frame', role='button_sm',
-            pad_x=14, pad_y=8, gap=5, container_pad=5,
+            caption=chrome.tab_text('FRAME'), min_option_width=44,
         ))
-        self.ring = center.add(AttitudeRing(telemetry, ship_control))
-        # Der geschwindigkeitswert sitzt UNTER dem ring, nicht darin: die
-        # nadel laeuft aus der ringmitte heraus und schnitt sonst quer durch
-        # die zahl (siehe VelocityReadout).
-        self.velocity = center.add(VelocityReadout(telemetry))
-
-        # --- unten rechts: autopilot + zoom ------------------------------
-        self.right_stack = root.add(Stack(
-            gap=8, align='end', anchor=BOTTOM_RIGHT, offset=(16, 14),
-        ))
-        self.snaps = self.right_stack.add(SnapGrid(telemetry, ship_control))
-        self.snaps_compact = self.right_stack.add(
-            SnapGrid(telemetry, ship_control, compact=True)
-        )
-        self.zoom = self.right_stack.add(ZoomButtons(telemetry, self.camera))
-        self.zoom_compact = self.right_stack.add(
+        self.zoom = self.left_stack.add(ZoomButtons(telemetry, self.camera))
+        self.zoom_compact = self.left_stack.add(
             ZoomButtons(telemetry, self.camera, compact=True)
         )
 
@@ -210,15 +201,11 @@ class Hud:
             return
         self._wide = wide
 
-        self.elements.visible = wide
         self.target.visible = wide
-        self.throttle.visible = wide
         self.snaps.visible = wide
         self.zoom.visible = wide
 
-        self.elements_rail.visible = not wide
         self.target_rail.visible = not wide
-        self.throttle_compact.visible = not wide
         self.snaps_compact.visible = not wide
         self.zoom_compact.visible = not wide
 

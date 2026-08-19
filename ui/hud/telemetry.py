@@ -180,6 +180,17 @@ class Telemetry:
         self.marker_headings = {}
         self.snap_mode = None
 
+        # RADIALGESCHWINDIGKEIT -- der anteil der bahngeschwindigkeit, der
+        # vom bezugskoerper WEG zeigt (v . r_dach). Positiv heisst steigend.
+        #
+        # Das ist die 2D-entsprechung der senkrechtgeschwindigkeit, die in
+        # KSP2 auf dem rechten bogen neben dem navball steht, und sie ist
+        # hier die ehrlichere groesse: die simulation kennt keine
+        # oberflaechennormale, wohl aber die verbindungslinie zum koerper.
+        # Am Ap und Pe ist sie genau null -- das macht den bogen zu einer
+        # brauchbaren apsis-anzeige.
+        self.radial_speed = None
+
         self.target_distance = None
         self.target_relative_speed = None
         self.closest_approach = None
@@ -223,6 +234,7 @@ class Telemetry:
         )
 
         self._sample_attitude(ship, reference)
+        self._sample_radial(ship, reference, reference_velocity)
         self._sample_target(ship, reference, reference_velocity)
 
         self.warp_factor = float(getattr(self.camera, 'sim_dt', 1.0)) * self.tick_rate
@@ -324,6 +336,30 @@ class Telemetry:
                 return (float(body.velocity.x), float(body.velocity.y))
             except Exception:
                 return (0.0, 0.0)
+
+    def _sample_radial(self, ship, reference, reference_velocity=None):
+        """v . r_dach gegen den bezugskoerper -- steig- bzw. sinkrate.
+
+        Die geschwindigkeit des KOERPERS wird abgezogen, und zwar ueber
+        body_velocity(): das gespeicherte velocity-feld skriptgefuehrter
+        koerper steht auf null (siehe dort), womit die rate bei einem
+        planeten auf sonnenbahn um dessen 30 km/s danebenlaege.
+        """
+        self.radial_speed = None
+        if ship is None or reference is None:
+            return
+        try:
+            rx = float(ship.position.x) - float(reference.position.x)
+            ry = float(ship.position.y) - float(reference.position.y)
+            distance = math.hypot(rx, ry)
+            if distance <= 0.0:
+                return
+            base = reference_velocity or (0.0, 0.0)
+            vx = float(ship.velocity.x) - float(base[0])
+            vy = float(ship.velocity.y) - float(base[1])
+            self.radial_speed = (vx * rx + vy * ry) / distance
+        except Exception:
+            self.radial_speed = None
 
     def _sample_target(self, ship, reference, reference_velocity=None):
         self.target_locked = reference is not None
@@ -434,6 +470,24 @@ class Telemetry:
     def text_warp(self):
         return units.time_warp(self.warp_factor)
 
+    def text_mission_time(self):
+        """Die laufende weltzeit als 'T+000y 012d 04:05'.
+
+        Sie gehoert neben den zeitraffer: eine raffungsstufe ohne die zeit,
+        die sie erzeugt, ist eine zahl ohne sichtbare wirkung -- und bei
+        1 y/s ist die jahresstelle die einzige, an der man ueberhaupt noch
+        etwas laufen sieht.
+        """
+        try:
+            seconds = max(0.0, float(getattr(self.world, 'time', 0.0)))
+        except Exception:
+            return 'T+--'
+        years, rest = divmod(int(seconds), 31557600)
+        days, rest = divmod(rest, 86400)
+        hours, rest = divmod(rest, 3600)
+        minutes = rest // 60
+        return f"T+{years:03d}y {days:03d}d {hours:02d}:{minutes:02d}"
+
     def view_mode_label(self):
         """SURFACE / ORBITAL / TARGET -- identisch zur rahmenwahl im HUD."""
         if self.ui_state is None:
@@ -442,6 +496,121 @@ class Telemetry:
 
     def text_throttle(self):
         return f"{int(round(self.thrust_level * 100.0))}%"
+
+    # ------------------------------------------- die beiden navball-flanken
+
+    def gauge_speed(self):
+        """Bahngeschwindigkeit als (zahl, einheit) fuer die linke flanke."""
+        return units.split_speed(self.frame_speed)
+
+    def gauge_altitude(self):
+        """Hoehe ueber der oberflaeche des bezugskoerpers, als (zahl, einheit).
+
+        Ueber der OBERFLAECHE, nicht ueber dem mittelpunkt: alles andere
+        waere neben einem planeten mit 6 371 km radius sinnlos. Genau
+        dieselbe bezugsgroesse benutzen auch AP und PE.
+        """
+        e = self.elements
+        if not e.valid or e.altitude is None:
+            return ('--', '')
+        return units.split_distance(e.altitude)
+
+    def text_time_to_periapsis(self):
+        if not self.elements.closed:
+            return '--'
+        return units.countdown(self.elements.time_to_periapsis)
+
+    def text_countdown_to_apoapsis(self):
+        if not self.elements.closed:
+            return '--'
+        return units.countdown(self.elements.time_to_apoapsis)
+
+    def orbital_speed_scale(self):
+        """(bahntempo, kreisbahn-tempo, fluchttempo) am aktuellen ort.
+
+        Der MASSSTAB der geschwindigkeitsnadel, und er wird aus der bahn
+        gerechnet statt festgelegt. Vorher stand im ring ein fester
+        vollausschlag von 2600 m/s -- eine zahl, die zu nichts gehoert: im
+        niedrigen Erdorbit fliegt man 7.7 km/s und die nadel klebt am
+        anschlag, um Pluto 4.7 km/s und ebenfalls, waehrend sie um einen
+        kleinen mond ueberhaupt nicht ausschlaegt.
+
+        Die beiden ehrlichen bezugsgroessen liefert der zentralkoerper
+        selbst:
+
+            v_kreis = sqrt(mu / r)          eine kreisbahn hier
+            v_flucht = sqrt(2) * v_kreis    gerade noch gebunden
+
+        Damit bedeutet dieselbe nadellaenge an JEDEM koerper dasselbe --
+        kurz = unterhalb der kreisbahn, drei viertel = kreisbahn, voll =
+        fluchtgeschwindigkeit. Das ist die "an jeden planeten angepasste
+        proportion mit realistischer obergrenze".
+
+        Gerechnet wird gegen die geschwindigkeit RELATIV zum bezugskoerper
+        (OrbitalElements.speed), nicht gegen die baryzentrische: sonst
+        traegt eine Erdumlaufbahn die 30 km/s der Erde um die Sonne mit
+        und die nadel steht immer am anschlag.
+        """
+        e = self.elements
+        reference = self.ui_state.reference_body if self.ui_state else None
+        if not e.valid or reference is None or not e.radius or e.radius <= 0.0:
+            return (None, None, None)
+        try:
+            mu = float(getattr(self.world, 'G', 6.6730831e-11)) * float(reference.mass)
+        except Exception:
+            return (None, None, None)
+        if mu <= 0.0:
+            return (None, None, None)
+        circular = math.sqrt(mu / e.radius)
+        return (e.speed, circular, circular * math.sqrt(2.0))
+
+    def velocity_fraction(self):
+        """Nadellaenge auf [0, 1]: 0 = ruhe, ~0.71 = kreisbahn, 1 = flucht."""
+        speed, _circular, escape = self.orbital_speed_scale()
+        if speed is None or not escape or escape <= 0.0:
+            return None
+        return max(0.0, min(1.0, float(speed) / float(escape)))
+
+    def circular_speed_fraction(self):
+        """Wo auf derselben skala die kreisbahn liegt -- immer 1/sqrt(2).
+
+        Steht hier trotzdem als funktion, weil der ring die marke daraus
+        zeichnet: eine skalierte nadel ohne bezugsmarke ist nur ein
+        zappelnder strich.
+        """
+        _speed, circular, escape = self.orbital_speed_scale()
+        if circular is None or not escape or escape <= 0.0:
+            return None
+        return float(circular) / float(escape)
+
+    def radial_fraction(self, full_scale=None):
+        """Radialgeschwindigkeit auf [-1, 1], fuer den rechten bogen.
+
+        MASSSTAB AUS DER BAHN, nicht fest: die auftretenden raten reichen
+        von metern je sekunde im niedrigen orbit bis zu kilometern je
+        sekunde auf einem transfer. Ein fester vollausschlag waere in einem
+        der beiden faelle immer nutzlos. Bezug ist deshalb die
+        bahngeschwindigkeit selbst -- auf einer kreisbahn ist die radialrate
+        null, auf einer stark elliptischen erreicht sie einen guten teil
+        davon. Vollausschlag heisst damit "die gesamte bewegung geht
+        senkrecht vom koerper weg oder auf ihn zu".
+
+        Bezugsgroesse ist OrbitalElements.speed, also die geschwindigkeit
+        RELATIV ZUM BEZUGSKOERPER -- nicht frame_speed. Die haengt am
+        gewaehlten plotting-rahmen, und dann skalierte sich ein bogen neu,
+        weil jemand die ANSICHT umgestellt hat. Zaehler und nenner muessen
+        aus derselben bewegung kommen, sonst misst der bogen nichts.
+        """
+        value = self.radial_speed
+        if value is None:
+            return None
+        if full_scale is None:
+            full_scale = self.elements.speed if self.elements.valid else None
+            if not full_scale:
+                full_scale = self.relative_speed or self.frame_speed
+        if not full_scale or full_scale <= 0.0:
+            return None
+        return max(-1.0, min(1.0, float(value) / float(full_scale)))
 
     def _reference_radius(self):
         reference = self.ui_state.reference_body if self.ui_state else None

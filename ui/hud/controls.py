@@ -1,11 +1,11 @@
-"""Die bedienelemente des HUDs.
+"""Die bedienelemente des HUDs: zeitraffer, bezugsrahmen, autopilot, zoom.
 
-Zeitraffer, bezugsrahmen, orientierungs-autopilot, schub, zoom und die
-palettenauswahl. Alle folgen derselben zustandsregel aus dem entwurf:
+ALLE folgen derselben zustandsregel:
 
     aktiv    -> flaeche in der rollenfarbe (88 %), schrift in der
-                gegenfarbe (ink_on), farbiger schein
-    inaktiv  -> flaeche weiss auf 5 %, schrift in der rollenfarbe (78 %)
+                gegenfarbe (ink_on)
+    inaktiv  -> flaeche sehr schwach, schrift in der rollenfarbe
+    gesperrt -> keine flaeche, sehr blasse schrift
 
 Das ist bewusst EINE regel fuer alle knoepfe: sobald jeder knopf seinen
 eigenen aktiv-stil erfindet, liest sich die leiste nicht mehr auf einen
@@ -15,12 +15,16 @@ WICHTIG -- ANZEIGE, NICHT ZUSTAND: jedes element liest seinen wert ueber
 ein callable aus der simulation zurueck, statt ihn selbst zu halten. Nur so
 stimmen HUD und tastatur ueberein, wenn dieselbe groesse ueber beide wege
 verstellt wird (etwa PageUp/PageDown und der zeitraffer-knopf).
+
+FORM: die bauteile aus chrome.py -- gefaste kanten, doppelrahmen,
+notch-tabs. Kein element bringt eine eigene kontur mit.
 """
 
 import math
 
 from ..core import Widget
-from ..theme import ink_on, mix, rgba, with_alpha
+from ..theme import ink_on, mix, with_alpha
+from . import chrome
 
 
 def _button_colors(ctx, active, color, hover_t=0.0, press_t=0.0):
@@ -32,7 +36,7 @@ def _button_colors(ctx, active, color, hover_t=0.0, press_t=0.0):
         border = with_alpha(color, 0.90)
     else:
         fill = palette.idle_fill
-        text = with_alpha(color, 0.78)
+        text = with_alpha(color, 0.80)
         border = palette.edge
     fill = mix(fill, palette.hover, hover_t * 0.6)
     fill = mix(fill, palette.active, press_t * 0.6)
@@ -40,16 +44,21 @@ def _button_colors(ctx, active, color, hover_t=0.0, press_t=0.0):
 
 
 class SegmentBar(Widget):
-    """Waagerechte pillenleiste mit sich ausschliessenden optionen.
+    """Waagerechte zellenleiste mit sich ausschliessenden optionen.
 
-    Traegt im entwurf sowohl den zeitraffer als auch die rahmenauswahl --
-    dieselbe form, andere rollenfarbe und andere beschriftung.
+    Traegt den zeitraffer und die rahmenauswahl -- dieselbe form, andere
+    rollenfarbe und andere beschriftung. Die zellen sind GEFASTE rechtecke
+    mit sichtbarem spalt dazwischen, nicht pillen in einer wanne: eine
+    zellenreihe liest sich als stufenschalter, eine pillenreihe als
+    web-navigation.
+
+    Die beschriftung reitet als notch-tab auf der oberkante.
     """
 
     def __init__(self, options, value, on_select, color_role='frame',
                  caption=None, role='button_sm', min_option_width=0.0,
-                 pad_x=14, pad_y=8, gap=5, container_pad=5, enabled=None,
-                 **kwargs):
+                 pad_x=9, pad_y=7, gap=2, container_pad=5, enabled=None,
+                 tab_edge='top', cumulative=False, **kwargs):
         kwargs.setdefault('size', (None, None))
         super().__init__(**kwargs)
         self.options = list(options)
@@ -63,6 +72,13 @@ class SegmentBar(Widget):
         self.pad_y = pad_y
         self.gap = gap
         self.container_pad = container_pad
+        self.tab_edge = tab_edge
+        # PEGEL statt auswahl: bei cumulative=True bekommen auch alle zellen
+        # UNTERHALB der gewaehlten eine (schwaechere) fuellung. Genau so
+        # zeigt die vorlage ihre raffung -- als reihe gruener winkel, die
+        # bis zur aktuellen stufe reicht. Eine raffungsstufe IST ein pegel;
+        # als radiogruppe gezeichnet sagt sie weniger, als sie weiss.
+        self.cumulative = bool(cumulative)
         # Praedikat index -> bool. None heisst: alles erlaubt. Wird fuer den
         # zeitraffer benutzt, dessen obere stufen nahe an einem koerper die
         # bahn nicht mehr aufloesen (siehe Hud._warp_step_enabled).
@@ -84,6 +100,25 @@ class SegmentBar(Widget):
         except Exception:
             return True
 
+    def tab_height(self, ctx):
+        """Platz, den der notch-tab AUSSERHALB des rahmens braucht.
+
+        Er wird in measure() mitgezaehlt und in _bar_rect() wieder abgezogen.
+        Ohne diese reservierung ragte der tab in den nachbarn -- an der
+        zeitraffer-leiste verdeckte er die beiden ersten stufen.
+        """
+        if not self.caption:
+            return 0.0
+        return ctx.text.measure(self.caption, 'tab')[1] + ctx.px(4)
+
+    def _bar_rect(self, ctx):
+        """Die flaeche des eigentlichen rahmens, ohne das tab-band."""
+        tab_h = self.tab_height(ctx)
+        if self.tab_edge == 'top':
+            return (self.rect.x, self.rect.y + tab_h,
+                    self.rect.w, self.rect.h - tab_h)
+        return (self.rect.x, self.rect.y, self.rect.w, self.rect.h - tab_h)
+
     def _metrics(self, ctx):
         options = self.resolve_options()
         pad_x = ctx.px(self.pad_x)
@@ -92,26 +127,22 @@ class SegmentBar(Widget):
             width = ctx.text.measure(str(option), self.role)[0] + pad_x * 2.0
             widths.append(max(width, ctx.px(self.min_option_width)))
         height = ctx.text.measure('X', self.role)[1] + ctx.px(self.pad_y) * 2.0
-        caption_w = 0.0
-        if self.caption:
-            caption_w = (ctx.text.measure(self.caption, 'caption')[0]
-                         + ctx.px(7) * 2.0)
-        return widths, height, caption_w
+        return widths, height
 
     def measure(self, ctx):
-        widths, height, caption_w = self._metrics(ctx)
+        widths, height = self._metrics(ctx)
         pad = ctx.px(self.container_pad)
         gap = ctx.px(self.gap)
-        total = (sum(widths) + gap * max(0, len(widths) - 1)
-                 + caption_w + pad * 2.0)
-        return (total, height + pad * 2.0)
+        total = sum(widths) + gap * max(0, len(widths) - 1) + pad * 2.0
+        return (total, height + pad * 2.0 + self.tab_height(ctx))
 
     def _option_rects(self, ctx):
-        widths, height, caption_w = self._metrics(ctx)
+        widths, height = self._metrics(ctx)
         pad = ctx.px(self.container_pad)
         gap = ctx.px(self.gap)
-        x = self.rect.x + pad + caption_w
-        y = self.rect.y + pad
+        bx, by, _bw, _bh = self._bar_rect(ctx)
+        x = bx + pad
+        y = by + pad
         rects = []
         for width in widths:
             rects.append((x, y, width, height))
@@ -139,62 +170,117 @@ class SegmentBar(Widget):
     def draw(self, ctx):
         palette = ctx.theme.palette
         color = palette.accent_for(self.color_role)
-        radius = self.rect.h * 0.5
-
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, self.rect.h,
-            fill=palette.panel_pill, radius=radius,
-            border_color=palette.edge, border_width=ctx.theme.border_width,
-            shadow=ctx.theme.glow(self.color_role),
-            shadow_offset=(0.0, 0.0), shadow_softness=ctx.px(22.0),
-        )
-
-        if self.caption:
-            ctx.text.draw(
-                self.caption, self.rect.x + ctx.px(self.container_pad) + ctx.px(7),
-                self.rect.center_y, role='caption', color=palette.text_dim,
-                valign='middle',
-            )
+        fx, fy, fw, fh = self._bar_rect(ctx)
+        chrome.frame(ctx, fx, fy, fw, fh, glow_role=self.color_role)
 
         selected = self.resolve_value()
         options = self.resolve_options()
+        cut = -ctx.px(3.0)
         for index, (bx, by, bw, bh) in enumerate(self._option_rects(ctx)):
             active = index == selected
             usable = self.option_enabled(index)
             hover = 1.0 if (self.hovered and index == self._hover_index
                             and usable) else 0.0
+            below = self.cumulative and index < selected
             fill, text_color, _ = _button_colors(ctx, active, color, hover)
             if not usable:
                 # Gesperrt: keine flaeche, nur sehr blasse schrift -- der
                 # knopf bleibt sichtbar (die stufe existiert ja), sagt aber
                 # deutlich, dass er hier nicht zu haben ist.
                 text_color = palette.text_dimmer
+            elif below:
+                ctx.draw.rect(bx, by, bw, bh, fill=with_alpha(color, 0.26),
+                              radius=(cut, 0.0, cut, 0.0))
+                text_color = with_alpha(color, 0.95)
             elif active or hover:
-                ctx.draw.rect(bx, by, bw, bh, fill=fill, radius=bh * 0.5)
+                # Die AKTIVE zelle wird nur oben links und unten rechts
+                # gefast. Diagonal gegenueberliegende schnitte lesen sich
+                # als richtung -- die zelle bekommt damit eine lage in der
+                # reihe, nicht nur eine markierung.
+                ctx.draw.rect(bx, by, bw, bh, fill=fill,
+                              radius=(cut, 0.0, cut, 0.0))
             ctx.text.draw(
                 str(options[index]) if index < len(options) else '',
                 bx + bw * 0.5, by + bh * 0.5, role=self.role,
                 color=text_color, align='center', valign='middle',
             )
 
+        if self.caption:
+            edge_y = fy if self.tab_edge == 'top' else fy + fh
+            chrome.tab(ctx, self.caption, fx + ctx.px(14), edge_y,
+                       color=color, edge=self.tab_edge)
 
-class SnapGrid(Widget):
-    """Zwei-mal-zwei-raster fuer den rastenden orientierungs-autopiloten.
 
-    Bildet exakt die tasten I / K / J / L ab und liest den aktiven modus
-    aus schiffcontrol.snap_mode zurueck -- tastatur und HUD koennen deshalb
-    nicht auseinanderlaufen.
+class WarpBar(SegmentBar):
+    """Der zeitraffer -- die zellenleiste plus die laufende missionszeit.
 
-    Die symbole des entwurfs (◉ / ⊗) werden GEZEICHNET, nicht gesetzt: beide
-    fehlen in vielen oberflaechen-schriften und erschienen als kaestchen.
+    Die uhr gehoert dazu und nicht woandershin: eine raffungsstufe ohne die
+    zeit, die sie erzeugt, ist eine zahl ohne wirkung. Die vorlage stellt
+    beides ebenfalls in einen block.
     """
 
+    def __init__(self, telemetry, clock_height=22, **kwargs):
+        super().__init__(**kwargs)
+        self.telemetry = telemetry
+        self.clock_height = float(clock_height)
+
+    def measure(self, ctx):
+        width, height = super().measure(ctx)
+        return (width, height + ctx.px(self.clock_height))
+
+    def _bar_rect(self, ctx):
+        """Der rahmen endet ueber dem uhrstreifen."""
+        x, y, w, h = super()._bar_rect(ctx)
+        return (x, y, w, h - ctx.px(self.clock_height))
+
+    def draw(self, ctx):
+        palette = ctx.theme.palette
+        clock_h = ctx.px(self.clock_height)
+        super().draw(ctx)
+        fx, fy, fw, fh = self._bar_rect(ctx)
+        y = fy + fh
+        chrome.plate(ctx, fx, y, fw, clock_h, fill=palette.panel_sunken,
+                     corners=(False, False, True, True))
+        middle = y + clock_h * 0.5
+        pad = ctx.px(9)
+        ctx.text.draw('UT', fx + pad, middle, role='caption',
+                      color=palette.text_dimmer, valign='middle')
+        ctx.text.draw(self.telemetry.text_mission_time(), fx + fw - pad,
+                      middle, role='warp', color=palette.warp,
+                      align='right', valign='middle')
+
+
+class SnapRosette(Widget):
+    """Der orientierungs-autopilot als rosette -- vier knoepfe um das schiff.
+
+    Bildet exakt die tasten I / K / J / L ab und liest den aktiven modus aus
+    schiffcontrol.snap_mode zurueck; tastatur und HUD koennen deshalb nicht
+    auseinanderlaufen.
+
+    Warum eine ROSETTE und kein 2x2-raster: die vier richtungen sind keine
+    liste, sondern ein achsenkreuz. Prograde steht dem retrograden
+    gegenueber, normal dem antinormalen -- im raster ist diese beziehung
+    nicht ablesbar, in der rosette steht sie da. Die vorlage ordnet sie aus
+    demselben grund so an.
+
+    Die dritte raumachse der vorlage (radial in/out) fehlt: diese
+    simulation ist zweidimensional, es gibt sie schlicht nicht.
+
+    Die symbole werden GEZEICHNET, nicht gesetzt -- die zeichen der vorlage
+    (U+25C9 / U+2297) fehlen in vielen schriften und erschienen als kaestchen.
+    """
+
+    #: (modus, kuerzel, winkel in kompassgrad, farbrolle)
     MODES = (
-        ('prograde', 'PRO'),
-        ('retrograde', 'RETRO'),
-        ('normal_in', 'NORM'),
-        ('antinormal_out', 'ANTI'),
+        ('prograde', 'PRO', 0.0, 'snap'),
+        ('normal_in', 'NORM', 90.0, 'normal'),
+        ('retrograde', 'RETRO', 180.0, 'snap'),
+        ('antinormal_out', 'ANTI', 270.0, 'normal'),
     )
+
+    SIZE = 132.0
+    TILE = 34.0
+    ORBIT = 38.0
 
     def __init__(self, telemetry, ship_control, compact=False, **kwargs):
         kwargs.setdefault('size', (None, None))
@@ -205,25 +291,25 @@ class SnapGrid(Widget):
         self.blocks_mouse = True
         self._hover_index = -1
 
-    def _tile(self, ctx):
-        if self.compact:
-            return ctx.px(34), ctx.px(34), ctx.px(5), ctx.px(6)
-        return ctx.px(60), ctx.px(46), ctx.px(6), ctx.px(7)
+    def _scale(self):
+        return 0.76 if self.compact else 1.0
 
     def measure(self, ctx):
-        tw, th, gap, pad = self._tile(ctx)
-        return (tw * 2.0 + gap + pad * 2.0, th * 2.0 + gap + pad * 2.0)
+        size = ctx.px(self.SIZE * self._scale())
+        return (size, size)
 
     def _tile_rect(self, ctx, index):
-        tw, th, gap, pad = self._tile(ctx)
-        col = index % 2
-        row = index // 2
-        return (self.rect.x + pad + col * (tw + gap),
-                self.rect.y + pad + row * (th + gap), tw, th)
+        scale = self._scale()
+        tile = ctx.px(self.TILE * scale)
+        orbit = ctx.px(self.ORBIT * scale)
+        _mode, _label, compass, _role = self.MODES[index]
+        cx, cy = chrome.polar(self.rect.center_x, self.rect.center_y,
+                              orbit, compass)
+        return (cx - tile * 0.5, cy - tile * 0.5, tile, tile)
 
     def on_mouse_move(self, ctx, x, y):
         self._hover_index = -1
-        for index in range(4):
+        for index in range(len(self.MODES)):
             bx, by, bw, bh = self._tile_rect(ctx, index)
             if bx <= x < bx + bw and by <= y < by + bh:
                 self._hover_index = index
@@ -233,7 +319,7 @@ class SnapGrid(Widget):
     def on_mouse_up(self, ctx, x, y, button):
         if button != 1 or self.ship_control is None:
             return True
-        for index in range(4):
+        for index in range(len(self.MODES)):
             bx, by, bw, bh = self._tile_rect(ctx, index)
             if bx <= x < bx + bw and by <= y < by + bh:
                 try:
@@ -245,168 +331,79 @@ class SnapGrid(Widget):
 
     def draw(self, ctx):
         palette = ctx.theme.palette
-        color = palette.snap
-        radius = ctx.px(18 if self.compact else 16)
+        cx, cy = self.rect.center_x, self.rect.center_y
+        scale = self._scale()
 
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, self.rect.h,
-            fill=palette.panel, radius=radius,
-            border_color=palette.edge, border_width=ctx.theme.border_width,
-            shadow=ctx.theme.glow('snap'),
-            shadow_offset=(0.0, 0.0), shadow_softness=ctx.px(26.0),
-        )
+        # Der TRAeGER ist ein oktogon, kein rechteck: eine rosette in einer
+        # kiste sieht aus wie ein raster, das man rund gestellt hat. Der
+        # entwurf von Claude Design hatte hier eine viel zu grosse
+        # hintergrundflaeche -- diese hier umschliesst die vier knoepfe
+        # gerade eben.
+        span_units = (self.ORBIT + self.TILE * 0.5 + 7.0) * scale * 2.0
+        span = ctx.px(span_units)
+        chrome.frame(ctx, cx - span * 0.5, cy - span * 0.5, span, span,
+                     cut=span_units * 0.26, glow_role='snap')
+
+        # Das schiff in der mitte -- der bezugspunkt, auf den sich die vier
+        # richtungen beziehen.
+        self._ship_glyph(ctx, cx, cy, ctx.px(11.0 * scale), palette.ship)
 
         active_mode = getattr(self.ship_control, 'snap_mode', None)
-        for index, (mode, label) in enumerate(self.MODES):
+        for index, (mode, label, _compass, role) in enumerate(self.MODES):
             bx, by, bw, bh = self._tile_rect(ctx, index)
             active = mode == active_mode
             hover = 1.0 if (self.hovered and index == self._hover_index) else 0.0
+            color = palette.accent_for(role)
             fill, text_color, border = _button_colors(ctx, active, color, hover)
-            tile_radius = bh * 0.5 if self.compact else ctx.px(12)
-            ctx.draw.rect(bx, by, bw, bh, fill=fill, radius=tile_radius,
-                          border_color=border,
-                          border_width=ctx.theme.border_width)
+            chrome.plate(ctx, bx, by, bw, bh, fill=fill, line=border,
+                         cut=6.0 * scale)
+            self._glyph(ctx, mode, bx + bw * 0.5, by + bh * 0.5,
+                        ctx.px(7.0 * scale), text_color)
 
-            if self.compact:
-                self._glyph(ctx, mode, bx + bw * 0.5, by + bh * 0.5,
-                            ctx.px(7), text_color)
-            else:
-                self._glyph(ctx, mode, bx + bw * 0.5, by + ctx.px(15),
-                            ctx.px(7), text_color)
-                ctx.text.draw(label, bx + bw * 0.5, by + bh - ctx.px(8),
-                              role='caption', color=text_color,
-                              align='center', valign='middle')
+        if not self.compact:
+            label = (dict((m, l) for m, l, _c, _r in self.MODES).get(active_mode)
+                     if active_mode else 'FREE')
+            chrome.tab(ctx, chrome.tab_text('SNAP', label),
+                       cx, cy + span * 0.5,
+                       color=palette.snap if active_mode else palette.text_dim,
+                       align='center', edge='bottom')
+
+    def _ship_glyph(self, ctx, x, y, radius, color):
+        """Ein schlanker pfeil nach oben -- dieselbe silhouette wie die
+        schiffsnase am ring."""
+        width = max(1.0, ctx.px(1.6))
+        ctx.draw.line(x, y - radius, x - radius * 0.52, y + radius * 0.72,
+                      color, width=width, cap='round')
+        ctx.draw.line(x, y - radius, x + radius * 0.52, y + radius * 0.72,
+                      color, width=width, cap='round')
+        ctx.draw.line(x - radius * 0.52, y + radius * 0.72,
+                      x + radius * 0.52, y + radius * 0.72,
+                      color, width=width, cap='round')
 
     def _glyph(self, ctx, mode, x, y, radius, color):
-        width = max(1.0, ctx.px(1.6))
+        width = max(1.0, ctx.px(1.5))
         if mode == 'prograde':
             ctx.draw.ring(x, y, radius, width, color)
-            ctx.draw.circle(x, y, radius * 0.38, fill=color)
+            ctx.draw.circle(x, y, radius * 0.36, fill=color)
         elif mode == 'retrograde':
             ctx.draw.ring(x, y, radius, width, color)
-            arm = radius * 0.62
+            arm = radius * 0.60
             ctx.draw.line(x - arm, y - arm, x + arm, y + arm, color,
                           width=width, cap='round')
             ctx.draw.line(x - arm, y + arm, x + arm, y - arm, color,
                           width=width, cap='round')
         else:
-            ctx.text.draw('N' if mode == 'normal_in' else 'A', x, y,
-                          role='glyph', color=color,
-                          align='center', valign='middle')
-
-
-class ThrottleControl(Widget):
-    """Schubstufe.
-
-    Das schiff kennt keinen dauerschub -- 'Up'/'Down' geben pro frame einen
-    festen delta-v-impuls ueber schiffcontrol.thrust_acc. Dieser regler
-    skaliert genau diesen wert und ist damit eine echte, wirksame
-    steuerung: bei 0 % bleibt der schub aus, bei 100 % liegt er auf dem in
-    config.json eingestellten maximum.
-    """
-
-    def __init__(self, telemetry, compact=False, **kwargs):
-        kwargs.setdefault('size', (None, None))
-        super().__init__(**kwargs)
-        self.telemetry = telemetry
-        self.compact = bool(compact)
-        self.blocks_mouse = True
-
-    def measure(self, ctx):
-        if self.compact:
-            return (ctx.px(46), ctx.px(112 + 52))
-        return (ctx.px(132 + 28), ctx.px(64))
-
-    def _track_rect(self, ctx):
-        if self.compact:
-            width = ctx.px(10)
-            height = ctx.px(112)
-            return (self.rect.center_x - width * 0.5,
-                    self.rect.y + ctx.px(26), width, height)
-        width = ctx.px(132)
-        height = ctx.px(10)
-        return (self.rect.x + ctx.px(14), self.rect.bottom - ctx.px(20),
-                width, height)
-
-    def _apply(self, ctx, x, y):
-        tx, ty, tw, th = self._track_rect(ctx)
-        if self.compact:
-            level = (ty + th - float(y)) / max(th, 1e-6)
-        else:
-            level = (float(x) - tx) / max(tw, 1e-6)
-        self.telemetry.set_thrust_level(level)
-
-    def on_mouse_down(self, ctx, x, y, button):
-        if button == 1:
-            self._apply(ctx, x, y)
-        return True
-
-    def on_mouse_move(self, ctx, x, y):
-        if self.pressed:
-            self._apply(ctx, x, y)
-            return True
-        return False
-
-    def on_wheel(self, ctx, dx, dy):
-        if not dy:
-            return False
-        self.telemetry.set_thrust_level(
-            self.telemetry.thrust_level + 0.05 * float(dy)
-        )
-        return True
-
-    def draw(self, ctx):
-        palette = ctx.theme.palette
-        # Im zeitraffer ist der schub gesperrt. Der regler wird dann
-        # ausgegraut und beschriftet -- ohne das drueckt der spieler 'Up',
-        # es passiert nichts, und nichts auf dem schirm sagt warum.
-        locked = bool(getattr(self.telemetry, 'thrust_locked', False))
-        color = palette.text_dimmer if locked else palette.throttle
-        level = self.telemetry.thrust_level
-
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, self.rect.h,
-            fill=palette.panel, radius=ctx.px(16),
-            border_color=palette.edge, border_width=ctx.theme.border_width,
-            shadow=ctx.theme.glow('throttle'),
-            shadow_offset=(0.0, 0.0), shadow_softness=ctx.px(26.0),
-        )
-
-        tx, ty, tw, th = self._track_rect(ctx)
-        ctx.draw.rect(tx, ty, tw, th, fill=palette.panel_sunken,
-                      radius=min(tw, th) * 0.5)
-
-        if self.compact:
-            ctx.text.draw(self.telemetry.text_throttle(), self.rect.center_x,
-                          self.rect.y + ctx.px(13), role='throttle_value',
-                          color=color, align='center', valign='middle')
-            filled = th * level
-            if filled > 0.5:
-                ctx.draw.rect(tx, ty + th - filled, tw, filled, fill=color,
-                              radius=tw * 0.5)
-            ctx.text.draw('HOLD' if locked else 'THR', self.rect.center_x,
-                          self.rect.bottom - ctx.px(12), role='caption',
-                          color=palette.text_dim, align='center', valign='middle')
-            return
-
-        ctx.text.draw('THROTTLE', self.rect.x + ctx.px(14),
-                      self.rect.y + ctx.px(16), role='section',
-                      color=palette.text_dim, valign='middle')
-        # Gesperrt steht rechts 'HOLD' STATT des prozentwerts -- eine
-        # laengere ueberschrift lief in die zahl hinein. Die eingestellte
-        # stufe bleibt am fuellstand des balkens ablesbar und die zahl
-        # kommt zurueck, sobald wieder in echtzeit geflogen wird.
-        ctx.text.draw('HOLD' if locked else self.telemetry.text_throttle(),
-                      self.rect.right - ctx.px(14), self.rect.y + ctx.px(16),
-                      role='throttle_value', color=color,
-                      align='right', valign='middle')
-
-        filled = tw * level
-        if filled > 0.5:
-            ctx.draw.rect(tx, ty, filled, th, fill=color, radius=th * 0.5)
-        knob_x = tx + filled
-        ctx.draw.circle(knob_x, ty + th * 0.5, ctx.px(8),
-                        fill=palette.text_dim if locked else palette.text)
+            # Normal / antinormal: das dreieck der vorlage, mit der spitze
+            # nach oben bzw. unten.
+            up = mode == 'normal_in'
+            tip = y - radius if up else y + radius
+            base = y + radius * 0.72 if up else y - radius * 0.72
+            ctx.draw.line(x - radius * 0.92, base, x + radius * 0.92, base,
+                          color, width=width, cap='round')
+            ctx.draw.line(x - radius * 0.92, base, x, tip, color,
+                          width=width, cap='round')
+            ctx.draw.line(x + radius * 0.92, base, x, tip, color,
+                          width=width, cap='round')
 
 
 class ZoomButtons(Widget):
@@ -430,15 +427,15 @@ class ZoomButtons(Widget):
 
     def measure(self, ctx):
         if self.compact:
-            return (ctx.px(40) * 2.0 + ctx.px(6), ctx.px(40))
-        return (ctx.px(196), ctx.px(42))
+            return (ctx.px(36) * 2.0 + ctx.px(4), ctx.px(36))
+        return (ctx.px(168), ctx.px(34))
 
     def _button_rect(self, ctx, index):
         if self.compact:
-            size = ctx.px(40)
-            gap = ctx.px(6)
+            size = ctx.px(36)
+            gap = ctx.px(4)
             return (self.rect.x + index * (size + gap), self.rect.y, size, size)
-        gap = ctx.px(6)
+        gap = ctx.px(4)
         width = (self.rect.w - gap) * 0.5
         return (self.rect.x + index * (width + gap), self.rect.y,
                 width, self.rect.h)
@@ -503,12 +500,17 @@ class ZoomButtons(Widget):
     def draw(self, ctx):
         palette = ctx.theme.palette
         color = palette.orbit
+        cut = -ctx.px(4.0)
         for index, label in enumerate(('SYSTEM', 'LOCAL')):
             bx, by, bw, bh = self._button_rect(ctx, index)
             active = (self._mode == ('system' if index == 0 else 'local'))
             hover = 1.0 if (self.hovered and index == self._hover_index) else 0.0
             fill, text_color, border = _button_colors(ctx, active, color, hover)
-            ctx.draw.rect(bx, by, bw, bh, fill=fill, radius=bh * 0.5,
+            # Aussenkante gefast, innenkante scharf -- die beiden knoepfe
+            # lesen sich damit als EIN geteiltes bauteil.
+            radius = ((cut, 0.0, 0.0, cut) if index == 0
+                      else (0.0, cut, cut, 0.0))
+            ctx.draw.rect(bx, by, bw, bh, fill=fill, radius=radius,
                           border_color=border,
                           border_width=ctx.theme.border_width)
 
@@ -536,146 +538,3 @@ class ZoomButtons(Widget):
         if plus:
             ctx.draw.line(x, y - radius * 0.45, x, y + radius * 0.45, color,
                           width=width, cap='round')
-
-
-class PaletteButton(Widget):
-    """Die vier farbpunkte oben rechts -- oeffnet die palettenauswahl.
-
-    Der entwurf setzt genau hierhin sein zentrales versprechen: die
-    oberflaeche zieht ihre farbe aus vier werten, und diese vier lassen sich
-    wechseln. Umgesetzt ist die auswahl aus den drei benannten saetzen des
-    entwurfs; ein farbwaehler pro einzelfarbe braeuchte ein eingabe-widget,
-    das es in dieser oberflaeche noch nicht gibt.
-    """
-
-    def __init__(self, theme, on_change=None, **kwargs):
-        kwargs.setdefault('size', (None, 34))
-        super().__init__(**kwargs)
-        self.theme_ref = theme
-        self.on_change = on_change
-        self.blocks_mouse = True
-        self.open = False
-        self.z = max(self.z, 200)
-        self._hover_set = -1
-
-    def measure(self, ctx):
-        return (ctx.px(7) * 2.0 + ctx.px(12) * 4.0 + ctx.px(5) * 3.0, ctx.px(34))
-
-    # -------------------------------------------------------------- popup
-
-    def _popup_rect(self, ctx):
-        width = ctx.px(236)
-        sets = self.theme_ref.palette_sets()
-        row = ctx.px(30)
-        height = ctx.px(14) * 2.0 + ctx.px(18) + ctx.px(8) + len(sets) * row
-        x = self.rect.right - width
-        y = self.rect.bottom + ctx.px(9)
-        return (x, y, width, height)
-
-    def _set_row_rect(self, ctx, index):
-        px, py, pw, ph = self._popup_rect(ctx)
-        row = ctx.px(30)
-        top = py + ctx.px(14) + ctx.px(18) + ctx.px(8) + index * row
-        return (px + ctx.px(14), top, pw - ctx.px(28), row - ctx.px(6))
-
-    def hit_test(self, ctx, x, y):
-        if not self.visible:
-            return False
-        if self.rect.contains(x, y):
-            return True
-        if not self.open:
-            return False
-        px, py, pw, ph = self._popup_rect(ctx)
-        return px <= x < px + pw and py <= y < py + ph
-
-    def dismiss(self):
-        self.open = False
-        self._hover_set = -1
-
-    def on_mouse_move(self, ctx, x, y):
-        self._hover_set = -1
-        if self.open:
-            for index in range(len(self.theme_ref.palette_sets())):
-                bx, by, bw, bh = self._set_row_rect(ctx, index)
-                if bx <= x < bx + bw and by <= y < by + bh:
-                    self._hover_set = index
-                    break
-        return True
-
-    def on_mouse_up(self, ctx, x, y, button):
-        if button != 1:
-            return True
-        if self.open:
-            for index, (name, colors) in enumerate(self.theme_ref.palette_sets()):
-                bx, by, bw, bh = self._set_row_rect(ctx, index)
-                if bx <= x < bx + bw and by <= y < by + bh:
-                    self.theme_ref.set_palette_colors(colors, name=name)
-                    if self.on_change is not None:
-                        self.on_change(name, colors)
-                    self.open = False
-                    return True
-            if not self.rect.contains(x, y):
-                return True
-        if self.rect.contains(x, y):
-            self.open = not self.open
-        return True
-
-    # ------------------------------------------------------------ zeichnen
-
-    def draw(self, ctx):
-        palette = ctx.theme.palette
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, self.rect.h,
-            fill=palette.panel_pill, radius=self.rect.h * 0.5,
-            border_color=palette.accent if self.open else palette.edge,
-            border_width=ctx.theme.border_width,
-        )
-        dot = ctx.px(6)
-        gap = ctx.px(5)
-        x = self.rect.x + ctx.px(7) + dot
-        for color in palette.colors:
-            ctx.draw.circle(x, self.rect.center_y, dot, fill=color)
-            x += dot * 2.0 + gap
-
-        if self.open:
-            self._draw_popup(ctx)
-
-    def _draw_popup(self, ctx):
-        palette = ctx.theme.palette
-        px, py, pw, ph = self._popup_rect(ctx)
-        ctx.draw.rect(
-            px, py, pw, ph, fill=palette.panel_popup, radius=ctx.px(18),
-            border_color=palette.edge_strong, border_width=ctx.theme.border_width,
-            shadow=palette.shadow, shadow_offset=(0.0, ctx.px(-6)),
-            shadow_softness=ctx.px(18),
-        )
-        ctx.text.draw('UI PALETTE - 4 COLOURS', px + ctx.px(14),
-                      py + ctx.px(14), role='section', color=palette.text_dim)
-
-        for index, (name, colors) in enumerate(self.theme_ref.palette_sets()):
-            bx, by, bw, bh = self._set_row_rect(ctx, index)
-            selected = name == palette.name
-            if index == self._hover_set:
-                ctx.draw.rect(bx, by, bw, bh, fill=palette.hover,
-                              radius=bh * 0.5)
-            swatch_w = ctx.px(13)
-            total = swatch_w * 4.0
-            sx = bx + ctx.px(8)
-            for offset, color in enumerate(colors):
-                left_r = bh * 0.35 if offset == 0 else 0.0
-                right_r = bh * 0.35 if offset == 3 else 0.0
-                # PALETTE_SETS haelt die farben als HEX-ZEICHENKETTEN, damit
-                # die saetze lesbar in theme.py stehen. Der zeichenpfad will
-                # float-tupel -- ohne diese wandlung stirbt der shader-aufruf
-                # an "could not convert string to float: '#'".
-                ctx.draw.rect(
-                    sx + offset * swatch_w, by + ctx.px(5), swatch_w,
-                    bh - ctx.px(10), fill=rgba(color),
-                    radius=(left_r, right_r, right_r, left_r),
-                )
-            ctx.text.draw(
-                name.upper(), sx + total + ctx.px(12), by + bh * 0.5,
-                role='caption',
-                color=palette.text if selected else palette.text_muted,
-                valign='middle',
-            )

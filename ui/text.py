@@ -61,6 +61,7 @@ class TextRenderer:
         self._cache = {}            # (text, font_key) -> (texture, w, h)
         self._deferred = []
         self._font_paths = None
+        self._digit_widths = {}
 
         self._init_pipeline()
         self._rebuild_fonts()
@@ -101,10 +102,9 @@ class TextRenderer:
         Reihenfolge: mitgelieferte TTF in ui/assets/ -> systemschrift aus der
         familienliste des themes -> pygames eingebauter fallback (None).
 
-        Der entwurf ist in "Chakra Petch" gesetzt, einer Google-schrift, die
-        auf Windows nicht vorinstalliert ist. Ist sie installiert, wird sie
-        genommen; sonst faellt die liste auf Segoe UI zurueck -- genau die
-        fallback-kette, die der entwurf selbst angibt.
+        Zwei familien, zwei aufgaben (siehe theme.py, modulkopf):
+        'display' = SB Liquid, die gefaste pixelschrift der instrumente;
+        'text'    = Oxanium, die weich gerundete leseschrift.
         """
         if self._font_paths is not None:
             return self._font_paths
@@ -125,13 +125,16 @@ class TextRenderer:
                     return path
             return None
 
-        sans = self.theme.font_family
-        mono = self.theme.font_family_mono
+        display = self.theme.font_family_display
+        text = self.theme.font_family_text
         self._font_paths = {
-            (False, False): pick(sans, ('ui-sans.ttf', 'ui.ttf'), False),
-            (False, True): pick(sans, ('ui-sans-bold.ttf', 'ui-sans.ttf'), True),
-            (True, False): pick(mono, ('ui-mono.ttf',), False),
-            (True, True): pick(mono, ('ui-mono-bold.ttf', 'ui-mono.ttf'), True),
+            # Die pixelschrift hat keinen eigenen fetten schnitt und braucht
+            # auch keinen: sie ist bereits ein solid-schnitt, synthetisches
+            # fetten wuerde nur das pixelraster verschmieren.
+            ('display', False): pick(display, ('ui-display.ttf', 'ui-mono.ttf'), False),
+            ('display', True): pick(display, ('ui-display.ttf', 'ui-mono.ttf'), False),
+            ('text', False): pick(text, ('ui-text.ttf', 'ui-sans.ttf'), False),
+            ('text', True): pick(text, ('ui-text-bold.ttf', 'ui-text.ttf'), True),
         }
         return self._font_paths
 
@@ -141,8 +144,70 @@ class TextRenderer:
             role = self.theme.type_scale.body
         return role
 
+    #: Rasterstufe der pixelschrift und ihre kleinste brauchbare groesse.
+    #: Beides gemessen, siehe _role_pixel_size.
+    _PIXEL_STEP = 5
+    _PIXEL_MIN = 10
+
     def _role_pixel_size(self, name):
-        return max(6, int(round(self._role(name).size * self.ui_scale)))
+        """Rollengroesse -> pixelgroesse, fuer die pixelschrift GERASTET.
+
+        SB Liquid ist auf einem pixelraster gezeichnet. Bei einer beliebigen
+        pixelgroesse fallen ihre stege unterschiedlich breit aus -- gemessen
+        an 'HHIHIH1111' liefern die groessen 11 bis 13 stege von 1 UND 2 px
+        nebeneinander, was die schrift trotz harter kanten unruhig macht.
+        Auf vielfachen von fuenf (10/15/20/25/30/35/40/45/50) ist die
+        stegbreite dagegen durchgaengig gleich. Darunter, bei 9 px, bleiben
+        von einer versalie nur noch 6 px ink -- deshalb der boden bei 10.
+
+        Die leseschrift wird NICHT gerastet: sie hat keine rasterbindung,
+        und ein sprung von 5 px waere dort nur ein grober typo-sprung.
+        """
+        role = self._role(name)
+        raw = role.size * self.ui_scale
+        if role.family != 'display':
+            return max(6, int(round(raw)))
+        step = self._PIXEL_STEP
+        return max(self._PIXEL_MIN, int(round(raw / step)) * step)
+
+    def _role_antialias(self, name):
+        """Die pixelschrift wird OHNE kantenglaettung gerastert.
+
+        Gemessen ueber 'ABCDEFG0123456789': mit glaettung traegt SB Liquid
+        bei jeder groesse einen halbdeckenden saum (6-22 % der pixel),
+        ohne sie genau ZWEI alphawerte -- 0 und 255. Genau das ist der
+        unterschied zwischen "pixelig" und "unscharf pixelig".
+        """
+        return self._role(name).family != 'display'
+
+    def _role_tabular(self, name):
+        """Die instrumentenschrift setzt ZIFFERN AUF FESTER BREITE.
+
+        SB Liquid ist nicht dicktengleich: gemessen bei 15 px ist die '1'
+        neun pixel breit, jede andere ziffer zehn. Bei einem rechtsbuendigen
+        zaehler wandert damit die LINKE kante jedes mal, wenn eine '1' in
+        die anzeige laeuft oder sie verlaesst -- der AP/PE-countdown zuckte
+        so im sekundentakt.
+
+        Behoben wird das wie in jeder echten schrift mit tabellenziffern:
+        jede ziffer bekommt die breite der breitesten und wird darin
+        zentriert. Nur ziffern -- die uebrigen zeichen behalten ihre
+        natuerliche breite, denn sie stehen in einem festen format ohnehin
+        immer an derselben stelle.
+        """
+        return self._role(name).family == 'display'
+
+    def _digit_width(self, font):
+        """Breite der breitesten ziffer dieser schrift, einmal gemessen."""
+        key = id(font)
+        width = self._digit_widths.get(key)
+        if width is None:
+            try:
+                width = max(font.size(digit)[0] for digit in '0123456789')
+            except Exception:
+                width = 0
+            self._digit_widths[key] = width
+        return width
 
     def _rebuild_fonts(self):
         """Rastert alle rollen in der aktuellen skalierten pixelgroesse NEU.
@@ -153,6 +218,7 @@ class TextRenderer:
         """
         paths = self._resolve_font_paths()
         self._fonts = {}
+        self._digit_widths = {}
         for name in dir(self.theme.type_scale):
             if name.startswith('_'):
                 continue
@@ -160,7 +226,7 @@ class TextRenderer:
             if role is None or not hasattr(role, 'size'):
                 continue
             size_px = self._role_pixel_size(name)
-            path = paths.get((role.mono, role.bold))
+            path = paths.get((role.family, role.bold))
             try:
                 if path:
                     font = pygame.font.Font(path, size_px)
@@ -173,8 +239,11 @@ class TextRenderer:
                     continue
             # Fand die suche keine EIGENE fette schnittdatei (der eintrag ist
             # derselbe wie fuer regular), synthetisch fetten -- sonst faellt
-            # die gewichts-hierarchie des entwurfs in sich zusammen.
-            if role.bold and path is not None and paths.get((role.mono, False)) == path:
+            # die gewichts-hierarchie in sich zusammen. Die PIXELSCHRIFT ist
+            # davon ausgenommen: synthetisches fetten verbreitert ihre stege
+            # um genau ein halbes pixel und zerstoert damit das raster.
+            if (role.bold and role.family != 'display' and path is not None
+                    and paths.get((role.family, False)) == path):
                 try:
                     font.set_bold(True)
                 except Exception:
@@ -214,13 +283,22 @@ class TextRenderer:
         entry = self._cache.get(key)
         if entry is not None:
             return entry
+        antialias = self._role_antialias(role)
         try:
             # IMMER weiss rastern -- eingefaerbt wird im shader (u_color).
-            surface = self._render_tracked(text, font, self.tracking_px(role))
+            surface = self._render_tracked(
+                text, font, self.tracking_px(role), antialias,
+                tabular=self._role_tabular(role),
+            )
             data = pygame.image.tostring(surface, 'RGBA', True)
             w, h = surface.get_size()
             texture = self.ctx.texture((w, h), 4, data)
-            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            # Die pixelschrift wird NEAREST gefiltert. _blit zeichnet zwar
+            # 1:1 und auf ganze pixel gerastet, wo LINEAR dasselbe ergaebe --
+            # aber eine harte rasterung, die von der genauigkeit der
+            # texturkoordinaten abhaengt, ist ein unnoetiges risiko.
+            mode = moderngl.LINEAR if antialias else moderngl.NEAREST
+            texture.filter = (mode, mode)
         except Exception:
             return None
 
@@ -237,33 +315,50 @@ class TextRenderer:
         self._cache[key] = (texture, w, h)
         return self._cache[key]
 
-    def _render_tracked(self, text, font, tracking):
+    def _render_tracked(self, text, font, tracking, antialias=True,
+                        tabular=False):
         """Rastert text, bei bedarf mit LAUFWEITE (letter-spacing).
 
-        Der entwurf sperrt seine beschriftungen stark (.18em bei
-        abschnitts-titeln, .24em bei einheiten) -- ohne das sieht die
-        oberflaeche voellig anders aus. pygames font.render kann keine
-        laufweite, also werden die zeichen einzeln gesetzt.
+        Die oberflaeche sperrt ihre beschriftungen stark (.16em bei
+        abschnitts-titeln, .20em bei einheiten) -- ohne das sieht sie voellig
+        anders aus. pygames font.render kann keine laufweite, also werden die
+        zeichen einzeln gesetzt.
 
         Ohne sperrung laeuft weiter der normale einzel-render: er behaelt
         das kerning, das beim zeichenweisen setzen verloren geht. Bei
         gesperrter versal-beschriftung faellt kerning nicht auf, bei
         normalem fliesstext schon.
-        """
-        if abs(tracking) < 0.05:
-            return font.render(text, True, (255, 255, 255))
 
+        antialias=False rastert hart -- so wird die pixelschrift gesetzt.
+        pygame liefert dann eine palettierte flaeche; convert_alpha() ist
+        ohne display-modus nicht sicher, deshalb wird sie ueber einen
+        SRCALPHA-zwischenschritt mit farbschluessel transparent gemacht.
+
+        tabular=True setzt ZIFFERN auf feste breite (siehe _role_tabular).
+        """
+        if abs(tracking) < 0.05 and not tabular:
+            return self._render_plain(text, font, antialias)
+
+        digit_width = self._digit_width(font) if tabular else 0
         glyphs = []
         total = 0.0
         height = font.get_height()
         for index, char in enumerate(text):
-            glyph = font.render(char, True, (255, 255, 255))
-            advance = font.size(char)[0]
+            glyph = self._render_plain(char, font, antialias)
+            natural = font.size(char)[0]
+            if tabular and char.isdigit() and digit_width > natural:
+                # In der zelle ZENTRIEREN, nicht linksbuendig setzen: sonst
+                # sitzt eine schmale '1' sichtbar links in ihrem feld.
+                advance = digit_width
+                offset = total + (digit_width - natural) * 0.5
+            else:
+                advance = natural
+                offset = total
             # Nach dem LETZTEN zeichen keine sperrung: sonst hinge rechts
             # ein leerraum, der zentrierten text sichtbar nach links zieht.
             if index < len(text) - 1:
                 advance += tracking
-            glyphs.append((glyph, total))
+            glyphs.append((glyph, offset))
             total += advance
 
         surface = pygame.Surface(
@@ -271,6 +366,24 @@ class TextRenderer:
         )
         for glyph, offset in glyphs:
             surface.blit(glyph, (int(round(offset)), 0))
+        return surface
+
+    @staticmethod
+    def _render_plain(text, font, antialias):
+        """Ein render-aufruf, mit alphakanal auch im hart gerasterten fall.
+
+        Ohne kantenglaettung liefert pygame eine 8-bit-palettenflaeche mit
+        durchsichtigem hintergrund. Sie laesst sich blitten, aber
+        image.tostring('RGBA') gaebe deckende schwarze pixel um jede glyphe.
+        Der umweg ueber eine SRCALPHA-flaeche macht daraus einen echten
+        alphakanal mit genau zwei werten -- 0 und 255.
+        """
+        if antialias:
+            return font.render(text, True, (255, 255, 255))
+        raw = font.render(text, False, (255, 255, 255), (0, 0, 0))
+        surface = pygame.Surface(raw.get_size(), pygame.SRCALPHA)
+        raw.set_colorkey((0, 0, 0))
+        surface.blit(raw, (0, 0))
         return surface
 
     def measure(self, text, role='body'):

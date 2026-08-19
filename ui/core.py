@@ -138,7 +138,16 @@ class UIContext:
         self.dt = 0.0
 
     def px(self, design_units):
-        """Design-einheiten -> pixel. Das gegenstueck zu Renderer.ui_px()."""
+        """Design-einheiten -> pixel. Das gegenstueck zu Renderer.ui_px().
+
+        Nimmt auch eine FOLGE, denn ein eckradius darf pro ecke verschieden
+        sein (theme.cut_corners). Ohne diesen fall muesste jeder aufrufer
+        die umrechnung selbst ueber das tupel ziehen -- und genau das ging
+        einmal schief: Panel reichte das tupel ungeprueft weiter und starb
+        an "float() argument must be ... not 'tuple'".
+        """
+        if isinstance(design_units, (tuple, list)):
+            return tuple(float(value) * self.ui_scale for value in design_units)
         return float(design_units) * self.ui_scale
 
     @property
