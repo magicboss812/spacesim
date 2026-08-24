@@ -413,17 +413,27 @@ class Telemetry:
 
     # ------------------------------------------------------ formatierte werte
 
+    # AP/PE SIND ABSTAENDE ZUM MITTELPUNKT, NICHT HOEHEN UEBER GRUND.
+    #
+    # Sie standen einmal als `apsis - koerperradius` da, also als hoehe. Die
+    # Ap/Pe-fahnen auf der linie zeigen aber `r` aus
+    # `Predictor.get_apsis_markers()`, und das ist der abstand zum
+    # MITTELPUNKT des referenzkoerpers. Zwei zahlen fuer denselben punkt, die
+    # sich um einen ganzen koerperradius unterscheiden (bei Erde 6371 km) --
+    # und nichts an der anzeige sagt, welche welche ist. Beide messen jetzt
+    # vom mittelpunkt; die hoehe ueber grund steht weiterhin im ALT-feld,
+    # wo sie hingehoert (siehe text_altitude).
     def text_apoapsis(self):
         e = self.elements
         if not e.valid or e.apoapsis is None:
             return '--'
-        return units.distance(e.apoapsis - self._reference_radius())
+        return units.distance(e.apoapsis)
 
     def text_periapsis(self):
         e = self.elements
         if not e.valid or e.periapsis is None:
             return '--'
-        return units.distance(e.periapsis - self._reference_radius())
+        return units.distance(e.periapsis)
 
     def text_eccentricity(self):
         return units.eccentricity(self.elements.eccentricity)
@@ -460,9 +470,11 @@ class Telemetry:
         return units.speed(self.target_relative_speed)
 
     def text_closest(self):
+        # Dieselbe groesse wie die Pe-fahne (siehe text_periapsis): sie kommt
+        # aus demselben marker, also auch vom mittelpunkt gemessen.
         if self.closest_approach is None:
             return '--'
-        return units.distance(self.closest_approach - self._reference_radius())
+        return units.distance(self.closest_approach)
 
     def text_time_to_closest(self):
         return units.duration(self.time_to_closest)
@@ -507,8 +519,9 @@ class Telemetry:
         """Hoehe ueber der oberflaeche des bezugskoerpers, als (zahl, einheit).
 
         Ueber der OBERFLAECHE, nicht ueber dem mittelpunkt: alles andere
-        waere neben einem planeten mit 6 371 km radius sinnlos. Genau
-        dieselbe bezugsgroesse benutzen auch AP und PE.
+        waere neben einem planeten mit 6 371 km radius sinnlos. AP und PE
+        messen dagegen vom MITTELPUNKT -- so wie die fahnen auf der linie
+        (siehe text_periapsis).
         """
         e = self.elements
         if not e.valid or e.altitude is None:
@@ -611,10 +624,6 @@ class Telemetry:
         if not full_scale or full_scale <= 0.0:
             return None
         return max(-1.0, min(1.0, float(value) / float(full_scale)))
-
-    def _reference_radius(self):
-        reference = self.ui_state.reference_body if self.ui_state else None
-        return float(getattr(reference, 'radius', 0.0) or 0.0)
 
     # ------------------------------------------------------------- steuerung
 

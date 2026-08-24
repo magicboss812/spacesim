@@ -9,11 +9,13 @@ import moderngl
 import math
 import os
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import time
 
 import numpy as np
 
 from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
+import body_style
 
 # Numba-fassungen der reinen zahlenschleifen im linien-zeichenweg
 # (min-step-verdichtung und RDP-vereinfachung). Wort-fuer-wort dieselbe
@@ -137,6 +139,27 @@ class Renderer:
         self._ortho_vao = None
         self._body_program = None
         self._body_vao = None
+
+        # --- prozedurale vektor-optik der koerper (D2) -------------------
+        # Die zeichnung eines koerpers ist geometrie, keine textur: sie wird
+        # einmal je (seed, farbe, muster) gebaut, liegt im einheitskreis und
+        # wird pro frame nur skaliert. Beleuchtung ist ein uniform, deshalb
+        # wandert der terminator mit der bahn, ohne dass etwas neu entsteht.
+        self._body_surface_program = None
+        self._body_line_program = None
+        self._body_style_gpu = {}
+        # Gebaut wird NEBENLAEUFIG. Der bau ist reine rechnung (numpy, keine
+        # GL-aufrufe), nur das hochladen muss im hauptthread passieren --
+        # gemessen der billige teil. Synchron gebaut kostete der erste frame
+        # eines herangezoomten koerpers 18.5 ms; das ist genau der ruckler,
+        # den man beim heranzoomen sieht, also dort, wo er auffaellt.
+        self._body_style_jobs = {}
+        self._body_style_executor = None
+        # Gleichzeitige bauten. Einer reicht: mehr wuerden sich nur um die
+        # GIL streiten und dem hauptthread dieselbe zeit abziehen.
+        self._body_style_build_budget = 1
+        self._light_source_body = None
+        self._light_screen_xy = None
         self._texquad_program = None
         self._texquad_vao = None
 
@@ -275,6 +298,55 @@ class Renderer:
         # (kein leerer frame, keine doppelzeichnung). Beim weiteren herauszoomen
         # bleibt das icon konstant groß (skaliert nicht mehr mit der zoom-stufe).
         self.body_icon_radius_px = 4.0
+
+        # --- schwellen und regler der koerper-optik ----------------------
+        # Unterhalb von `body_vector_min_radius_px` sieht man von facetten
+        # ohnehin nichts, also wird gar nichts gebaut und der koerper bleibt
+        # die alte flache scheibe. Dazwischen blendet `u_fade` linear ein --
+        # ein harter schnitt bei einer zoomstufe waere als aufblitzen sichtbar.
+        self.body_vector_style = True
+        self.body_vector_min_radius_px = 11.0
+        self.body_vector_full_radius_px = 26.0
+        # Detailleiter. Die stufe wird NICHT fest gewaehlt, sondern so, dass
+        # eine facette immer ungefaehr `body_vector_facet_px` pixel breit ist.
+        #
+        # Das ist nicht bloss sparsamkeit. Fest auf 'fine' sieht ein koerper
+        # mit 40 px radius aus wie ein golfball: 26 facetten ueber den
+        # durchmesser sind dort 3 px breit und werden zu grauem rauschen.
+        # Fest auf 'coarse' fehlt beim heranzoomen genau die zeichnung, um
+        # derentwillen das ganze gebaut wurde. Gemessen kostet der bau
+        # 2.0 / 4.0 / 13.0 ms und belegt 0.12 / 0.32 / 1.13 MB je koerper --
+        # einmalig, danach ist es reine zeichenarbeit.
+        #
+        # Der uebergang wird UEBERBLENDET (`body_vector_detail_blend`), sonst
+        # springt das muster mitten in einer zoom-geste um.
+        self.body_vector_detail = None  # 'coarse'/'medium'/'fine' erzwingt eine stufe
+        self.body_vector_facet_px = 14.0
+        self.body_vector_detail_blend = 0.35
+        self.body_vector_coverage = 0.5
+        self.body_vector_shape_density = body_style.DEFAULT_SHAPE_DENSITY
+        # Beleuchtung: die richtung kommt vom stern, liegt in der bahnebene
+        # (z = 0) und ergibt damit die echte phase. `body_ambient` ist die
+        # resthelligkeit der nachtseite -- ohne sie verschwindet die haelfte
+        # des koerpers restlos.
+        self.body_light_enabled = True
+        self.body_ambient = 0.16
+        self.body_light_exponent = 1.45
+        # Anteil des lichts, der ZUM betrachter zeigt.
+        #
+        # 0.0 waere die physikalisch exakte phase fuer eine draufsicht auf die
+        # bahnebene -- dann steht der subsolare punkt aber IMMER auf dem rand,
+        # die scheibenmitte liegt genau auf dem terminator, und jeder planet
+        # ist auf ewig halb. Gemessen bleibt davon wenig uebrig: die hellste
+        # stelle ist die staerkste verkuerzung, der koerper liest sich als
+        # dunkler fleck. 0.55 ist der wert des mockups und kippt das bild in
+        # eine dreiviertel-beleuchtung -- eine seite klar heller als die
+        # andere, was der eigentliche zweck ist.
+        self.body_light_tilt = 0.55
+        # Grundglimmen jedes koerpers in seiner eigenen farbe. Sterne bekommen
+        # ueber `light_intensity` zusaetzlich einen groesseren halo.
+        self.body_glow_alpha = 0.16
+
         # Bildschirm-bounding-box kleiner als dieser wert (px) => referenz-spur
         # wird nicht gezeichnet (sub-pixel, ohnehin unsichtbar).
         self.reference_traj_min_screen_px = 2.0
@@ -747,6 +819,23 @@ class Renderer:
             self._body_program = None
             self._body_vao = None
 
+        self._init_body_style_pipeline()
+
+    def _init_body_style_pipeline(self):
+        """Programme fuer die vektor-zeichnung der koerper.
+
+        Anders als die uebrigen pipelines gibt es hier KEIN gemeinsames VAO:
+        jeder koerper hat seine eigene geometrie und damit seinen eigenen
+        puffer (siehe `_upload_body_style`).
+        """
+        self._body_surface_program = self._compile_shader_program(
+            'body_surface.vert', 'body_surface.frag', 'body_surface')
+        self._body_line_program = self._compile_shader_program(
+            'body_line.vert', 'body_line.frag', 'body_line')
+        if self._body_surface_program is None or self._body_line_program is None:
+            self._body_surface_program = None
+            self._body_line_program = None
+
     def _init_texquad_pipeline(self):
         """Texturierte quads (labels, HUD) in der ortho-konvention (y nach oben)."""
         program = self._compile_shader_program('texquad.vert', 'texquad.frag', 'texquad')
@@ -1045,8 +1134,17 @@ class Renderer:
 
         return runs
 
-    def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density, light_intensity):
-        """Zeichnet einen körper als shader-gesteuertes quad (scheibe + optional atmosphäre + glow)."""
+    def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density,
+                        light_intensity, light=(0.0, 0.0, 1.0), emissive=1.0,
+                        surface_mix=0.0, glow=0.0):
+        """Zeichnet einen körper als shader-gesteuertes quad (scheibe + optional atmosphäre + glow).
+
+        `light` ist die richtung ZUR lichtquelle im scheiben-raum (y nach oben);
+        `emissive` = 1 schaltet die schattierung ab (stern, positions-icon).
+        `surface_mix` verdunkelt die scheibe, sobald die vektor-zeichnung
+        darueber liegt -- ohne das leuchtet die volle koerperfarbe durch die
+        linien hindurch und die facetten verschwinden.
+        """
         if self._body_vao is None:
             return False
 
@@ -1057,15 +1155,25 @@ class Renderer:
         atmos_alpha = 0.0
         atmos_radius = radius_px
         if atmos_density > 0.0:
-            atmos_radius = radius_px * 2.0
+            # Enger als frueher (war 2.0): mit der neuen kugelschattierung ist
+            # der koerper selbst dunkel, und ein halo von zwei radien breite
+            # ueberstrahlte dann die halbe bildflaeche.
+            atmos_radius = radius_px * 1.22
             outer_radius = max(outer_radius, atmos_radius)
-            atmos_alpha = min(float(atmos_density) / 100.0, 1.0) * radius_scale
+            atmos_alpha = min(float(atmos_density) / 100.0, 1.0) * min(radius_scale, 1.0)
 
         glow_alpha = 0.0
         if light_intensity > 0.0:
-            glow_radius = radius_px * 2.5
+            # Stern: grosser halo. Die alte formel teilte durch 1000 und kam
+            # damit auf alpha 4e-4 -- der glow war rechnerisch da und optisch
+            # nie zu sehen.
+            glow_radius = radius_px * 3.0
             outer_radius = max(outer_radius, glow_radius)
-            glow_alpha = min(float(light_intensity) / 1000.0, 1.0) * 0.5 * radius_scale * 0.8
+            glow_alpha = min(1.0, 0.22 + float(light_intensity) * 0.30) * radius_scale
+        elif glow > 0.0:
+            glow_radius = radius_px * 1.28
+            outer_radius = max(outer_radius, glow_radius)
+            glow_alpha = min(1.0, float(glow))
 
         core_norm = max(0.001, min(1.0, radius_px / max(outer_radius, 1e-6)))
         if atmos_alpha > 0.0:
@@ -1088,6 +1196,10 @@ class Renderer:
             prog['u_atmos_radius_norm'].value = float(atmos_norm)
             prog['u_atmos_alpha'].value = float(atmos_alpha)
             prog['u_glow_alpha'].value = float(glow_alpha)
+            prog['u_light'].value = (float(light[0]), float(light[1]), float(light[2]))
+            prog['u_ambient'].value = float(self.body_ambient)
+            prog['u_emissive'].value = float(emissive)
+            prog['u_surface_mix'].value = float(surface_mix)
 
             self._body_vao.render(moderngl.TRIANGLE_STRIP)
             return True
@@ -1109,6 +1221,219 @@ class Renderer:
         positionsgenau und am übergang nahtlos zum körper.
         """
         self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0)
+
+    # ------------------------------------------------------------------
+    # Prozedurale vektor-optik der koerper (D2)
+    # ------------------------------------------------------------------
+
+    def _body_style_key(self, body, detail):
+        """Cache-schluessel: alles, was die zeichnung bestimmt.
+
+        Bewusst NICHT `id(body)`: der schluessel soll einen neu geladenen
+        koerper mit denselben angaben auf dieselbe zeichnung fuehren.
+        """
+        seed = getattr(body, 'style_seed', None)
+        if seed is None:
+            seed = body_style.seed_from_name(getattr(body, 'name', '?'))
+        mode = getattr(body, 'style_mode', None) or body_style.DEFAULT_MODE
+        shape = getattr(body, 'style_shape', None) or body_style.DEFAULT_SHAPE
+        color = tuple(int(c) for c in tuple(getattr(body, 'color', (255, 255, 255)))[:3])
+        return (int(seed) & 0xFFFFFFFF, str(mode), str(shape), color,
+                str(detail), float(self.body_vector_shape_density))
+
+    def _body_detail_levels(self, radius_px):
+        """[(stufe, gewicht), ...] fuer diesen bildschirmradius.
+
+        Die stufe, deren facetten am naechsten an `body_vector_facet_px`
+        liegen, gewinnt; in einem band um den wechsel herum laufen ZWEI
+        stufen mit summe 1 -- das ist die ueberblendung. Gerechnet wird in
+        log-groesse, weil die stufen sich in der facettenbreite jeweils
+        halbieren, also geometrisch und nicht linear liegen.
+        """
+        forced = self.body_vector_detail
+        levels = body_style.DETAIL_LEVELS
+        if forced:
+            return ((str(forced), 1.0),)
+
+        radius_px = max(1e-3, float(radius_px))
+        target = max(1.0, float(self.body_vector_facet_px))
+        blend = max(1e-3, min(0.9, float(self.body_vector_detail_blend)))
+
+        position = 0.0
+        for index in range(len(levels) - 1):
+            # Bildschirmradius, bei dem stufe index+1 dieselbe facettenbreite
+            # traefe wie das ziel.
+            switch = target / body_style.FACET_FRACTION[levels[index + 1]]
+            low = math.log(switch / (1.0 + blend))
+            high = math.log(switch * (1.0 + blend))
+            position += max(0.0, min(1.0,
+                                     (math.log(radius_px) - low) / (high - low)))
+
+        base = int(math.floor(position))
+        frac = position - base
+        if base >= len(levels) - 1:
+            return ((levels[-1], 1.0),)
+        if frac <= 1e-3:
+            return ((levels[base], 1.0),)
+        return ((levels[base], 1.0 - frac), (levels[base + 1], frac))
+
+    def _body_style_entry(self, body, detail):
+        """Gebaute + hochgeladene zeichnung eines koerpers, oder None.
+
+        None heisst 'diesen frame noch nicht' -- entweder ist das budget
+        aufgebraucht (dann kommt sie im naechsten frame) oder der bau ist
+        fehlgeschlagen (dann nie wieder, der fehler steht in debug_info).
+        """
+        if not self.body_vector_style or self._body_surface_program is None:
+            return None
+        key = self._body_style_key(body, detail)
+        entry = self._body_style_gpu.get(key)
+        if entry is not None:
+            return entry or None
+        job = self._body_style_jobs.get(key)
+        if job is not None:
+            if not job.done():
+                return None
+            del self._body_style_jobs[key]
+            return self._finish_body_style(key, body, job.result)
+
+        if len(self._body_style_jobs) >= int(self._body_style_build_budget):
+            return None
+        executor = self._body_style_executor
+        if executor is None:
+            try:
+                executor = ThreadPoolExecutor(max_workers=1,
+                                              thread_name_prefix='bodystyle')
+                self._body_style_executor = executor
+            except Exception:
+                executor = None
+        args = (key[0],)
+        kwargs = dict(color=key[3], mode=key[1], shape=key[2],
+                      coverage=float(self.body_vector_coverage),
+                      detail=key[4], shape_density=key[5])
+        if executor is None:
+            # Ohne threads lieber einen ruckler als gar keine zeichnung.
+            return self._finish_body_style(
+                key, body, lambda: body_style.build_planet_style(*args, **kwargs))
+        self._body_style_jobs[key] = executor.submit(
+            body_style.build_planet_style, *args, **kwargs)
+        return None
+
+    def _finish_body_style(self, key, body, produce):
+        """Ergebnis eines baus in GL-puffer legen. Laeuft im hauptthread."""
+        try:
+            entry = self._upload_body_style(produce())
+        except Exception as exc:
+            self.debug_info['body_style_error'] = f"{getattr(body, 'name', '?')}: {exc}"
+            print(f"Body style build failed ({getattr(body, 'name', '?')}): {exc}")
+            entry = False
+        self._body_style_gpu[key] = entry
+        return entry or None
+
+    def _upload_body_style(self, style):
+        """PlanetStyle -> GL-puffer.
+
+        Die linien werden GETRENNT expandiert: `expand_segments` wirft
+        entartete segmente weg, und danach waere die grenze zwischen den
+        segmenten unter und ueber den fuellungen nicht mehr bekannt. Diese
+        reihenfolge ist nicht kosmetisch -- alphas addieren sich, das
+        gitternetz gehoert unter die fuellungen.
+        """
+        tri = np.ascontiguousarray(style.tri, dtype='f4')
+        under = body_style.expand_segments(style.seg[:style.under_segments])
+        over = body_style.expand_segments(style.seg[style.under_segments:])
+        lines = np.ascontiguousarray(np.concatenate([under, over], axis=0), dtype='f4')
+
+        tri_vbo = self.ctx.buffer(tri.tobytes()) if tri.shape[0] else None
+        line_vbo = self.ctx.buffer(lines.tobytes()) if lines.shape[0] else None
+
+        tri_vao = None
+        if tri_vbo is not None:
+            tri_vao = self.ctx.vertex_array(
+                self._body_surface_program,
+                [(tri_vbo, '2f 3f 3f 1f 1f',
+                  'a_pos', 'a_nrm', 'a_col', 'a_alpha', 'a_dark')],
+            )
+        line_vao = None
+        if line_vbo is not None:
+            line_vao = self.ctx.vertex_array(
+                self._body_line_program,
+                [(line_vbo, '2f 3f 3f 1f 1f 2f 1f 1f 1f',
+                  'a_pos', 'a_nrm', 'a_col', 'a_alpha', 'a_dark',
+                  'a_dir', 'a_side', 'a_ext', 'a_half')],
+            )
+        return {
+            'tri_vao': tri_vao,
+            'tri_count': int(tri.shape[0]),
+            'line_vao': line_vao,
+            'under_count': int(under.shape[0]),
+            'over_count': int(over.shape[0]),
+            'buffers': [b for b in (tri_vbo, line_vbo) if b is not None],
+            'style': style,
+        }
+
+    def _body_detail_fade(self, radius_px):
+        """0 unter der schwelle, 1 ab voller groesse, dazwischen linear."""
+        lo = float(self.body_vector_min_radius_px)
+        hi = max(lo + 1e-6, float(self.body_vector_full_radius_px))
+        return max(0.0, min(1.0, (float(radius_px) - lo) / (hi - lo)))
+
+    def _body_light_dir(self, body, x, y):
+        """Richtung zur lichtquelle im scheiben-raum, plus emissiv-flag.
+
+        Die richtung wird im BILDSCHIRM gemessen, nicht in weltkoordinaten:
+        so folgt die beleuchtung automatisch jedem rotierenden plotting-frame.
+        z bleibt 0, das licht liegt also in der bahnebene -- genau das ergibt
+        von oben auf das system gesehen die richtige phase.
+        """
+        source = self._light_screen_xy
+        if (not self.body_light_enabled or source is None
+                or body is self._light_source_body):
+            return (0.0, 0.0, 1.0), 1.0
+        dx = float(source[0]) - float(x)
+        dy = float(source[1]) - float(y)
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return (0.0, 0.0, 1.0), 1.0
+        tilt = max(0.0, min(1.0, float(self.body_light_tilt)))
+        plane = math.sqrt(max(0.0, 1.0 - tilt * tilt)) / length
+        # bildschirm zaehlt y nach unten, die scheibe nach oben
+        return (dx * plane, -dy * plane, tilt), 0.0
+
+    def _draw_body_vector(self, entry, x, y, radius_px, light, emissive, fade):
+        """Zeichnet die vektor-zeichnung eines koerpers: drei draw-calls.
+
+        Gitternetz -> fuellungen -> konturen/figuren/ringe, in genau dieser
+        reihenfolge (siehe `_upload_body_style`).
+        """
+        prog_surface = self._body_surface_program
+        prog_line = self._body_line_program
+        if prog_surface is None or prog_line is None:
+            return False
+        try:
+            for prog in (prog_surface, prog_line):
+                prog['u_center_px'].value = (float(x), float(y))
+                prog['u_radius_px'].value = float(radius_px)
+                prog['u_viewport'].value = (float(self.width), float(self.height))
+                prog['u_light'].value = (float(light[0]), float(light[1]), float(light[2]))
+                prog['u_light_exp'].value = float(self.body_light_exponent)
+                prog['u_fade'].value = float(fade)
+                prog['u_emissive'].value = float(emissive)
+
+            line_vao = entry.get('line_vao')
+            under = int(entry.get('under_count', 0))
+            over = int(entry.get('over_count', 0))
+            if line_vao is not None and under > 0:
+                line_vao.render(moderngl.TRIANGLES, vertices=under, first=0)
+            tri_vao = entry.get('tri_vao')
+            if tri_vao is not None and entry.get('tri_count', 0) > 0:
+                tri_vao.render(moderngl.TRIANGLES)
+            if line_vao is not None and over > 0:
+                line_vao.render(moderngl.TRIANGLES, vertices=over, first=under)
+            return True
+        except Exception as exc:
+            self.debug_info['body_style_error'] = f"draw: {exc}"
+            return False
 
     def _recompute_ui_scale(self):
         """Leitet ui_scale aus der fensterhöhe ab. Gibt True bei änderung zurück.
@@ -1465,6 +1790,26 @@ class Renderer:
         self.debug_info['bodies_rendered'] = 0
         self.debug_info['bodies_culled'] = 0
         self.debug_info['bodies_as_icon'] = 0
+        self.debug_info['bodies_vector'] = 0
+
+        # Beleuchtung: EINE quelle je frame, in bildschirmkoordinaten. Jeder
+        # koerper leitet daraus nur noch eine richtung ab (`_body_light_dir`).
+        if not self.body_vector_style and self._body_style_jobs:
+            # Abgeschaltet: laufende bauten interessieren nicht mehr, und
+            # liegengelassen wuerden sie das budget dauerhaft belegen.
+            self._body_style_jobs.clear()
+        self._light_source_body = self._find_light_source(bodies)
+        self._light_screen_xy = None
+        if self._light_source_body is not None:
+            try:
+                self._light_screen_xy = self._world_to_screen_xy(
+                    float(self._light_source_body.position.x),
+                    float(self._light_source_body.position.y),
+                    camera,
+                    camera_frame_xy=self._frame_camera_xy(camera),
+                )
+            except Exception:
+                self._light_screen_xy = None
         self.debug_info['prediction_points_in'] = 0
         self.debug_info['prediction_points_drawn'] = 0
         self._last_prediction_render_stats = {
@@ -1838,6 +2183,27 @@ class Renderer:
 
         return f"{speed_m_s:.1f} m/s"
     
+    def _find_light_source(self, bodies):
+        """Der koerper, der das system beleuchtet.
+
+        `light_intensity > 0` gewinnt; sonst der massereichste koerper. Der
+        fallback ist absicht: ein selbst gebautes system ohne das feld soll
+        trotzdem beleuchtet aussehen, und der schwerste koerper ist dort
+        praktisch immer der stern.
+        """
+        best = None
+        best_mass = -1.0
+        for candidate in bodies:
+            if getattr(candidate, 'is_ship', False):
+                continue
+            if float(getattr(candidate, 'light_intensity', 0.0)) > 0.0:
+                return candidate
+            mass = float(getattr(candidate, 'mass', 0.0))
+            if mass > best_mass:
+                best = candidate
+                best_mass = mass
+        return best
+
     def _draw_body(self, body, camera):
         camera_frame_xy = self._frame_camera_xy(camera)
         x, y = self._world_to_screen_xy(
@@ -1956,6 +2322,30 @@ class Renderer:
         atmos_density = float(getattr(body, 'atmos_density', 0.0)) if has_atmos else 0.0
         light_intensity = float(getattr(body, 'light_intensity', 0.0))
 
+        # Lichtrichtung und detailgrad bestimmen, BEVOR die scheibe gezeichnet
+        # wird: `fade` verdunkelt die scheibe genau so weit, wie die vektor-
+        # zeichnung darueber sie ersetzt.
+        light, emissive = self._body_light_dir(body, x, y)
+        fade = self._body_detail_fade(radius_px)
+        style_layers = []
+        if fade > 0.0:
+            for detail, weight in self._body_detail_levels(radius_px):
+                entry = self._body_style_entry(body, detail)
+                if entry is not None:
+                    style_layers.append((entry, weight))
+        if not style_layers:
+            # Noch nicht gebaut (budget) oder abgeschaltet: die alte flache
+            # scheibe bleibt stehen, statt einen leeren dunklen kreis zu zeigen.
+            fade = 0.0
+        else:
+            # Waehrend einer ueberblendung fehlt die zweite stufe vielleicht
+            # noch. Dann traegt die vorhandene das volle bild, statt dass die
+            # zeichnung fuer einen frame halb durchsichtig wird.
+            total = sum(weight for _entry, weight in style_layers)
+            if total > 1e-6:
+                style_layers = [(entry, weight / total)
+                                for entry, weight in style_layers]
+
         # GLSL-Shader zeichnet Scheibe + Glow + Atmosphäre in einem Quad.
         # (Kein immediate-mode-fallback mehr: ohne body-shader wird der körper
         # nicht gezeichnet, der fehler steht in debug_info['shader_error'].)
@@ -1967,7 +2357,20 @@ class Renderer:
             (r1, g1, b1),
             atmos_density,
             light_intensity,
+            light=light,
+            emissive=emissive,
+            surface_mix=fade,
+            glow=float(self.body_glow_alpha) * fade,
         )
+
+        drawn = False
+        for entry, weight in style_layers:
+            if self._draw_body_vector(entry, x, y, radius_px,
+                                      light, emissive, fade * weight):
+                drawn = True
+        if drawn:
+            self.debug_info['bodies_vector'] = (
+                self.debug_info.get('bodies_vector', 0) + 1)
 
         if radius > 5:
             # Label-Position mittels camera.world_to_screen berechnen, um

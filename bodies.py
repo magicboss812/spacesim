@@ -6,7 +6,8 @@ class body:
     def __init__(self, name, mass, radius, position, velocity, fixed=False, 
                  semi_major_axis=None, eccentricity=None, period=None, theta0=0.0, 
                  is_moon_of=None, color=(255, 255, 255),
-                 has_atmosphere=False,atmosphere_color=(255, 255, 255), atmos_density=0.0, light_intensity=0.0, is_ship=False):
+                 has_atmosphere=False,atmosphere_color=(255, 255, 255), atmos_density=0.0, light_intensity=0.0, is_ship=False,
+                 style_seed=None, style_mode=None, style_shape=None):
         self.name = name
         self.mass = float(mass)
         self.radius = float(radius)
@@ -37,6 +38,14 @@ class body:
         self.atmos_density = float(atmos_density) if self.has_atmosphere else 0.0
         self.light_intensity = float(light_intensity)
         self.atmosphere_color = atmosphere_color if self.has_atmosphere else (0, 0, 0)
+
+        # Prozedurale vektor-optik (siehe body_style.py). Alle drei duerfen
+        # None bleiben: der seed wird dann aus dem NAMEN abgeleitet, muster
+        # und figur stehen auf 'bands' / 'nested'. Das feld existiert nur,
+        # damit ein einzelner koerper bewusst anders aussehen kann.
+        self.style_seed = None if style_seed is None else (int(style_seed) & 0xFFFFFFFF)
+        self.style_mode = style_mode
+        self.style_shape = style_shape
     def position_at_time(self, t):
         """Return this body's Kepler position at simulation time t without modifying state.
 

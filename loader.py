@@ -365,6 +365,7 @@ class ConfigLoader:
             ('toggle_num_points', None, None),
             ('length_step_factor', None, None),
             ('precision_step_factor', None, None),
+            ('max_num_points', None, None),
         ])
         # `precision` ist der basiswert, von dem die zoom-automatik ausgeht.
         if 'precision' in self.section('predictor'):
@@ -403,6 +404,20 @@ class ConfigLoader:
             ('show_apsis_markers', 'show_apsis_markers', bool),
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
             ('body_icon_radius_px', 'body_icon_radius_px', float),
+            # Prozedurale vektor-optik der koerper (D2)
+            ('body_vector_style', 'body_vector_style', bool),
+            ('body_vector_min_radius_px', 'body_vector_min_radius_px', float),
+            ('body_vector_full_radius_px', 'body_vector_full_radius_px', float),
+            ('body_vector_detail', 'body_vector_detail', None),
+            ('body_vector_facet_px', 'body_vector_facet_px', float),
+            ('body_vector_detail_blend', 'body_vector_detail_blend', float),
+            ('body_vector_coverage', 'body_vector_coverage', float),
+            ('body_vector_shape_density', 'body_vector_shape_density', float),
+            ('body_light_enabled', 'body_light_enabled', bool),
+            ('body_ambient', 'body_ambient', float),
+            ('body_light_exponent', 'body_light_exponent', float),
+            ('body_light_tilt', 'body_light_tilt', float),
+            ('body_glow_alpha', 'body_glow_alpha', float),
             ('reference_trajectories_enabled', 'reference_trajectories_enabled', bool),
             ('reference_trajectories_max_points', 'reference_trajectories_max_points', int),
             ('reference_trajectories_sample_step_s', 'reference_trajectories_sample_step_s', float),
@@ -552,5 +567,8 @@ class SystemLoader:
             atmosphere_color=self.hex_to_rgb(entry["atmosphere_color"]) if "atmosphere_color" in entry else (255, 255, 255),
             has_atmosphere=entry.get("has_atmosphere", False),
             atmos_density=entry.get("atmos_density", 0.0),
-            light_intensity=entry.get("light_intensity", 0.0)
+            light_intensity=entry.get("light_intensity", 0.0),
+            style_seed=entry.get("style_seed"),
+            style_mode=entry.get("style_mode"),
+            style_shape=entry.get("style_shape")
         )

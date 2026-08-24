@@ -151,8 +151,30 @@ class world:
             parent_pos = body.is_moon_of.position if body.is_moon_of else None
             mu = self.G * body.is_moon_of.mass if body.is_moon_of else None
 
-            # Advance position; record epoch so position_at_time can extrapolate
-            # correctly during the next update_dynamics call.
+            # DIE EPOCHE GEHOERT ZUR REIHENFOLGE, UND DIE IST
+            # `update_dynamics(dt)` DANN `update_planets(dt)`
+            # (test.py::update). In dieser reihenfolge hat `self.time` bereits
+            # das ende des chunks erreicht, wenn hier `body.theta` um genau
+            # diesen chunk vorgeschrieben wird -- bookmark und winkel gehoeren
+            # also zusammen, und der naechste `update_dynamics`-aufruf liest
+            # sie richtig.
+            #
+            # DREHT MAN DIE REIHENFOLGE UM, IST ES FALSCH, und zwar
+            # erster ordnung im chunk: `position_at_time(tau)` liefert dann
+            # systematisch die position bei `tau + dt`, jeder geskriptete
+            # koerper steht fuer die kraftrechnung des schiffs einen chunk in
+            # der zukunft. Gemessen (erdumlaufbahn rp 2e7 m, e = 0.3, abstand
+            # der welt von der analytisch propagierten predictor-linie nach
+            # 4800 s):
+            #
+            #   chunk                       1000 s    300 s     5 s
+            #   dynamics, planets (spiel)   5.2e1 m   5.2e1 m   5.2e1 m
+            #   planets, dynamics           9.4e6 m   3.9e6 m   7.4e4 m
+            #
+            # Wer die aufrufe also vertauscht, verschiebt die bahn um
+            # kilometer -- und weil der fehler mit dem chunk waechst, um so
+            # mehr, je hoeher die raffung. `tests/warp_predictor_test.py`
+            # tut genau das in seinem `advance()`-helfer; §18 misst es.
             body.position = body.orbit_position(dt, parent_pos, mu)
             body._kepler_ref_theta = body.theta
             body._kepler_ref_time = self.time

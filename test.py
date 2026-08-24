@@ -154,6 +154,28 @@ def main():
     # Default = num_points * base precision, so initial output is unchanged.
     PREDICTOR_BASE_LENGTH = predictor.num_points * predictor.precision
     predictor.set_length(PREDICTOR_BASE_LENGTH)
+    # DAS PUNKTBUDGET WAECHST MIT DEM HORIZONT.
+    #
+    # `_horizon_spacing_floor()` ist `length / num_points` -- bei festem
+    # budget verdoppelt jedes '+' also nicht nur den bogen, sondern auch den
+    # PUNKTABSTAND. Die zahl der stuetzstellen JE UMLAUF halbiert sich damit
+    # bei jedem druck, und irgendwann ueberspannt eine stuetzweite einen
+    # nennenswerten teil der bahn: das kubische Hermite-polynom zwischen zwei
+    # solchen punkten ist die bahn dann nicht mehr, die linie wird zu beulen
+    # mit knicken dazwischen. In einer 2e7-m-erdumlaufbahn sind das 180
+    # stuetzstellen je umlauf im grundzustand, 22 bei 8x und 5.6 bei 32x.
+    #
+    # Also waechst `num_points` mit, bis zur decke `predictor.max_num_points`
+    # -- der punktabstand bleibt dann konstant und mit ihm das detail je
+    # umlauf. Das ist billig: der integrator muss denselben bogen ueberdecken
+    # wie vorher, die schrittzahl aendert sich also nicht; teurer werden nur
+    # die ausgabe und die arrays.
+    PREDICTOR_BASE_SPACING = (PREDICTOR_BASE_LENGTH
+                              / max(1, int(predictor.num_points)))
+    PREDICTOR_MAX_POINTS = max(
+        int(predictor.num_points),
+        int(config.get('predictor.max_num_points', 40000)),
+    )
     # Der horizont ist ein PRODUKT: basis * manuell ('+'/'-') * raffung.
     # Der raffungs-anteil kommt aus predictor_warp_length_mult(); ohne ihn
     # deckt die linie bei 1 y/s nur 2.1 tage einer 45-jahre-reise ab und der
@@ -462,6 +484,17 @@ def main():
         # genau die den halt am leben haelt (siehe predictor_warp_length_mult).
         if hasattr(predictor, 'set_display_length'):
             predictor.set_display_length(drawn if wanted > drawn else None)
+        # Punktbudget zuerst, damit `set_length` gleich darauf arbeitet.
+        # WEICH: der zeitraffer-schritt verstellt den horizont bei jedem
+        # stufenwechsel und damit auch das budget -- ein harter reset waere
+        # genau der ruckler, den set_length(soft) schon einmal beseitigt hat
+        # (34-82 ms im hauptthread, siehe §17).
+        points_wanted = int(min(
+            PREDICTOR_MAX_POINTS,
+            max(1, math.ceil(wanted / max(PREDICTOR_BASE_SPACING, 1e-9))),
+        ))
+        if points_wanted != int(predictor.num_points):
+            predictor.set_num_points(points_wanted, soft=True)
         current = predictor.length
         if current is not None and abs(current - wanted) <= wanted * 1e-9:
             return

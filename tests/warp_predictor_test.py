@@ -74,11 +74,31 @@ def build(async_compute=False, fast_integrator=True):
 
 
 def advance(w, sim_seconds):
+    """Ein weltschritt -- IN DER REIHENFOLGE DES SPIELS.
+
+    `test.py::update` ruft erst `update_dynamics`, dann `update_planets`.
+    Diese reihenfolge ist nicht beliebig: `update_planets` schreibt
+    `body.theta` um einen ganzen chunk vor und merkt sich `self.time` als
+    epoche -- die dann bereits das chunk-ende ist, weil `update_dynamics`
+    die uhr schon gestellt hat. Vertauscht liegt der bookmark einen chunk
+    daneben, und `position_at_time` liefert jeden geskripteten koerper einen
+    chunk ZU FRUEH BZW. ZU SPAET. Gemessen (erdumlaufbahn rp 2e7 m, e = 0.3,
+    abstand der welt von der analytisch propagierten predictor-linie nach
+    4800 s):
+
+        chunk                       1000 s    300 s     5 s
+        dynamics, planets (spiel)   5.2e1 m   5.2e1 m   5.2e1 m
+        planets, dynamics           9.4e6 m   3.9e6 m   7.4e4 m
+
+    Dieser helfer hatte die reihenfolge vertauscht und hat den halt damit
+    gegen eine welt gemessen, die das spiel so gar nicht rechnet. §18 haelt
+    die aussage jetzt ausdruecklich fest.
+    """
     steps = max(1, int(math.ceil(sim_seconds / MAX_SUBSTEP)))
     dt = sim_seconds / steps
     for _ in range(steps):
-        w.update_planets(dt)
         w.update_dynamics(dt)
+        w.update_planets(dt)
 
 
 def arc_length(points):
@@ -1346,6 +1366,10 @@ print("17. Der wechsel der zeitraffer-stufe haelt den hauptthread nicht an")
 _W17_TICK = 180.0
 _W17_FRAME_DT = 1.0 / _W17_TICK
 _W17_BASE = None
+# Punktbudget-parameter wie in test.py: der punktabstand des grundzustands
+# und die decke aus config.json.
+_W17_SPACING = None
+_W17_MAX_POINTS = 40000
 
 
 def _w17_mult(rate):
@@ -1365,8 +1389,9 @@ def _w17_step(w, sim_seconds):
     steps = max(1, int(math.ceil(sim_seconds / chunk)))
     sub = sim_seconds / steps
     for _ in range(steps):
-        w.update_planets(sub)
+        # reihenfolge wie test.py::update -- siehe advance()
         w.update_dynamics(sub)
+        w.update_planets(sub)
 
 
 def _w17_frame(w, ship, p, rate):
@@ -1376,6 +1401,14 @@ def _w17_frame(w, ship, p, rate):
     changed = False
     if hasattr(p, 'set_display_length'):
         p.set_display_length(drawn if wanted > drawn else None)
+    # Das punktbudget waechst mit dem horizont mit (apply_predictor_horizon):
+    # auch das muss WEICH gehen, sonst kostet jeder stufenwechsel wieder
+    # einen synchronen neuaufbau im hauptthread.
+    _budget = int(min(_W17_MAX_POINTS,
+                      max(1, math.ceil(wanted / _W17_SPACING))))
+    if _budget != int(p.num_points):
+        p.set_num_points(_budget, soft=True)
+        changed = True
     if p.length is None or abs(p.length - wanted) > wanted * 1e-9:
         p.set_length(wanted)
         changed = True
@@ -1440,6 +1473,7 @@ _DOWN = [(31557600.0, 8640000.0, "1y/s -> 100d/s"),
 for _from, _to, _label in _UP + _DOWN:
     _w17, _ship17, _p17 = build(async_compute=True)
     _W17_BASE = float(_p17.length)
+    _W17_SPACING = _W17_BASE / max(1, int(_p17.num_points))
     try:
         _sw, _quiet, _minpts, _mindrawn, _arrived = _w17_transition(_w17, _ship17, _p17, _from, _to)
         # (a) Der wechsel-frame darf nicht aus der reihe fallen. Die schranke
@@ -1465,6 +1499,387 @@ for _from, _to, _label in _UP + _DOWN:
               else f"nie erreicht (laenge {_p17.length:.3e} m)")
     finally:
         _p17.close()
+
+
+# ══════════════ 18. die welt haelt sich an dieselbe bahn wie die vorhersage
+
+print()
+print("18. Welt und vorhersage rechnen dieselbe bahn")
+
+# ZWEI AUSSAGEN, UND DIE ERSTE IST EINE UEBER DIE REIHENFOLGE.
+#
+# `update_planets(dt)` schreibt `body.theta` um einen ganzen chunk vor und
+# merkt sich `self.time` als epoche. Das stimmt genau dann, wenn
+# `update_dynamics(dt)` VORHER lief und die uhr schon gestellt hat -- die
+# reihenfolge aus `test.py::update`. Vertauscht liegt der bookmark einen
+# chunk daneben und `position_at_time(tau)` liefert systematisch die
+# position bei `tau + dt`: jeder geskriptete koerper steht fuer die
+# kraftrechnung des schiffs einen chunk in der zukunft.
+#
+# Der fehler ist ERSTER ORDNUNG im chunk -- und `step_simulation()` rechnet
+# in `max_substep_seconds` = 1000 s grossen chunks, im zeitraffer sogar
+# `max(MAX_SUBSTEP, ceiling)`. Er faellt in echtzeit nicht auf, weil die
+# linie jeden frame neu gerechnet und am schiff verankert wird; im
+# zeitraffer steht sie still und das schiff rutscht an ihr entlang, dann
+# sieht man ihn sofort.
+#
+# Geprueft wird die groesse selbst, nicht die umsetzung: eine konvergierte
+# integration darf nicht davon abhaengen, wie fein man den weg zerlegt.
+
+from vec import Vec2 as _Vec2
+
+
+def _earth_orbit_scene(rp=2.0e7, ecc=0.3):
+    """Schiff auf eine bekannte bahn um die Erde setzen."""
+    config = ConfigLoader(None)
+    config.load()
+    bs = SystemLoader("solar_system.json").load()
+    w = World(G)
+    w.body = bs
+    config.apply_to_world(w)
+    ship = next(b for b in bs if b.is_ship)
+    erde = next(b for b in bs if b.name == "Erde")
+    erde_index = bs.index(erde)
+    w.update_planets(1.0)
+    q0 = erde.position_at_time(w.time)
+    q1 = erde.position_at_time(w.time + 10.0)
+    mu = G * erde.mass
+    ship.position = _Vec2(erde.position.x + rp, erde.position.y)
+    ship.velocity = _Vec2((q1.x - q0.x) / 10.0,
+                          (q1.y - q0.y) / 10.0
+                          + math.sqrt(mu * (1.0 + ecc) / rp))
+    p = Predictor(recompute_every_update=True, **config.predictor_kwargs())
+    config.apply_to_predictor(p)
+    p.set_length(p.num_points * p.precision)
+    p.async_compute = True
+    p.set_reference_body_index(erde_index)
+    period = 2.0 * math.pi * math.sqrt((rp / (1.0 - ecc)) ** 3 / mu)
+    return w, ship, p, erde, period
+
+
+def _hermite_at(points, t):
+    """Die linie KUBISCH auswerten -- so zeichnet der renderer sie auch.
+
+    Linear zwischen den stuetzstellen zu interpolieren misst die SEHNE, nicht
+    die kurve: bei 1e6 m punktabstand und r = 2e7 m sind das schon
+    c^2/8R = 6 km, und jede aussage hier ginge darin unter.
+    """
+    ts = points[:, 2]
+    i = int(np.searchsorted(ts, t))
+    if i <= 0 or i >= len(ts):
+        return None
+    t0 = float(ts[i - 1]); t1 = float(ts[i])
+    h = t1 - t0
+    if h <= 0.0:
+        return None
+    u = (t - t0) / h
+    h00 = 2 * u ** 3 - 3 * u ** 2 + 1
+    h10 = u ** 3 - 2 * u ** 2 + u
+    h01 = -2 * u ** 3 + 3 * u ** 2
+    h11 = u ** 3 - u ** 2
+    return (h00 * points[i - 1, 0] + h10 * h * points[i - 1, 3]
+            + h01 * points[i, 0] + h11 * h * points[i, 3],
+            h00 * points[i - 1, 1] + h10 * h * points[i - 1, 4]
+            + h01 * points[i, 1] + h11 * h * points[i, 4])
+
+
+# (a) DIE ZERLEGUNG IN CHUNKS DARF DIE BAHN NICHT VERSCHIEBEN -- in der
+#     reihenfolge des spiels. Wer die beiden aufrufe vertauscht, faellt hier
+#     um drei groessenordnungen durch.
+_TOTAL18 = 4800.0
+
+
+def _walk18(chunk, dyn_first=True):
+    w, ship, p, _erde, _T = _earth_orbit_scene()
+    try:
+        p.async_compute = False
+        p.set_view_scale(1e-5)
+        p.update(ship, w)
+        line = np.array(p.points, dtype=np.float64)
+    finally:
+        p.close()
+    steps = int(round(_TOTAL18 / chunk))
+    dt = _TOTAL18 / steps
+    for _ in range(steps):
+        if dyn_first:
+            w.update_dynamics(dt)
+            w.update_planets(dt)
+        else:
+            w.update_planets(dt)
+            w.update_dynamics(dt)
+    q = _hermite_at(line, float(w.time))
+    if q is None:
+        return None
+    return math.hypot(float(ship.position.x) - q[0],
+                      float(ship.position.y) - q[1])
+
+
+_d_game = {c: _walk18(c) for c in (1000.0, 300.0, 5.0)}
+_d_swapped = _walk18(1000.0, dyn_first=False)
+
+check(max(_d_game.values()) < 1.0e3,
+      "das schiff bleibt auf der vorhergesagten linie, bei jeder chunk-groesse",
+      "  ".join(f"{c:.0f}s: {d:.3e} m" for c, d in sorted(_d_game.items())))
+check(abs(_d_game[1000.0] - _d_game[5.0]) < 1.0,
+      "und die bahn haengt nicht davon ab, wie fein man sie zerlegt",
+      f"1000 s gegen 5 s: {abs(_d_game[1000.0] - _d_game[5.0]):.3e} m")
+# Gegenprobe: mit vertauschten aufrufen muss es deutlich schlechter werden,
+# sonst prueft (a) gar nicht die reihenfolge.
+check(_d_swapped > _d_game[1000.0] * 100.0,
+      "vertauschte reihenfolge (planets vor dynamics) faellt durch",
+      f"{_d_swapped:.3e} m gegen {_d_game[1000.0]:.3e} m")
+
+
+# (b) UND SO SIEHT ES DER SPIELER: im zeitraffer, ueber mehrere umlaeufe.
+#
+# Im halt wird die kurve NICHT neu gerechnet -- das schiff rutscht an einer
+# stehenden linie entlang, jede abweichung steht also unmittelbar auf dem
+# schirm. `hold_drift_max_px` ist die schranke dagegen: wird der seitliche
+# versatz groesser als ein halbes pixel, fordert der halt ASYNCHRON eine
+# neue kurve an (siehe Predictor._hold_advance) statt weiter zu driften.
+
+VIEW_SCALE_18 = 1e-5          # px/m -- eine erdumlaufbahn fuellt damit den schirm
+WARP_18 = 3600.0              # 1 h/s
+FRAMES_18 = 1200
+
+
+def _lateral_drift(points, ship):
+    ax = float(points[1, 0]); ay = float(points[1, 1])
+    bx = float(points[2, 0]); by = float(points[2, 1])
+    dx = bx - ax; dy = by - ay
+    chord = math.hypot(dx, dy)
+    if chord <= 0.0:
+        return 0.0
+    return abs((float(ship.position.x) - ax) * dy
+               - (float(ship.position.y) - ay) * dx) / chord
+
+
+w, ship, p, erde, period18 = _earth_orbit_scene()
+p.set_view_scale(VIEW_SCALE_18)
+p.update(ship, w)
+p.set_hold(True)
+drifts = []
+false_markers = 0
+try:
+    for _ in range(FRAMES_18):
+        advance(w, WARP_18 / 60.0)
+        p.update(ship, w)
+        pts = p.points
+        if pts.shape[0] < 6:
+            break
+        drifts.append(_lateral_drift(pts, ship))
+        dt_pt = float(pts[3, 2]) - float(pts[2, 2])
+        for row in p.get_apsis_markers():
+            offset = float(row[2]) - float(w.time)
+            if not (0.0 <= offset <= 4.0 * dt_pt):
+                continue
+            # Auf einem echten apsis-durchgang gehoert die fahne dorthin.
+            # Falsch ist sie, wenn der abstand an dieser stelle noch monoton
+            # laeuft -- dann gibt es dort gar kein extremum.
+            r = []
+            for i in range(6):
+                q = erde.position_at_time(float(pts[i, 2]))
+                r.append(math.hypot(float(pts[i, 0]) - q.x,
+                                    float(pts[i, 1]) - q.y))
+            rising = all(r[i + 1] > r[i] for i in range(5))
+            falling = all(r[i + 1] < r[i] for i in range(5))
+            if (rising and float(row[3]) >= 0.5) or (falling and float(row[3]) < 0.5):
+                false_markers += 1
+finally:
+    p.close()
+
+drifts = np.array(drifts)
+worst_px = float(drifts.max()) * VIEW_SCALE_18
+check(worst_px < 0.5,
+      "im zeitraffer bleibt das schiff auf der gehaltenen linie",
+      f"groesster seitlicher versatz {drifts.max():.3e} m = {worst_px:.3f} px "
+      f"ueber {len(drifts)} frames "
+      f"({len(drifts) * (WARP_18 / 60.0) / period18:.1f} umlaeufe)")
+check(false_markers == 0,
+      "und keine Ap/Pe-fahne sitzt auf dem schiff, wo es gar kein extremum gibt",
+      f"{false_markers} von {len(drifts)} frames")
+
+# (c) Die schranke ist ein PIXELMASS, kein weltmass -- und sie laesst sich
+#     abschalten. Eine weltlaenge waere auf jeder zoomstufe etwas anderes:
+#     dieselben 50 km sind einmal unsichtbar und einmal fingerdick.
+_wl18, _shipl18, _pl18, _el18, _Tl18 = _earth_orbit_scene()
+try:
+    _pl18.hold_drift_max_px = 0.5
+    _pl18.set_view_scale(1e-5)
+    check(abs(_pl18._hold_drift_limit_m() - 0.5 / 1e-5) < 1e-6,
+          "die schranke rechnet pixel in meter um",
+          f"0.5 px bei 1e-5 px/m = {_pl18._hold_drift_limit_m():.1f} m")
+    _pl18.set_view_scale(1e-3)
+    check(abs(_pl18._hold_drift_limit_m() - 0.5 / 1e-3) < 1e-6,
+          "und zwar mit dem zoom, nicht fest",
+          f"0.5 px bei 1e-3 px/m = {_pl18._hold_drift_limit_m():.1f} m")
+    _pl18.hold_drift_max_px = 0.0
+    check(_pl18._hold_drift_limit_m() == float('inf'),
+          "0 px heisst AUS, nicht 'null meter erlaubt'",
+          f"{_pl18._hold_drift_limit_m()}")
+finally:
+    _pl18.close()
+
+
+# ═════════════════ 19. der vorangestellte kopf faelscht die apsis-suche nicht
+
+print()
+print("19. Der selbst vorangestellte kopf faelscht die apsis-suche nicht")
+
+# Der kopf im halt ist die WELT-position des schiffs, nicht ein punkt dieser
+# kurve. Als startwert des trend-scans gelesen kippt sein sprung die
+# richtung, und die suche meldet ein extremum bei index 1 -- eine fahne
+# direkt auf dem schiff. Geprueft wird am kern selbst: dieselbe kurve, ein
+# kuenstlich versetzter kopf, einmal mit und einmal ohne `skip_head`.
+
+from predictor import _find_apsis_markers_numba as _apsis_kernel
+
+_w19, _ship19, _p19, _erde19, _ = _earth_orbit_scene()
+try:
+    _p19.async_compute = False
+    _p19.set_view_scale(VIEW_SCALE_18)
+    _p19.update(_ship19, _w19)
+    _snap19 = _p19._last_swapped_snapshot
+    _pts19 = np.array(_p19.points, dtype=np.float64)
+
+    def _scan(points, skip_head):
+        out, count = _apsis_kernel(
+            points, float(_snap19.get("sim_time", 0.0)),
+            int(_snap19.get("reference_body_index", -1)),
+            _snap19["body_x"], _snap19["body_y"], _snap19["body_m"],
+            _snap19["body_scripted"], _snap19["body_a"], _snap19["body_e"],
+            _snap19["body_theta"], _snap19["body_arg"], _snap19["body_parent"],
+            float(_snap19["G"]),
+            1 if bool(_snap19.get("use_time_dependent_bodies", True)) else 0,
+            int(_p19.apsis_max_markers), int(skip_head),
+        )
+        return out[:int(count)].copy()
+
+    clean = _scan(_pts19, 0)
+
+    # DEN KOPF SO VERSETZEN, WIE ES DER HALT TUT: RADIAL.
+    #
+    # Der kopf ist die welt-position des schiffs; sie weicht radial von der
+    # kurve ab. Entscheidend ist die RICHTUNG: laeuft der abstand am anfang
+    # der kurve nach oben, muss der kopf nach AUSSEN, dann sieht der scan
+    # zuerst ein fallen und meldet gleich darauf eine periapsis. Laeuft er
+    # nach unten, umgekehrt. Der betrag (30 punktweiten) ist die
+    # groessenordnung, die im halt ueber ein paar umlaeufe wirklich entstand.
+    _erde_at = _erde19.position_at_time(float(_pts19[0, 2]))
+    _rx = float(_pts19[0, 0]) - _erde_at.x
+    _ry = float(_pts19[0, 1]) - _erde_at.y
+    _rlen = math.hypot(_rx, _ry)
+    _erde_at1 = _erde19.position_at_time(float(_pts19[3, 2]))
+    _r1 = math.hypot(float(_pts19[3, 0]) - _erde_at1.x,
+                     float(_pts19[3, 1]) - _erde_at1.y)
+    _outward = 1.0 if _r1 > _rlen else -1.0
+    _step_len = math.hypot(float(_pts19[2, 0]) - float(_pts19[1, 0]),
+                           float(_pts19[2, 1]) - float(_pts19[1, 1]))
+    bumped = _pts19.copy()
+    bumped[0, 0] += _outward * (_rx / _rlen) * _step_len * 30.0
+    bumped[0, 1] += _outward * (_ry / _rlen) * _step_len * 30.0
+
+    naive = _scan(bumped, 0)
+    guarded = _scan(bumped, 1)
+
+    def _first_index(markers, points):
+        """Wie weit vorn sitzt die erste fahne, in punkten?"""
+        if markers.shape[0] == 0:
+            return None
+        dt = float(points[3, 2]) - float(points[2, 2])
+        return (float(markers[0, 2]) - float(points[0, 2])) / max(dt, 1e-9)
+
+    naive_first = _first_index(naive, bumped)
+    guarded_first = _first_index(guarded, bumped)
+    clean_first = _first_index(clean, _pts19)
+
+    check(naive_first is not None and naive_first < 4.0,
+          "ohne die absicherung erzeugt der versetzte kopf eine fahne am schiff",
+          f"erste fahne bei {naive_first:.2f} punkten "
+          f"(unversetzt {clean_first:.1f})")
+    check(guarded_first is not None and guarded_first > 4.0,
+          "mit skip_head bleibt die fahne dort, wo sie ohne versatz war",
+          f"erste fahne bei {guarded_first:.2f} punkten "
+          f"(unversetzt {clean_first:.2f})")
+    check(guarded.shape[0] == clean.shape[0]
+          and bool(np.allclose(guarded[:, 2], clean[:, 2], rtol=0.0, atol=1e-6)),
+          "und sie meldet dieselben fahnen wie die ungestoerte kurve",
+          f"{guarded.shape[0]} gegen {clean.shape[0]} fahnen")
+    check(bool(np.array_equal(_scan(_pts19, 0), clean)),
+          "ohne halt (skip_head = 0) ist die suche bit-identisch",
+          "gleicher aufruf, gleiches ergebnis")
+finally:
+    _p19.close()
+
+
+# ═════════════ 20. die horizont-decke springt nicht ueber die bahn hinweg
+
+print()
+print("20. Ein langer horizont verbiegt die bahn nicht")
+
+# `rkn_adaptive_far_maxdt` hebt die schrittweiten-decke mit dem HORIZONT an,
+# damit ein weiter blick nicht mit der laenge teurer wird. Die decke kennt
+# aber die bahn nicht: nach ein paar '+'-druecken deckt EIN schritt einen
+# nennenswerten teil der umlaufzeit ab, und dann bestimmt nicht mehr die
+# fehlerkontrolle die schrittweite, sondern die decke. Gemessen in einer
+# erdumlaufbahn (rp 2e7 m, e = 0.6, T = 97 h) bei 64x horizont: die linie
+# wich gegen dieselbe rechnung mit fester decke um bis zu 6.0e7 m ab --
+# mehr, als die bahn gross ist.
+
+
+def _long_horizon_points(mult, adaptive, ecc=0.6):
+    w, ship, p, _erde, _period = _earth_orbit_scene(ecc=ecc)
+    try:
+        p.async_compute = False
+        p.auto_precision_from_zoom = False
+        p.rkn_adaptive_far_maxdt = bool(adaptive)
+        p.set_length(p.num_points * p.precision * mult)
+        p.reset()
+        p.update(ship, w)
+        return np.array(p.points, dtype=np.float64)
+    finally:
+        p.close()
+
+
+def _probe20(points, t):
+    ts = points[:, 2]
+    if t < ts[0] or t > ts[-1]:
+        return None
+    i = max(1, min(int(np.searchsorted(ts, t)), len(ts) - 1))
+    f = (t - ts[i - 1]) / max(1e-9, ts[i] - ts[i - 1])
+    return (points[i - 1, 0] + (points[i, 0] - points[i - 1, 0]) * f,
+            points[i - 1, 1] + (points[i, 1] - points[i - 1, 1]) * f)
+
+
+for _mult in (16, 64):
+    _fixed = _long_horizon_points(_mult, adaptive=False)
+    _raised = _long_horizon_points(_mult, adaptive=True)
+    _span20 = float(_fixed[-1, 2] - _fixed[0, 2])
+    _worst20 = 0.0
+    for _frac in (0.1, 0.5, 0.999):
+        _t20 = float(_fixed[0, 2]) + _span20 * _frac
+        _a20 = _probe20(_raised, _t20)
+        _b20 = _probe20(_fixed, _t20)
+        if _a20 and _b20:
+            _worst20 = max(_worst20, math.hypot(_a20[0] - _b20[0],
+                                                _a20[1] - _b20[1]))
+    check(_worst20 == 0.0,
+          f"{_mult}x horizont: dieselbe bahn wie mit fester schrittdecke",
+          f"groesste abweichung {_worst20:.3e} m ueber "
+          f"{_span20 / 3600.0:.0f} h")
+
+# Gegenprobe: im FERNFELD muss die decke weiterhin greifen, sonst waere der
+# riegel oben einfach ein "aus" fuer die ganze mechanik.
+_wf, _shipf, _pf = build()
+try:
+    _tchar = _wf.characteristic_timescale(_shipf)
+    _orbit_cap = _tchar / _pf.rkn_max_dt_timescale_divisor
+    check(_orbit_cap > _pf.rkn_max_dt_ceiling,
+          "im fernfeld bleibt der bahn-riegel weit ueber der decke",
+          f"bahn-riegel {_orbit_cap:.3e} s gegen decke "
+          f"{_pf.rkn_max_dt_ceiling:.3e} s (t_char {_tchar:.3e} s)")
+finally:
+    _pf.close()
 
 
 print()

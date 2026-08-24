@@ -211,8 +211,8 @@ if NUMBA_AVAILABLE:
         p2y = py + half_dt * vy + 0.125 * dt2 * k1_ay
         k2_ax, k2_ay = _rkn_acc_numba(p2x, p2y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
 
-        p3x = px + half_dt * vx + 0.125 * dt2 * k2_ax
-        p3y = py + half_dt * vy + 0.125 * dt2 * k2_ay
+        p3x = px + half_dt * vx + 0.125 * dt2 * k1_ax
+        p3y = py + half_dt * vy + 0.125 * dt2 * k1_ay
         k3_ax, k3_ay = _rkn_acc_numba(p3x, p3y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
 
         p4x = px + dt * vx + 0.5 * dt2 * k3_ax
@@ -889,8 +889,26 @@ if NUMBA_AVAILABLE:
             body_memo
         )
 
-        p3x = px + half_dt * vx + 0.125 * dt2 * k2_ax
-        p3y = py + half_dt * vy + 0.125 * dt2 * k2_ay
+        # DRITTE STUFE: k1, NICHT k2.
+        #
+        # Im klassischen RKN4 teilen sich k2 und k3 ihr argument -- genau
+        # diese identitaet ist der ganze vorteil des verfahrens (ordnung 4
+        # aus 3 kraftauswertungen, wo RK4 vier braucht). Mit `k2` hier
+        # unterscheiden sich die stufen, die ordnungsbedingung bricht, und
+        # man bezahlt die vierte auswertung fuer 3. ordnung.
+        #
+        # Die welt hat diesen fehler am 2026-08-18 verloren
+        # (world.py + world_kernels.py:147), der predictor NICHT -- er ist
+        # bis hierher 3. ordnung geblieben. Zwei verfahren auf derselben
+        # physik laufen aber auseinander, und weil die vorhersage die einzige
+        # ist, deren ergebnis man SIEHT, sah man es an ihr: gemessen in einer
+        # erdumlaufbahn (rp 2e7 m, e = 0.3) lag ihr apoapsis bei 3.7133e7 m,
+        # das der welt bei 3.7692e7 m -- 5.5e5 m auseinander nach EINEM
+        # umlauf, und beide fuer sich in der schrittweite auskonvergiert.
+        # Im zeitraffer, wo die kurve stehenbleibt und das schiff an ihr
+        # entlangrutscht, ist genau das das "schiff loest sich von der linie".
+        p3x = px + half_dt * vx + 0.125 * dt2 * k1_ax
+        p3y = py + half_dt * vy + 0.125 * dt2 * k1_ay
         k3_ax, k3_ay = _rkn_acc_time_numba(
             p3x, p3y, mid_t, ref_enabled, ref_index, ref_px, ref_py,
             body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
@@ -1588,6 +1606,7 @@ if NUMBA_AVAILABLE:
         G,
         use_time_dependent_bodies,
         max_markers,
+        skip_head,
     ):
         # sucht lokale extrema des abstands schiff<->referenzkörper entlang der
         # predictor-punkte (pts: (n,3) mit x, y, absoluter sim-zeit). der
@@ -1664,11 +1683,29 @@ if NUMBA_AVAILABLE:
                 d2_arr[i] = dx * dx + dy * dy
 
         # pass 2: trend-scan über den abstandsverlauf
-        best_d2 = d2_arr[0]
-        best_idx = 0
+        #
+        # `skip_head` sagt, ab welchem index die punkte einer GEMEINSAMEN
+        # rechnung entstammen. Im zeitraffer-halt stellt `_hold_advance` der
+        # gehaltenen kurve die tatsächliche schiffsposition als kopf voran --
+        # die stammt aus der WELT, nicht aus dieser kurve, und weicht deshalb
+        # um ein vielfaches eines normalen punktschritts von ihr ab (gemessen
+        # 37 km gegen 1.3 km reguläre schrittweite in einer erdumlaufbahn).
+        # Als startwert des trends gelesen kippt dieser sprung die richtung
+        # und der scan meldet ein extremum bei index 1 -- ein Ap/Pe-marker
+        # DIREKT AUF DEM SCHIFF, der von frame zu frame an- und ausgeht, weil
+        # der sprung die hysterese mal reisst und mal nicht. Der kopf wird
+        # deshalb gar nicht erst gelesen; `best_idx > skip_head` unterdrückt
+        # zusätzlich ein extremum unmittelbar dahinter.
+        start = skip_head
+        if start < 0:
+            start = 0
+        if start > n - 2:
+            start = n - 2
+        best_d2 = d2_arr[start]
+        best_idx = start
         trend = 0  # 0 unbestimmt, 1 steigend, -1 fallend
 
-        for i in range(1, n):
+        for i in range(start + 1, n):
             if count >= max_markers:
                 break
             d2 = d2_arr[i]
@@ -1695,8 +1732,8 @@ if NUMBA_AVAILABLE:
                     best_idx = i
                 elif d2 < best_d2 - hyst:
                     # trend kippt nach unten: verfolgtes maximum = apoapsis.
-                    # best_idx == 0 (schiffsposition) wird unterdrückt.
-                    if best_idx > 0:
+                    # best_idx == start (schiffsposition) wird unterdrückt.
+                    if best_idx > start:
                         rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx)
                         out[count, 0] = rx
                         out[count, 1] = ry
@@ -1712,7 +1749,7 @@ if NUMBA_AVAILABLE:
                     best_d2 = d2
                     best_idx = i
                 elif d2 > best_d2 + hyst:
-                    if best_idx > 0:
+                    if best_idx > start:
                         rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx)
                         out[count, 0] = rx
                         out[count, 1] = ry
@@ -2363,6 +2400,10 @@ class Predictor:
         # See _make_snapshot.
         self.rkn_adaptive_far_maxdt = True
         self.rkn_far_field_target_steps = 1250.0
+        # Bruchteil der bahn-zeitskala (sqrt(r/|g|) = T/2pi auf der kreisbahn),
+        # den ein integrator-schritt hoechstens ueberdecken darf, wenn der
+        # horizont die decke anhebt. Siehe _make_snapshot.
+        self.rkn_max_dt_timescale_divisor = 30.0
         self.rkn_max_dt_ceiling = 30000.0
         # Gemessene MITTLERE inverse geschwindigkeit ueber den horizont (s/m):
         # zeitspanne des letzten laufs geteilt durch seine bogenlaenge. 0.0 =
@@ -2552,6 +2593,10 @@ class Predictor:
         self._apsis_soft_stale = False
         self._apsis_last_scan_ts = 0.0
         self.apsis_hold_rescan_s = 0.25
+        # Generation der punkteliste: steigt bei jeder NEUEN kurve (swap,
+        # neuberechnung, reset), nicht beim verbrauchen/anstueckeln im halt.
+        self._points_generation = 0
+        self._apsis_scan_generation = -1
 
         # Zeitraffer-halt (siehe _hold_advance). Standardmaessig AUS -- die
         # hauptschleife schaltet ihn ein, sobald der zeitraffer ueber die
@@ -2576,6 +2621,19 @@ class Predictor:
         self.hold_refresh_fraction = 0.25
         # Ueber wie viele punkte die kopf-korrektur abklingt.
         self.hold_taper_points = 64
+        # Hoechstens so viele punkte je frame hinten anstueckeln (siehe
+        # _hold_advance): verteilt einen budget-sprung ueber mehrere frames.
+        self.hold_extend_max_points = 1000
+        # WIE WEIT DARF DAS SCHIFF NEBEN DER GEHALTENEN KURVE LIEGEN?
+        # In PIXELN, weil genau das die groesse ist, die man sieht -- und
+        # weil eine weltlaenge auf jeder zoomstufe etwas anderes bedeutet.
+        # Siehe _hold_advance.
+        self.hold_drift_max_px = 0.5
+        # Untergrenze in metern, damit ein extremer zoom nicht in jedem frame
+        # nachrechnen laesst (dann waere der halt wirkungslos).
+        self.hold_drift_min_m = 1.0
+        # Letzter gemessener seitlicher versatz (diagnose/tests).
+        self.hold_drift_m = 0.0
         # GERECHNETE laenge und GEZEICHNETE laenge sind nicht dasselbe.
         # Im zeitraffer muss die kurve viel weiter reichen, als man sieht --
         # sonst laeuft der halt leer (bei 1 y/s frisst EIN frame den ganzen
@@ -3115,10 +3173,36 @@ class Predictor:
 
                 last_gx = self._last_seen_gx
                 last_gy = self._last_seen_gy
-                if last_gx is None or last_gy is None:
-                    # Ohne vorwert die alte, grosszuegige schranke nehmen --
-                    # lieber eine anforderung verpassen als im zeitraffer die
-                    # gehaltene kurve zu zerreissen.
+                # DIE KRUEMMUNGS-SCHRANKE GILT NUR, SOLANGE DER SCHRITT DIE
+                # BAHN UEBERHAUPT AUFLOEST.
+                #
+                # `|g_jetzt - g_vorher|` misst, wie stark sich die schwerkraft
+                # ueber den schritt geaendert hat -- ein gutes mass fuer den
+                # fehler von `g * dt`, solange sich g dazwischen stetig
+                # bewegt. Deckt ein schritt aber MEHRERE UMLAEUFE ab (7 d/s
+                # sind 28 stunden je bild, auf einer 2-stunden-bahn), dann
+                # sind anfangs- und endwert unkorreliert: sie koennen zufaellig
+                # dicht beieinander liegen, die schranke faellt zusammen und
+                # der ganz normale gleitflug reisst sie. Gemessen auf der
+                # e = 0.7-bahn bei 100800 s je schritt: rest 2.46e3 m/s gegen
+                # eine schranke von 1.20e3 m/s -- ein bild von sechs, ohne
+                # jeden schub.
+                #
+                # Oberhalb der bahn-zeitskala (`sqrt(r/|g|)`, auf der
+                # kreisbahn T/2pi -- dieselbe groesse, die den zeitraffer
+                # deckelt) traegt der vergleich also nichts mehr, und es
+                # bleibt die alte, grosszuegige schranke. Das ist die
+                # richtige seite des irrtums: schub gibt es dort ohnehin
+                # nicht (`test.py` sperrt ihn oberhalb von
+                # `realtime_warp_max`), eine verpasste anforderung kostet
+                # nichts -- eine falsche zerreisst die gehaltene kurve.
+                resolves_orbit = True
+                try:
+                    t_char = self._characteristic_timescale(world, ship)
+                    resolves_orbit = t_char is None or span <= t_char
+                except Exception:
+                    resolves_orbit = True
+                if last_gx is None or last_gy is None or not resolves_orbit:
                     curvature_dv = math.hypot(gx, gy) * span
                 else:
                     curvature_dv = math.hypot(gx - float(last_gx), gy - float(last_gy)) * span
@@ -3733,6 +3817,19 @@ class Predictor:
         if drop > 0:
             budget = self._get_target_point_cap()
             missing = int(budget) - int(self.points.shape[0])
+            # JE FRAME NUR EIN STUECK. Normal sind das die punkte, die vorn
+            # gerade verbraucht wurden (bei 7d/s rund 170) -- die schranke
+            # merkt man dort nicht. Sie greift, wenn das BUDGET springt:
+            # `apply_predictor_horizon` zieht mit dem zeitraffer-schritt auch
+            # das punktbudget mit, beim wechsel 7d/s -> 30d/s von 10 000 auf
+            # 40 000. Die fehlenden 30 000 punkte in EINEM frame anzustueckeln
+            # kostete gemessen 40.3 ms im hauptthread (nachbarframes 0.3 ms) --
+            # genau der ruckler, den §17 fuer set_length schon beseitigt hat.
+            # Verteilt ueber ein paar frames faellt er nicht auf, und die
+            # bestellte neue kurve ist ohnehin schon unterwegs.
+            cap = int(getattr(self, 'hold_extend_max_points', 1000) or 0)
+            if cap > 0 and missing > cap:
+                missing = cap
             if missing > 0:
                 self._hold_extend_tail(missing)
             points = self.points
@@ -3741,6 +3838,22 @@ class Predictor:
         remaining = points.shape[0]
         refresh_at = max(4, int(target_points * float(getattr(
             self, 'hold_refresh_fraction', 0.25))))
+        # LAEUFT SCHON EINE NEUE KURVE, IST DIE SCHWELLE EINE ANDERE.
+        #
+        # Sie misst den vorrat am ANGEPEILTEN budget. Waechst das budget
+        # sprunghaft -- der zeitraffer-schritt zieht ueber
+        # `apply_predictor_horizon` den horizont UND das punktbudget mit, beim
+        # wechsel 7d/s -> 30d/s von 10 000 auf 40 000 --, dann rutscht die
+        # noch vollstaendige kurve allein durch die neue bezugsgroesse unter
+        # die schwelle, und der halt rechnet SYNCHRON nach: gemessen 43.8 ms
+        # im hauptthread gegen 0.3 ms in den nachbarframes.
+        #
+        # Ist der ersatz bereits unterwegs (`_hold_pending_swap`), kann die
+        # linie gar nicht auslaufen -- dann genuegt eine absolute
+        # not-schwelle. Kommt der auftrag nicht an, raeumt `update()` das
+        # flag ab und der harte weg steht im naechsten frame wieder offen.
+        if getattr(self, '_hold_pending_swap', False):
+            refresh_at = max(4, int(target_points * 0.02))
         if remaining < refresh_at:
             # Vorrat zu klein -> normaler weg rechnet nach (und der halt
             # greift danach wieder). Das ist die failsafe-schwelle.
@@ -3763,7 +3876,77 @@ class Predictor:
                 self._hold_synthetic_head = False
                 return False
 
+            # DER HALT BRAUCHT EINE OBERGRENZE FUER DEN SEITLICHEN VERSATZ.
+            #
+            # Die pruefung darueber misst den abstand ENTLANG der bahn und
+            # laesst vier punktweiten zu -- an einer seitlichen abweichung
+            # geht sie deshalb blind vorbei. Und der vorrat laeuft nie leer,
+            # weil `_hold_extend_tail` hinten nachlegt: gemessen 0 volle
+            # neuberechnungen in 3000 frames. Die gehaltene kurve wurde also
+            # EINMAL gerechnet und danach nie wieder mit der welt verglichen.
+            #
+            # Welt und predictor rechnen aber nicht dasselbe (andere
+            # schrittweiten, und die welt setzt die planeten ueber
+            # `bodies.position_at_time` mit konstanter winkelrate, der
+            # predictor mit echtem Kepler-solve). Der unterschied summiert
+            # sich. Gemessen in einer erdumlaufbahn (rp 2e7 m, e = 0.3) bei
+            # 1 h/s ueber 2.5 umlaeufe: das schiff steht am ende **3.9e5 m
+            # = 1.96 % des bahnradius** neben der linie, und in einer
+            # sonnenumlaufbahn ueber 350 tage 4.2e5 m. Das ist genau das
+            # "schiff loest sich von der linie" -- und es verschwindet beim
+            # verlassen des zeitraffers, weil `set_hold(False)` hart entwertet.
+            #
+            # Gemessen wird SENKRECHT zur kurve (die laengsrichtung ist
+            # bereits durch den kopf abgedeckt) an den beiden ersten echten
+            # stuetzstellen -- der kopf ist ja das schiff selbst.
+            #
+            # Die schwelle ist ein PIXELMASS, weil nur das sichtbar ist:
+            # dieselbe weltlaenge ist zoom-abhaengig entweder unsichtbar oder
+            # fingerdick. Angefordert wird ASYNCHRON (derselbe weg wie beim
+            # stufenwechsel) -- die alte kurve bleibt stehen, bis die neue da
+            # ist, es gibt also keinen ruckler und kein springen.
+            dxs = float(points[2, 0]) - float(points[1, 0])
+            dys = float(points[2, 1]) - float(points[1, 1])
+            chord = math.hypot(dxs, dys)
+            if chord > 0.0:
+                drift = abs((sx - float(points[1, 0])) * dys
+                            - (sy - float(points[1, 1])) * dxs) / chord
+            else:
+                drift = 0.0
+            self.hold_drift_m = drift
+            #
+            # Getaktet wird das NICHT ueber eine uhr, sondern ueber
+            # `_hold_pending_swap`: solange ein auftrag laeuft, wird kein
+            # zweiter gestellt. Damit stellt sich die auffrischrate von
+            # selbst auf "eine je rechendauer" ein -- dieselbe selbstregelung
+            # wie beim schub. Eine feste echtzeit-sperre (0.25 s) war
+            # nachweislich zu grob: gemessen 4 auffrischungen ueber 1500
+            # frames, und der versatz lief zwischendurch wieder auf 4.4e5 m.
+            if (drift > self._hold_drift_limit_m()
+                    and not getattr(self, '_hold_pending_swap', False)):
+                self._request_hold_recompute(ship, world)
+
         return True
+
+    def _hold_drift_limit_m(self):
+        """Erlaubter seitlicher versatz des schiffs von der gehaltenen kurve.
+
+        Ein PIXELMASS, in meter umgerechnet -- siehe _hold_advance. Ohne
+        bekannte zoomstufe bleibt nur die untergrenze.
+        """
+        px = float(getattr(self, 'hold_drift_max_px', 0.5) or 0.0)
+        # px <= 0 heisst AUS -- keine anforderung, egal wie weit es auseinander
+        # laeuft. (Das ist auch der schalter, mit dem die gegenprobe im test
+        # das alte verhalten wiederherstellt.)
+        if px <= 0.0:
+            return float('inf')
+        scale = getattr(self, '_view_scale', None)
+        if scale is None or not math.isfinite(scale) or scale <= 0.0:
+            # Ohne bekannte zoomstufe gibt es kein pixelmass -- dann lieber
+            # nichts tun als eine weltlaenge zu raten.
+            return float('inf')
+        floor = float(getattr(self, 'hold_drift_min_m', 1.0) or 0.0)
+        return max(floor, px / scale)
 
     def _hold_extend_tail(self, wanted):
         """Hinten so viele punkte anstueckeln, wie vorn verbraucht wurden.
@@ -3884,6 +4067,12 @@ class Predictor:
                     setattr(self, attr, None)
                 except Exception:
                     pass
+        if not soft:
+            # NEUE GEOMETRIE -> die gemerkten marker gehoeren zu einer kurve,
+            # die es nicht mehr gibt. Der zaehler ist das, was der weiche weg
+            # in get_apsis_markers() dagegenhaelt: er darf nur filtern,
+            # solange die kurve DIESELBE ist, auf der er zuletzt gesucht hat.
+            self._points_generation = int(getattr(self, '_points_generation', 0)) + 1
         self._apsis_soft_stale = bool(soft)
 
     def _horizon_spacing_floor(self):
@@ -4017,6 +4206,32 @@ class Predictor:
             self._pending_future = None
             self._pending_job_id = 0
 
+    def _characteristic_timescale(self, world, ship):
+        """sqrt(r_dominant / |g_total|) am schiff, in sekunden -- oder None.
+
+        Dieselbe groesse, die `world.characteristic_timescale` fuer die
+        zeitraffer-obergrenze benutzt; sie wird hier durchgereicht, damit es
+        nur EINE definition davon gibt. Faellt die welt aus (tests reichen
+        manchmal nur ein objekt herein), gibt es None und die decke bleibt,
+        wie sie war.
+        """
+        if world is None or ship is None:
+            return None
+        fn = getattr(world, 'characteristic_timescale', None)
+        if fn is None:
+            return None
+        try:
+            value = fn(ship)
+        except Exception:
+            return None
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except Exception:
+            return None
+        return value if math.isfinite(value) and value > 0.0 else None
+
     def _make_snapshot(self, ship, world, max_points):
         effective_precision = self._effective_precision()
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
@@ -4063,7 +4278,30 @@ class Predictor:
                     time_per_arc = 1.0 / speed
             if time_per_arc > 0.0 and horizon_arc > 0.0:
                 desired = (horizon_arc * time_per_arc) / float(self.rkn_far_field_target_steps)
-                eff_max_dt = max(eff_max_dt, min(desired, float(self.rkn_max_dt_ceiling)))
+                ceiling = float(self.rkn_max_dt_ceiling)
+                # DIE DECKE DARF DIE BAHN NICHT UEBERSPRINGEN.
+                #
+                # `desired` kennt nur den horizont, nicht die bahn. Bei vielen
+                # '+'-druecken wird sie deshalb groesser als ein nennenswerter
+                # bruchteil der umlaufzeit -- und dann liegt die schrittweite
+                # nicht mehr an der fehlerkontrolle, sondern an der decke.
+                # Gemessen in einer erdumlaufbahn (rp 2e7 m, e = 0.6, T = 97 h)
+                # bei 64x horizont: die linie weicht gegen dieselbe rechnung
+                # mit fester decke (1500 s) um bis zu **6.0e7 m** ab, mehr als
+                # die bahn selbst gross ist -- die vorhersage zeigt dann
+                # schlicht eine andere bahn.
+                #
+                # Dieselbe schranke, die schon der zeitraffer benutzt:
+                # `sqrt(r_dominant/|g|)`, fuer eine kreisbahn genau T/2pi.
+                # Im FERNFELD (heliozentrisch, t_char ~ 5e6 s) ist sie um
+                # groessenordnungen groesser als die decke und aendert nichts
+                # -- der fernfeld-gewinn bleibt also unangetastet.
+                t_char = self._characteristic_timescale(world, ship)
+                if t_char is not None and t_char > 0.0:
+                    orbit_cap = t_char / max(1e-9, float(self.rkn_max_dt_timescale_divisor))
+                    if orbit_cap < ceiling:
+                        ceiling = orbit_cap
+                eff_max_dt = max(eff_max_dt, min(desired, ceiling))
 
         snapshot = {
             "ship_px": float(ship.position.x),
@@ -5117,6 +5355,15 @@ class Predictor:
                 pass
 
             self.points = points
+            # NEUE kurve -> abgeleitete zwischenergebnisse (apsis-marker) sind
+            # nicht bloss verschoben, sondern gehoeren zu einer anderen
+            # geometrie. Ohne das reichte der weiche weg im halt bis zu
+            # `apsis_hold_rescan_s` lang die marker der ALTEN kurve weiter --
+            # gemessen ein Pe/Ap-marker mit r = 3.71e7 m, waehrend das schiff
+            # bei 3.79e7 m stand und der abstand noch stieg. Auf dem schirm
+            # ist das die fahne, die fuer einen frame beim schiff auftaucht
+            # und wieder verschwindet.
+            self._invalidate_derived_caches()
             self.initialized = True
             self._last_swapped_job_id = finished_job_id
             self._jobs_swapped += 1
@@ -5186,6 +5433,8 @@ class Predictor:
             new_points = result
             self.points = new_points
 
+        # Siehe _swap_ready_result: neue kurve, neue marker.
+        self._invalidate_derived_caches()
         self.initialized = True
  
         try:
@@ -5705,6 +5954,8 @@ class Predictor:
         if (getattr(self, '_apsis_soft_stale', False)
                 and bool(getattr(self, 'hold_enabled', False))
                 and isinstance(self._apsis_markers, np.ndarray)
+                and int(getattr(self, '_apsis_scan_generation', -1))
+                == int(getattr(self, '_points_generation', 0))
                 and (now_ts - float(getattr(self, '_apsis_last_scan_ts', 0.0))
                      < float(getattr(self, 'apsis_hold_rescan_s', 0.25)))):
             markers = self._apsis_markers
@@ -5733,6 +5984,11 @@ class Predictor:
                 float(snapshot["G"]),
                 1 if bool(snapshot.get("use_time_dependent_bodies", True)) else 0,
                 int(self.apsis_max_markers),
+                # Der selbst vorangestellte kopf ist die WELT-position des
+                # schiffs und gehoert nicht zu dieser kurve -- siehe den
+                # trend-scan im kernel. Ohne halt ist er es nicht, dann ist
+                # dieser aufruf bit-identisch zu vorher.
+                1 if bool(getattr(self, '_hold_synthetic_head', False)) else 0,
             )
             self._apsis_markers = markers[:int(count)].copy()
         except Exception as exc:
@@ -5751,6 +6007,7 @@ class Predictor:
         self._apsis_cache_key = cache_key
         self._apsis_soft_stale = False
         self._apsis_last_scan_ts = now_ts
+        self._apsis_scan_generation = int(getattr(self, '_points_generation', 0))
         return self._apsis_markers
 
     def interpolation_error_floor(self, sample_limit=256):
@@ -5887,9 +6144,30 @@ class Predictor:
         elif self.async_compute:
             self._cancel_pending_job()
 
-    def set_num_points(self, count: int):
+    def set_num_points(self, count: int, soft: bool = False):
+        """Punktbudget setzen. `soft=True` behaelt die vorhandene kurve.
+
+        Der harte weg (`reset()`) ist richtig, wenn das budget aus einem
+        grund wechselt, der die kurve entwertet -- der `P`-umschalter etwa.
+
+        WEICH ist er, wenn das budget nur MITWAECHST, weil der horizont sich
+        geaendert hat (siehe `apply_predictor_horizon` in test.py). Die kurve,
+        die dann dasteht, ist geometrisch weiterhin richtig; sie hat bloss zu
+        wenige oder zu viele punkte. Genau dieselbe lage wie bei
+        `set_length()` -- und dort hat der harte weg im zeitraffer 34-82 ms
+        im hauptthread gekostet, weil `update()` sofort synchron neu rechnete
+        (§17). Der zeitraffer-schritt verstellt den horizont bei JEDEM
+        stufenwechsel, das budget also mit.
+        """
         self.num_points = max(0, int(count))
-        self.reset()
+        if not soft:
+            self.reset()
+            return
+        self.invalidate_hold(soft=True)
+        if self.rolling_mode:
+            self.reset()
+        elif self.async_compute:
+            self._cancel_pending_job()
 
     def advance_state(self, world=None):
 

@@ -593,26 +593,88 @@ class _BodyEphemerisMixin:
             return t
         return round(t / quantum) * quantum
 
+    @staticmethod
+    def _cubic_4pt(p0, p1, p2, p3, s):
+        """Kubik DURCH ALLE VIER knoten (Lagrange), ausgewertet auf [p1, p2].
+
+        Rein arithmetisch, also gilt derselbe ausdruck fuer floats UND fuer
+        numpy-arrays -- genau das haelt den skalaren und den stapel-weg
+        bitgleich, ohne die formel zweimal zu schreiben.
+
+        Bei s = 0 sind die basisfunktionen exakt (0, 1, 0, 0) und bei s = 1
+        exakt (0, 0, 1, 0); die knotenwerte selbst werden also nicht
+        verschoben, auch nicht um ein bit.
+
+        NICHT Catmull-Rom, und der unterschied ist gemessen. CR schaetzt die
+        steigung als `(p2 - p0) / 2`; auf einem kreis ist diese sehne um
+        `sin(t)/t` zu kurz, der ansatz also nur 3. ordnung. Die Lagrange-form
+        gibt jede kubik exakt wieder und ist damit 4. ordnung. Auf der
+        erdbahn, groesster fehler im mittleren intervall:
+
+        | theta | linear | Catmull-Rom | Lagrange |
+        |---|---|---|---|
+        | 0.033 | 2.0e7 m | 8.4e4 m | 4.0e3 m |
+        | 0.131 | 3.2e8 m | 5.4e6 m | 1.0e6 m |
+
+        Erkauft wird das mit C0 statt C1 an den knoten -- ein knick bleibt
+        also grundsaetzlich moeglich. Er ist nur eben 4. ordnung klein
+        (0.14 px gegen 42 px vorher), waehrend CRs glatter bogen 5x weiter
+        neben der bahn liegt. Sichtbarkeit schlaegt stetigkeit.
+        """
+        s2 = s * s
+        return (p0 * (-(s * (s - 1.0) * (s - 2.0)) / 6.0)
+                + p1 * (((s + 1.0) * (s - 1.0) * (s - 2.0)) / 2.0)
+                + p2 * (-((s + 1.0) * s * (s - 2.0)) / 2.0)
+                + p3 * (((s + 1.0) * s * (s - 1.0)) / 6.0))
+
     def _body_world_position_at_time(self, body, time_s: float, stack: set[int] | None = None) -> tuple[float, float]:
-        # Interpolierender wrapper: bei aktivem zeitfenster (q>0) wird die origin-
-        # position zwischen zwei exakten knots linear interpoliert statt pro punkt
-        # propagiert. stack gesetzt => rekursiver elternaufruf, der exakt bleiben
-        # muss. q<=0 => exakt (identisches verhalten wie zuvor, nie langsamer).
+        # Interpolierender wrapper: bei aktivem zeitfenster (q>0) wird die
+        # origin-position zwischen exakten knots interpoliert statt je punkt
+        # propagiert. stack gesetzt => rekursiver elternaufruf, der exakt
+        # bleiben muss. q<=0 => exakt (identisch wie zuvor, nie langsamer).
+        #
+        # KUBISCH, NICHT LINEAR -- und das ist bug 4.
+        #
+        # Gezeichnet wird `schiff(t) - origin(t)`. War `origin` die SEHNE
+        # zwischen zwei knoten, dann steckt in der linie die woelbung, die der
+        # bahn des BEZUGSKOERPERS fehlt: null auf jedem knoten, maximal
+        # dazwischen. Das ergibt genau das bild aus dem fehlerbericht --
+        # gleichfoermige baeuche mit harten ECKEN auf den knoten, und zwar
+        # ohne dass die vorhergesagten punkte selbst falsch waeren.
+        #
+        # Die groesse folgt der sehnenformel `R*theta^2/8` mit
+        # `theta = 2*pi*q / T_bezug`; das fenster ist die zeitspanne der
+        # vorhersage, also waechst q mit jedem '+'-druck. Fuer die Erde
+        # (R = 1.496e11 m, T = 1 jahr) bei 256 knoten, gemessen gegen eine
+        # praktisch exakte interpolation:
+        #
+        # | horizont | fenster | analytisch | gemessen |
+        # |---|---|---|---|
+        # | 1x   | 3.8 d  | 0.00 px  | 0.00 px  |
+        # | 32x  | 0.33 j | 0.17 px  | 0.19 px  |
+        # | 128x | 1.33 j | 2.66 px  | 6.13 px  |
+        # | 512x | 5.33 j | 42.51 px | **40.68 px** |
+        #
+        # Deshalb half weder ein groesseres zeichenbudget noch eine feinere
+        # unterteilung: beide zeichnen dieselbe verbogene kurve nur glatter.
+        # Kubisch ueber DIESELBEN knoten faellt der fehler auf
+        # `R*theta^4/384`, bei 512x also 42.5 px -> 0.015 px -- ohne eine
+        # einzige zusaetzliche Kepler-loesung, weil nur zwei knoten mehr
+        # gelesen werden und die ohnehin im positions-cache stehen.
         q = self._origin_interp_q
         if q <= 0.0 or body is None or stack is not None:
             return self._body_world_position_exact(body, time_s, stack)
         t = float(time_s)
-        n = math.floor((t - self._origin_interp_t0) / q)
-        klo = self._origin_interp_t0 + n * q
-        khi = klo + q
-        xlo, ylo = self._body_world_position_exact(body, klo, None)
-        xhi, yhi = self._body_world_position_exact(body, khi, None)
+        t0 = self._origin_interp_t0
+        n = math.floor((t - t0) / q)
+        klo = t0 + n * q
         frac = (t - klo) / q
-        if frac <= 0.0:
-            return xlo, ylo
-        if frac >= 1.0:
-            return xhi, yhi
-        return (xlo + (xhi - xlo) * frac, ylo + (yhi - ylo) * frac)
+        x0, y0 = self._body_world_position_exact(body, klo - q, None)
+        x1, y1 = self._body_world_position_exact(body, klo, None)
+        x2, y2 = self._body_world_position_exact(body, klo + q, None)
+        x3, y3 = self._body_world_position_exact(body, klo + q + q, None)
+        return (self._cubic_4pt(x0, x1, x2, x3, frac),
+                self._cubic_4pt(y0, y1, y2, y3, frac))
 
     def _origin_xy_arrays(self, body, times):
         """Stapelfassung von _body_world_position_at_time. None = nicht moeglich.
@@ -642,8 +704,12 @@ class _BodyEphemerisMixin:
         if not _np.all(_np.isfinite(n)):
             return None
         n_int = n.astype(_np.int64)
-        k_lo = int(n_int.min())
-        k_hi = int(n_int.max()) + 1          # +1: khi des letzten knotens
+        # Je auswertung werden VIER knoten gebraucht (k-1 .. k+2), nicht zwei
+        # -- siehe `_body_world_position_at_time`. Das gitter reicht deshalb
+        # eine stelle weiter nach beiden seiten; zusaetzliche kosten sind zwei
+        # knoten je frame, nicht zwei je punkt.
+        k_lo = int(n_int.min()) - 1
+        k_hi = int(n_int.max()) + 2
         span = k_hi - k_lo + 1
         # Schutz vor entarteten zeitfenstern: das gitter hat normalerweise
         # hoechstens frame_origin_interp_max_knots + 1 stuetzstellen.
@@ -673,12 +739,14 @@ class _BodyEphemerisMixin:
                 knot_x[j] = kx
                 knot_y[j] = ky
 
-        i = n_int - k_lo
+        # `i` zeigt jetzt auf den knoten VOR dem intervall (k-1), weil das
+        # gitter eine stelle frueher beginnt. p1 ist damit knot[i+1].
+        i = n_int - k_lo - 1
         frac = (t - (t0 + n * q)) / q
-        x_lo = knot_x[i]
-        y_lo = knot_y[i]
-        return (x_lo + (knot_x[i + 1] - x_lo) * frac,
-                y_lo + (knot_y[i + 1] - y_lo) * frac)
+        return (self._cubic_4pt(knot_x[i], knot_x[i + 1],
+                                  knot_x[i + 2], knot_x[i + 3], frac),
+                self._cubic_4pt(knot_y[i], knot_y[i + 1],
+                                  knot_y[i + 2], knot_y[i + 3], frac))
 
     def _knot_positions_batch(self, body, qt, depth: int = 0):
         """Stapelfassung von _body_world_position_exact ueber ein zeit-gitter.
