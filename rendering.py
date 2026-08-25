@@ -16,6 +16,7 @@ import numpy as np
 
 from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
 import body_style
+import orbit_lines
 
 # Numba-fassungen der reinen zahlenschleifen im linien-zeichenweg
 # (min-step-verdichtung und RDP-vereinfachung). Wort-fuer-wort dieselbe
@@ -399,6 +400,29 @@ class Renderer:
         self.reference_trajectories_sample_step_s = 1.0
         self._reference_traj_last_sample_time = None
         self._reference_traj_points = {}
+
+        # Bahnlinien der koerper (orbit_lines.py). Die deckkraft kommt aus
+        # der dichtesten annaeherung der praediktor-linie an die ZUKUENFTIGE
+        # position des koerpers, gemessen in vielfachen seiner
+        # einflusssphaere -- so heisst "nah" beim Mond dasselbe wie bei
+        # Jupiter.
+        self.orbit_lines_enabled = True
+        self.orbit_line_tolerance_px = 0.3
+        self.orbit_line_min_screen_px = 3.0
+        self.orbit_line_track_samples = 192
+        self.orbit_line_soi_full = 1.0
+        self.orbit_line_soi_fade = 3.0
+        self.orbit_line_reveal_full = 10.0
+        self.orbit_line_reveal_fade = 30.0
+        self.orbit_line_alpha_max = 0.85
+        self.orbit_line_alpha_floor = 0.12
+        self.orbit_line_alpha_floor_focus = 0.35
+        self.orbit_line_fade_rate = 6.0
+        self.orbit_line_width = 1.6
+        self.orbit_line_knot_angle = 0.05
+        self.orbit_line_end_caps = True
+        self.orbit_line_end_cap_px = 4.5
+        self._orbit_line_set = None
         self._shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
 
         self._label_texture_cache = {}
@@ -1741,6 +1765,224 @@ class Renderer:
                     continue
                 self._draw_polyline(run, color=(cr, cg, cb, 0.42), width=1.0)
 
+    # ------------------------------------------------------------------
+    # Bahnlinien der koerper (rechnung in orbit_lines.py)
+    # ------------------------------------------------------------------
+
+    def _ensure_orbit_line_set(self):
+        """Der zustandsbehaftete teil, ueber frames hinweg gehalten.
+
+        Die konfiguration wird JE FRAME hineingeschrieben statt das objekt
+        neu zu bauen -- ein neubau wuerde die eingeblendeten deckkraefte
+        verwerfen, und dann blitzt beim drehen an einem regler die ganze
+        szene auf.
+        """
+        oset = self._orbit_line_set
+        if oset is None:
+            oset = orbit_lines.OrbitLineSet()
+            self._orbit_line_set = oset
+        oset.track_samples = max(8, int(self.orbit_line_track_samples))
+        oset.soi_full = float(self.orbit_line_soi_full)
+        oset.soi_fade = float(self.orbit_line_soi_fade)
+        oset.reveal_full = float(self.orbit_line_reveal_full)
+        oset.reveal_fade = float(self.orbit_line_reveal_fade)
+        oset.alpha_max = float(self.orbit_line_alpha_max)
+        oset.alpha_floor = float(self.orbit_line_alpha_floor)
+        oset.alpha_floor_focus = float(self.orbit_line_alpha_floor_focus)
+        oset.fade_rate = float(self.orbit_line_fade_rate)
+        return oset
+
+    def _draw_frame_polyline(self, screen_x, screen_y, color, width,
+                             min_screen_px=0.0):
+        """Fertig projizierte bildschirmpunkte als polylinie, mit culling."""
+        n = int(screen_x.shape[0])
+        if n < 2:
+            return False
+        if not (np.all(np.isfinite(screen_x)) and np.all(np.isfinite(screen_y))):
+            return False
+
+        min_sx = float(screen_x.min()); max_sx = float(screen_x.max())
+        min_sy = float(screen_y.min()); max_sy = float(screen_y.max())
+
+        margin = float(self.prediction_visibility_margin_px)
+        right = self.width + margin
+        bottom = self.height + margin
+        if max_sx < -margin or min_sx > right or max_sy < -margin or min_sy > bottom:
+            return False
+        if (max_sx - min_sx) < min_screen_px and (max_sy - min_sy) < min_screen_px:
+            return False
+
+        pts = np.empty((n, 2), dtype=np.float64)
+        pts[:, 0] = screen_x
+        pts[:, 1] = screen_y
+
+        if min_sx >= -margin and max_sx <= right and min_sy >= -margin and max_sy <= bottom:
+            runs = (pts,)
+        else:
+            runs = self._build_clipped_polyline_runs(
+                pts, margin_px=margin, coords=(screen_x, screen_y))
+
+        drew = False
+        for run in runs:
+            if len(run) >= 2:
+                self._draw_polyline(run, color=color, width=width)
+                drew = True
+        return drew
+
+    def _draw_end_cap(self, sx, sy, color, size_px):
+        """Kleine raute auf dem endpunkt einer linie.
+
+        Die endkappen sind der eigentliche messwert der ganzen funktion:
+        liegt die des koerpers auf der des schiffs, ist das schiff zur
+        endzeit der vorhersage dort, wo der koerper dann steht.
+        """
+        if not (math.isfinite(sx) and math.isfinite(sy)):
+            return
+        if sx < -size_px or sx > self.width + size_px:
+            return
+        if sy < -size_px or sy > self.height + size_px:
+            return
+        r = float(size_px)
+        diamond = [(sx, sy - r), (sx + r, sy), (sx, sy + r), (sx - r, sy),
+                   (sx, sy - r)]
+        self._draw_polyline(diamond, color=color, width=1.0)
+
+    def _draw_orbit_lines(self, bodies, camera, predictor=None, real_dt=0.0):
+        """Wo jeder koerper waehrend des VORHERSAGE-FENSTERS entlanglaeuft.
+
+        Dieselbe zeitspanne wie die schiffslinie, punkt fuer punkt in dem
+        plot-frame, den seine EIGENE zeit aufspannt. Damit steht die
+        endkappe des koerpers fuer "hier ist er, wenn das schiff am ende
+        seiner linie ankommt" -- fallen die beiden endkappen zusammen,
+        trifft man. Das ist der ganze zweck, und es funktioniert nur, wenn
+        beide linien durch dieselbe transformation gehen.
+
+        Eine feste ellipse waere hier schlicht falsch: ein plot-frame ist
+        eine ZEITABHAENGIGE abbildung, eine starr transformierte ellipse
+        zeigt die bahn also so, wie sie JETZT gerade laege. Im Erd-rahmen
+        kam dabei eine Erdbahn um die Sonne heraus, obwohl die Erde dort im
+        ursprung steht.
+        """
+        self.debug_info['orbit_lines_drawn'] = 0
+        if not self.orbit_lines_enabled:
+            return
+
+        oset = self._ensure_orbit_line_set()
+
+        points = None
+        generation = None
+        if predictor is not None:
+            try:
+                points = predictor.get_points()
+            except Exception:
+                points = None
+            generation = getattr(predictor, '_points_generation', None)
+
+        oset.update(
+            bodies, points,
+            sim_time=self._frame_time_s, real_dt=real_dt,
+            reference_body=self.current_reference_body,
+            selected_body=self.selected_body,
+            generation=generation,
+        )
+
+        frame = self._active_frame()
+        origin_body = orbit_lines.frame_origin_body(frame)
+
+        # Der ursprungskoerper bekommt keine linie: er steht in seinem
+        # eigenen rahmen still.
+        drawable = [e for e in oset.entries()
+                    if e.reveal > 0.002 and e.alpha > 0.004
+                    and e.track is not None and e.track_t is not None
+                    and e.track.shape[0] >= 2
+                    and e.body is not origin_body]
+        if not drawable:
+            return
+
+        # EINE tabelle fuer alle: sie stehen alle auf dem fenster des
+        # praediktors, also wird die transformation einmal auf einem
+        # knotengitter bestimmt statt je koerper und stichprobe.
+        track_t = drawable[0].track_t
+        table = orbit_lines.FrameAffineTable(
+            frame, float(track_t[0]), float(track_t[-1]),
+            knot_angle=float(self.orbit_line_knot_angle))
+        if not table.valid:
+            return
+
+        camera_frame_xy = self._frame_camera_xy(camera)
+        scale = abs(float(camera.scale))
+        margin = float(self.prediction_visibility_margin_px)
+        view_diag = math.hypot(self.width + 2.0 * margin,
+                               self.height + 2.0 * margin)
+        min_px = float(self.orbit_line_min_screen_px)
+        half_w = self.width * 0.5
+        half_h = self.height * 0.5
+        cap_px = self.ui_px(self.orbit_line_end_cap_px)
+        show_caps = bool(self.orbit_line_end_caps)
+        drawn = 0
+        any_full = False
+
+        for entry in drawable:
+            body = entry.body
+            base = getattr(body, 'color', (200, 200, 200))
+            try:
+                cr = min(1.0, max(0.0, float(base[0]) / 255.0 * 0.85))
+                cg = min(1.0, max(0.0, float(base[1]) / 255.0 * 0.85))
+                cb = min(1.0, max(0.0, float(base[2]) / 255.0 * 0.85))
+            except Exception:
+                cr = cg = cb = 0.75
+
+            # Enthuellung: die linie rollt sich VOM KOERPER AUS ab.
+            total = int(entry.track.shape[0])
+            reveal = max(0.0, min(1.0, float(entry.reveal)))
+            n_show = max(2, int(math.ceil(reveal * total)))
+
+            # Gezeichnet wird nur so fein, wie die fehlerschranke verlangt.
+            # Als kruemmungsradius dient die bogenlaenge selbst -- fuer eine
+            # fast gerade kurve ist das eine unterschaetzung, also zu viele
+            # punkte statt zu wenige.
+            arc_px = entry.track_len * scale * reveal
+            r_eff = max(1.0, arc_px / (2.0 * math.pi))
+            stride = orbit_lines.polyline_stride(
+                n_show, arc_px, r_eff, view_diag,
+                float(self.orbit_line_tolerance_px))
+            idx = orbit_lines.stride_indices(n_show, stride)
+
+            fx, fy = table.project(
+                entry.track_t[idx],
+                np.ascontiguousarray(entry.track[idx, 0]),
+                np.ascontiguousarray(entry.track[idx, 1]))
+            sx = half_w + (fx - camera_frame_xy[0]) * scale
+            sy = half_h - (fy - camera_frame_xy[1]) * scale
+
+            if self._draw_frame_polyline(
+                    sx, sy, (cr, cg, cb, float(entry.alpha)),
+                    float(self.orbit_line_width), min_screen_px=min_px):
+                drawn += 1
+
+            # Die endkappe steht fuer den koerper zur ENDZEIT -- solange die
+            # linie nicht ganz da ist, endet sie irgendwo dazwischen und
+            # duerfte nicht als messpunkt gelesen werden.
+            if show_caps and reveal > 0.995:
+                any_full = True
+                self._draw_end_cap(float(sx[-1]), float(sy[-1]),
+                                   (cr, cg, cb, float(entry.alpha)), cap_px)
+
+        # Die kappe des schiffs nur, wenn es etwas zu vergleichen gibt --
+        # und ueber den weg der GEZEICHNETEN linie, damit sie auf deren ende
+        # sitzt und nicht daneben.
+        if show_caps and any_full and points is not None and len(points) >= 2:
+            try:
+                last = points[-1]
+                csx, csy = self._world_to_screen_xy_at_time(
+                    float(last[0]), float(last[1]), camera, float(last[2]),
+                    camera_frame_xy=camera_frame_xy)
+                self._draw_end_cap(csx, csy, (1.0, 1.0, 1.0, 0.9), cap_px)
+            except Exception:
+                pass
+
+        self.debug_info['orbit_lines_drawn'] = drawn
+
     def _emit_render_benchmark(self, timings):
         if not self.render_benchmark_debug:
             return
@@ -1764,6 +2006,8 @@ class Renderer:
                 f"clipped_or_rejected={pred.get('clipped_or_rejected', 0)} "
                 f"cache_hit={pred.get('cache_hit', False)} "
                 f"reference_trails_ms={timings.get('reference_trails_ms', 0.0):.3f} "
+                f"orbit_lines_ms={timings.get('orbit_lines_ms', 0.0):.3f} "
+                f"orbit_lines_drawn={self.debug_info.get('orbit_lines_drawn', 0)} "
                 f"hud_ms={timings.get('hud_ms', 0.0):.3f} "
                 f"fxaa_ms={timings.get('fxaa_ms', 0.0):.3f} "
                 f"swap_or_present_ms={timings.get('swap_or_present_ms', 0.0):.3f}",
@@ -1777,6 +2021,7 @@ class Renderer:
         timings = {
             'bodies_ms': 0.0,
             'reference_trails_ms': 0.0,
+            'orbit_lines_ms': 0.0,
             'hud_ms': 0.0,
             'fxaa_ms': 0.0,
             'swap_or_present_ms': 0.0,
@@ -1870,6 +2115,12 @@ class Renderer:
         reference_t0 = time.perf_counter()
         self._draw_reference_trajectories(bodies, camera)
         timings['reference_trails_ms'] += (time.perf_counter() - reference_t0) * 1000.0
+
+        # Bahnlinien VOR den koerpern: so verdeckt ein koerper seine eigene
+        # linie, statt von ihr durchkreuzt zu werden.
+        orbit_t0 = time.perf_counter()
+        self._draw_orbit_lines(bodies, camera, predictor=predictor, real_dt=real_dt)
+        timings['orbit_lines_ms'] = (time.perf_counter() - orbit_t0) * 1000.0
 
         # Render all non-ship bodies first (they may be FXAA-processed).
         bodies_t0 = time.perf_counter()
@@ -2512,73 +2763,6 @@ class Renderer:
                 )
         except Exception:
             pass
-
-    def _draw_orbit(self, body, camera, segments=None, color=None, width=1.0):
-        """Zeichnet eine vollständige Orbit-Ellipse für Körper mit scripted-Orbits.
-        Verwendet `semi_major_axis` (a) und `eccentricity` (e). Wenn `is_moon_of`
-        auf ein Eltern-Objekt gesetzt ist, wird die Bahn um die Position des Elternteils
-        gezeichnet; andernfalls ist der Fokus im Weltursprung.
-        Die Anzahl der Segmente wird adaptiv anhand des Umfangs in Bildschirmpixeln
-        gewählt, um die Linie glatt aber performant zu halten.
-        """
-        a = getattr(body, 'semi_major_axis', None)
-        e = getattr(body, 'eccentricity', None)
-        if a is None or e is None:
-            return
-        try:
-            a = float(a)
-            e = float(e)
-        except Exception:
-            return
-        if a <= 0:
-            return
-
-        parent = getattr(body, 'is_moon_of', None)
-        if parent is not None and hasattr(parent, 'position'):
-            cx = float(parent.position.x)
-            cy = float(parent.position.y)
-        else:
-            cx, cy = 0.0, 0.0
-
-        # screen transform params
-        half_w = self.width * 0.5
-        half_h = self.height * 0.5
-        cam_frame_x, cam_frame_y = self._frame_camera_xy(camera)
-        scale = abs(float(camera.scale))
-
-        # adaptive segment count: aim for ~1 segment per ~4px of circumference
-        circ_px = 2.0 * math.pi * a * scale
-        if segments is None:
-            est = int(max(48, min(1024, circ_px / 4.0))) if circ_px > 0 else 128
-            segments = max(48, min(2048, est))
-
-        # build screen-space polyline
-        screen_points = []
-        for i in range(segments + 1):
-            phi = 2.0 * math.pi * i / segments
-            r = a * (1.0 - e * e) / (1.0 + e * math.cos(phi))
-            wx = cx + r * math.cos(phi)
-            wy = cy + r * math.sin(phi)
-            frame_x, frame_y = self._frame_transform_xy(wx, wy)
-            sx = half_w + (frame_x - cam_frame_x) * scale
-            sy = half_h - (frame_y - cam_frame_y) * scale
-            screen_points.append((sx, sy))
-
-        # Nur sichtbare Abschnitte zeichnen, um unnötige GPU-Arbeit zu vermeiden
-        runs = self._visible_window_runs(screen_points, margin_px=self.prediction_visibility_margin_px)
-        if not runs:
-            return
-
-        if color is None:
-            base = getattr(body, 'color', (200, 200, 200))
-            cr, cg, cb = (base[0] / 255.0 * 0.8, base[1] / 255.0 * 0.8, base[2] / 255.0 * 0.8)
-        else:
-            cr, cg, cb = color
-
-        for run in runs:
-            if len(run) < 2:
-                continue
-            self._draw_polyline(run, color=(cr, cg, cb, 0.6), width=width)
 
     def _points_count(self, points):
         if points is None:

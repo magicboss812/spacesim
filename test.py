@@ -615,6 +615,11 @@ def main():
                     else:
                         predictor.set_num_points(predictor_toggle_points)
 
+                # Taste O: bahnlinien der koerper umschalten
+                elif event.key == pygame.K_o:
+                    renderer.orbit_lines_enabled = not renderer.orbit_lines_enabled
+                    print(f"ORBIT LINES: {'on' if renderer.orbit_lines_enabled else 'off'}")
+
                 # Taste E: epizykel-modus umschalten (zentriert auf kameraziel oder Fokuskörper)
                 elif event.key == pygame.K_e:
                     center = camera.target
