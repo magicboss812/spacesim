@@ -8,9 +8,10 @@ bleiben also gueltig, wenn die umsetzung sich aendert:
    ersten bildkante endete und Ap/Pe sowie CLOSEST/T-CA mit verschwanden.
 2. **Numba-integrator == Python-integrator.** Bit fuer bit, sonst ist die
    uebersetzung falsch (und nicht etwa "etwas ungenauer").
-3. **Gehaltene kurve zittert nicht und laeuft nicht aus.** Gemessen wird die
+3. **Die kurve zittert nicht und laeuft nicht aus.** Gemessen wird die
    bewegung eines punktes FESTER SIM-ZEIT zwischen zwei frames -- bei einer
-   stabilen kurve ist das null.
+   stabilen kurve ist das null. Gilt seit dem verbrauchen statt verschieben
+   fuer beide betriebsarten, nicht mehr nur fuer den zeitraffer-halt.
 4. **Echtzeit ist bei jeder bildrate erreichbar.** Der sim_dt-boden ist je
    TICK angegeben, die warp-stufen je ECHTSEKUNDE -- bei 180 fps sperrte der
    boden sonst die unterste stufe aus und der schub blieb ueberall gesperrt.
@@ -202,9 +203,19 @@ median_loose = float(np.median(loose))
 median_held = float(np.median(held))
 p99_held = float(np.percentile(held, 99))
 
-check(median_held < median_loose / 100.0,
-      "gehaltene kurve zittert um >2 groessenordnungen weniger",
-      f"median {median_held:.3e} m gehalten vs {median_loose:.3e} m ohne halt")
+# FRUEHER WAR DAS EIN VERGLEICH hold GEGEN nicht-hold, und der ging um zwei
+# groessenordnungen aus. Ohne halt zog `_anchor_first_point` die kurve jeden
+# frame STARR ans schiff -- hier gemessene 3.176e+07 m median je frame, gegen
+# 0.0 m mit halt. Inzwischen VERBRAUCHT auch die echtzeit die kurve, statt sie
+# zu verschieben (Predictor._advance_points_along_curve), und beide wege stehen
+# gleich still. Ein relativvergleich misst damit nichts mehr (0 < 0/100 ist
+# falsch). Die groesse, auf die es ankommt, ist der ABSOLUTE versatz eines
+# punktes fester sim-zeit -- und der gehoert in pixeln gemessen, weil nur das
+# sichtbar ist.
+check(median_held * 2e-6 < 0.5 and median_loose * 2e-6 < 0.5,
+      "die kurve steht still -- mit halt wie ohne",
+      f"median {median_held:.3e} m gehalten vs {median_loose:.3e} m ohne halt "
+      f"(= {median_held * 2e-6:.4f} / {median_loose * 2e-6:.4f} px)")
 # Bei 2e-6 px/m (zoomstufe des fehler-screenshots) sind 5e5 m rund 1 px.
 check(p99_held * 2e-6 < 0.5,
       "gehaltene kurve bleibt auch im 99. perzentil unter einem halben pixel",
@@ -688,7 +699,12 @@ check(np.median(thrust_ms) < 5.0,
       f"median {np.median(thrust_ms):.2f} ms, p90 {np.percentile(thrust_ms, 90):.2f} ms "
       f"(gleitflug {np.median(coast_ms):.2f} ms)")
 
-check(min(thrust_counts) == max(coast_counts),
+# Die kurve ATMET jetzt um ein, zwei punkte: sie wird vorn verbraucht (die
+# stuetzstellen, deren zeit vergangen ist) und bekommt dafuer das schiff als
+# kopf vorangestellt, statt starr mitgezogen zu werden. Geprueft wird deshalb,
+# dass sie nicht EINBRICHT -- das war der fehler --, und nicht, dass die zahl
+# auf den punkt genau stehen bleibt.
+check(min(thrust_counts) >= max(coast_counts) - 2,
       "die linie wird unter schub nicht geleert",
       f"kleinste punktzahl unter schub {min(thrust_counts)} von {max(coast_counts)}")
 

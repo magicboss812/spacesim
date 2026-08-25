@@ -2613,8 +2613,21 @@ class Predictor:
         # unterwegs ist (siehe _request_hold_recompute).
         self._hold_resume_context = None
         # Ob points[0] der selbst vorangestellte kopf ist (siehe
-        # _hold_advance) -- er muss vor der naechsten suche wieder weg.
-        self._hold_synthetic_head = False
+        # _advance_points_along_curve) -- er muss vor der naechsten suche
+        # wieder weg. Gilt fuer BEIDE wege: den zeitraffer-halt und die
+        # echtzeit, die dieselbe mechanik benutzt.
+        self._synthetic_head = False
+        # UM WIEVIEL WURDE DIE ZEITSPALTE GEGEN IHREN SCHNAPPSCHUSS VERSCHOBEN?
+        #
+        # `points[:, 2]` ist absolute sim-zeit, gerechnet als
+        # `snapshot["sim_time"] + lokale zeit`. Wer die kurve starr nachzieht
+        # (der fallback in _anchor_first_point), verschiebt auch diese spalte
+        # -- der schnappschuss aber bleibt, wo er ist. Jede auswertung, die
+        # aus einer punktzeit eine LOKALE zeit zurueckrechnet (der
+        # apsis-scan propagiert damit den referenzkoerper), braucht deshalb
+        # diesen versatz, sonst liest sie die koerper um genau diesen betrag
+        # zu weit vorn. Siehe get_apsis_markers().
+        self._points_time_offset = 0.0
         # Ab welchem restvorrat (anteil des punktbudgets) waehrend des halts
         # nachgerechnet wird. Das ist die failsafe-schwelle, die verhindert,
         # dass die linie ausläuft.
@@ -2830,7 +2843,9 @@ class Predictor:
         self.initialized = False
         self._clear_apsis_markers()
         # Der halt haelt eine kurve fest, die es nach dem reset nicht mehr gibt.
-        self._hold_synthetic_head = False
+        self._synthetic_head = False
+        # Ohne punkte gibt es auch keinen versatz ihrer zeitspalte.
+        self._points_time_offset = 0.0
         # Eine WEICHE entwertung setzt darauf, dass die alte kurve noch da ist
         # -- nach dem reset ist sie es nicht. Sonst wuerde der halt beim
         # naechsten frame auf einer leeren kurve weiterhalten wollen.
@@ -3049,6 +3064,8 @@ class Predictor:
         self.points = self._empty_points_array()
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
+        self._points_time_offset = 0.0
+        self._synthetic_head = False
         self._clear_apsis_markers()
 
     def _allowed_velocity_delta(self, speed):
@@ -3377,19 +3394,150 @@ class Predictor:
                 flush=True,
             )
 
-    def _anchor_first_point(self, ship, world):
-        """Klebt den kurvenanfang an das schiff -- in ORT *und* ZEIT.
+    def _advance_points_along_curve(self, ship, now):
+        """Kurve VERBRAUCHEN statt starr verschieben.
 
-        Die zeitspalte muss mitwandern. Sie ist bei der berechnung auf die
-        damalige `world.time` bezogen worden (_compute_from_snapshot), waehrend
-        diese funktion die kurve jeden frame raeumlich nachzieht. Ohne die
-        zeit-korrektur faellt die zeitbasis pro frame um ein sim_dt zurueck
-        (gemessen 900-2700 s). Der renderer waehlt daraus ueber
-        _world_to_screen_xy_at_time die epoche des plot-frames: bei einem
-        bewegten frame-ursprung (body-centred non-rotating) landet dieselbe
-        weltposition dadurch neben dem schiff -- gemessen 54.5 px bei
-        2e-6 px/m, exakt der drift von Erde ueber 900 s -- und springt mit
-        jedem swap, weil die latenz schwankt.
+        Rueckgabe: die zahl der vorn verbrauchten stuetzstellen, oder None,
+        wenn es nicht geht (keine/zu kurze kurve, zeit abgelaufen) -- dann
+        muss der aufrufer den alten weg gehen.
+
+        Die vorhersage ist eine eigenschaft der BAHN, nicht des augenblicks.
+        Ohne schub bleibt sie stehen und das schiff rutscht an ihr entlang.
+        Also werden vorn die punkte weggeworfen, deren zeit bereits vergangen
+        ist (die zeitspalte ist absolute sim-zeit, das ist exakt und per
+        suchlauf billig), und der rest bleibt in ORT UND ZEIT stehen, wo er
+        ist.
+
+        DIE KURVE WIRD VORN ANGESTUECKELT, NICHT VERBOGEN.
+
+        Stuetzstellen lassen sich nur GANZ wegwerfen -- eine halbe gibt es
+        nicht. Bliebe als kopf immer die naechste stuetzstelle VOR dem schiff
+        stehen, liefe der rest zwischen zwei verbrauchten stuetzstellen von 0
+        auf eine volle punktweite und spraenge dann zurueck: ein saegezahn mit
+        der amplitude EINER PUNKTWEITE. Weil das eine weltlaenge ist und der
+        zoom welt und linie gleich vergroessert, saehe es auf JEDER zoomstufe
+        gleich aus -- die linie rueckte sichtbar in stufen statt stetig vor.
+
+        Richtig ist, dem unveraenderten rest die aktuelle schiffsposition als
+        neuen kopf voranzustellen. Das erste segment ist dann ein echtes
+        teilstueck, das stetig kuerzer wird, bis die naechste stuetzstelle
+        verbraucht ist. Kein punkt hinter dem kopf bewegt sich dabei
+        ueberhaupt -- und genau darauf beruht, dass die Ap/Pe-marker
+        stillstehen.
+        """
+        points = self.points
+        if np is None or not isinstance(points, np.ndarray) or points.ndim != 2:
+            return None
+        if points.shape[0] < 4 or points.shape[1] < 3:
+            return None
+        if ship is None or not math.isfinite(now):
+            return None
+
+        # Den selbst vorangestellten kopf aus dem vorframe wieder entfernen,
+        # damit unten immer auf den UNVERAENDERTEN stuetzstellen gesucht wird
+        # (und die liste nicht bei jedem frame um einen punkt waechst).
+        had_head = bool(getattr(self, '_synthetic_head', False)) and points.shape[0] >= 3
+        if had_head:
+            points = points[1:]
+
+        times = points[:, 2]
+        if not (math.isfinite(float(times[0])) and math.isfinite(float(times[-1]))):
+            return None
+        # Reicht die kurve zeitlich ueberhaupt noch in die zukunft?
+        if float(times[-1]) <= now:
+            return None
+
+        # Erster punkt, der ECHT in der zukunft liegt. Die zeitspalte ist
+        # monoton steigend, also genuegt eine binaere suche.
+        #
+        # 'right', nicht 'left': eine stuetzstelle GENAU auf `now` ist die
+        # gegenwart, und die gegenwart ist der kopf, den wir gleich davor
+        # setzen. Bliebe sie stehen, saessen zwei punkte aufeinander und das
+        # erste segment haette laenge null -- mitsamt seiner tangente, an der
+        # der navball haengt. Exakte gleichheit ist kein grenzfall, sondern
+        # der regelfall: eine FRISCH gerechnete kurve beginnt per konstruktion
+        # bei ship@world.time, und _anchor_first_point laeuft unmittelbar
+        # danach.
+        drop = int(np.searchsorted(times, now, side='right'))
+        drop = max(0, min(drop, points.shape[0] - 2))
+
+        if drop == 0 and had_head:
+            # NICHTS VERBRAUCHT -> NICHTS UMKOPIEREN.
+            #
+            # Der regelfall in echtzeit: die stuetzstellen liegen auf festem
+            # BOGENabstand (bei spielueblichem zoom hunderte kilometer),
+            # waehrend ein bild nur bruchteile davon vorrueckt -- es wird also
+            # ueber viele bilder hinweg gar keine stuetzstelle faellig. Dann
+            # genuegt es, den vorhandenen kopf nachzufuehren.
+            #
+            # Das spart nicht bloss die kopie: es haelt auch die IDENTITAET
+            # des arrays fest, und daran haengen zwei caches, die sonst in
+            # jedem bild leerliefen -- der apsis-scan (id(pts), siehe
+            # get_apsis_markers) und die abtastung der linie im renderer
+            # (_make_prediction_line_cache_key). Die marker duerfen dabei
+            # stehen bleiben, weil der scan den kopf ohnehin ueberspringt
+            # (skip_head) und hinter ihm kein punkt bewegt wurde.
+            self.points[0, 0] = float(ship.position.x)
+            self.points[0, 1] = float(ship.position.y)
+            self.points[0, 2] = now
+            if self.points.shape[1] > 3:
+                self.points[0, 3] = float(getattr(ship.velocity, 'x', 0.0))
+                self.points[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
+            return 0
+
+        tail = points[drop:] if drop > 0 else points
+        head = np.empty((1, points.shape[1]), dtype=np.float64)
+        head[0, 0] = float(ship.position.x)
+        head[0, 1] = float(ship.position.y)
+        head[0, 2] = now
+        if points.shape[1] > 3:
+            # Der kopf IST das schiff -- also auch seine tangente. Frueher
+            # wurde die der naechsten stuetzstelle uebernommen; damit haette
+            # das erste (stetig kuerzer werdende) teilstueck eine tangente
+            # getragen, die zur falschen stelle der bahn gehoert.
+            head[0, 3] = float(getattr(ship.velocity, 'x', 0.0))
+            head[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
+
+        self.points = np.concatenate((head, tail), axis=0)
+        self._synthetic_head = True
+        # Die zeitspalte der verbliebenen punkte ist unangetastet -- ihr
+        # versatz gegen den schnappschuss bleibt also, was er war.
+        self._invalidate_derived_caches(soft=True)
+        return drop
+
+    def _anchor_first_point(self, ship, world):
+        """Setzt den kurvenanfang auf das schiff.
+
+        DER REGELFALL IST DAS VERBRAUCHEN, NICHT DAS VERSCHIEBEN. Erste wahl
+        ist `_advance_points_along_curve` -- die kurve bleibt stehen und das
+        schiff rutscht an ihr entlang. Die starre verschiebung unten ist nur
+        noch der fallback fuer den rolling-modus und fuer eine kurve, deren
+        zeit abgelaufen ist (dann steht ohnehin gleich eine neuberechnung an).
+
+        WARUM NICHT MEHR STARR. Die verschiebung zieht die GANZE kurve um den
+        kopfversatz mit, und der ist nicht der versatz je frame, sondern der
+        ueber das ganze alter des schnappschusses -- `max_async_wall_age`
+        laesst 1.5 s echtzeit zu, bei 60 s/s also bis zu 90 sim-sekunden
+        bahnbewegung. Der referenzkoerper wandert dabei NICHT mit. Was bleibt,
+        ist die RELATIVbewegung schiff<->referenzkoerper: die ganze kegel-
+        schnittbahn liegt um diesen betrag seitlich neben dem koerper, und
+        damit steht die periapsis-hoehe falsch. Weil das alter mit der
+        rechenlatenz schwankt, schwankt der angezeigte Pe/Ap-abstand mit --
+        das ist das hin- und herspringen der marker in echtzeit, und es
+        verschwand im zeitraffer nur deshalb, weil dort der halt schon
+        verbraucht statt verschoben hat.
+
+        Wird doch starr verschoben, muss die ZEITSPALTE mitwandern. Sie ist
+        bei der berechnung auf die damalige `world.time` bezogen worden
+        (_compute_from_snapshot). Ohne die zeit-korrektur faellt die zeitbasis
+        pro frame um ein sim_dt zurueck (gemessen 900-2700 s). Der renderer
+        waehlt daraus ueber _world_to_screen_xy_at_time die epoche des
+        plot-frames: bei einem bewegten frame-ursprung (body-centred
+        non-rotating) landet dieselbe weltposition dadurch neben dem schiff --
+        gemessen 54.5 px bei 2e-6 px/m, exakt der drift von Erde ueber 900 s.
+        Der betrag wird in `_points_time_offset` mitgeschrieben, weil die
+        punktzeiten damit nicht mehr zum schnappschuss passen und jeder, der
+        aus ihnen eine lokale zeit zurueckrechnet, das wissen muss.
         """
         if self._points_count() == 0:
             return
@@ -3420,6 +3568,16 @@ class Predictor:
                 self._apply_head_taper(self.points, sx, sy, st, dx, dy, dt)
                 self._invalidate_derived_caches(soft=True)
             return
+
+        # ECHTZEIT: DIESELBE MECHANIK WIE DER HALT.
+        #
+        # Der rolling-modus fuehrt in `_roll_states` einen zweiten, parallel
+        # gehaltenen zustand mit, der punktweise zu `points` passen muss --
+        # der bleibt beim alten weg. Alles andere verbraucht.
+        if not self.rolling_mode and st is not None:
+            if self._advance_points_along_curve(ship, st) is not None:
+                return
+
         if np is not None and isinstance(self.points, np.ndarray):
             dx = sx - float(self.points[0, 0])
             dy = sy - float(self.points[0, 1])
@@ -3433,6 +3591,10 @@ class Predictor:
                     if math.isfinite(dt):
                         self.points[:, 2] += dt
                         self.points[0, 2] = st
+                        # Die punktzeiten passen jetzt um `dt` nicht mehr zu
+                        # `snapshot["sim_time"]` -- siehe _points_time_offset.
+                        self._points_time_offset = float(
+                            getattr(self, '_points_time_offset', 0.0)) + dt
                 try:
                     if (
                         np is not None
@@ -3457,6 +3619,9 @@ class Predictor:
             if not math.isfinite(dt):
                 dt = 0.0
             t0 += dt
+            if dt:
+                self._points_time_offset = float(
+                    getattr(self, '_points_time_offset', 0.0)) + dt
             try:
                 dx = sx - float(self.points[0][0])
                 dy = sy - float(self.points[0][1])
@@ -3638,7 +3803,7 @@ class Predictor:
         if enabled == getattr(self, 'hold_enabled', False):
             return
         self.hold_enabled = enabled
-        self._hold_synthetic_head = False
+        self._synthetic_head = False
         self._hold_pending_swap = False
         self._hold_invalidated = True
         if enabled:
@@ -3667,7 +3832,7 @@ class Predictor:
         """
         self._hold_invalidated = True
         self._hold_soft_invalidated = bool(soft) and not self.rolling_mode
-        self._hold_synthetic_head = False
+        self._synthetic_head = False
         if not soft:
             # Weiterrechnen geht nur auf einer kurve, die noch gilt.
             self._resume_context = None
@@ -3731,85 +3896,32 @@ class Predictor:
             else:
                 self._hold_invalidated = False
                 self._hold_soft_invalidated = False
-                self._hold_synthetic_head = False
+                self._synthetic_head = False
                 return False
         if ship is None or world is None or np is None:
-            return False
-        points = self.points
-        if not isinstance(points, np.ndarray) or points.ndim != 2:
-            return False
-        if points.shape[0] < 4 or points.shape[1] < 3:
             return False
 
         try:
             now = float(world.time)
         except Exception:
             return False
-        if not math.isfinite(now):
+
+        # VERBRAUCHEN statt verschieben -- dieselbe mechanik, die inzwischen
+        # auch die echtzeit benutzt (siehe _advance_points_along_curve).
+        #
+        # Das ergebnis wird IMMER uebernommen, auch wenn gleich darauf
+        # abgebrochen wird: sonst rastet der halt ein. Bricht er ab, bevor der
+        # schnitt steht, bleibt die kurve stehen, waehrend das schiff
+        # weiterfliegt -- der kopfabstand waechst dann jeden frame weiter
+        # (gemessen 6.4e5 -> 3.2e6 m in fuenf frames) und die
+        # abbruchbedingung ist von da an dauerhaft erfuellt.
+        drop = self._advance_points_along_curve(ship, now)
+        if drop is None:
             return False
 
-        # Den selbst vorangestellten kopf aus dem vorframe wieder entfernen,
-        # damit unten immer auf den UNVERAENDERTEN stuetzstellen gesucht wird
-        # (und die liste nicht bei jedem frame um einen punkt waechst).
-        if getattr(self, '_hold_synthetic_head', False) and points.shape[0] >= 3:
-            points = points[1:]
-
-        times = points[:, 2]
-        if not (math.isfinite(float(times[0])) and math.isfinite(float(times[-1]))):
-            return False
-        # Reicht die kurve zeitlich ueberhaupt noch in die zukunft?
-        if float(times[-1]) <= now:
-            return False
-
-        # Erster punkt, der noch in der zukunft liegt. Die zeitspalte ist
-        # monoton steigend, also genuegt eine binaere suche.
-        drop = int(np.searchsorted(times, now, side='left'))
-        drop = max(0, min(drop, points.shape[0] - 2))
-
+        points = self.points
         sx = float(ship.position.x)
         sy = float(ship.position.y)
-
-        # DIE KURVE WIRD VORN ANGESTUECKELT, NICHT VERBOGEN.
-        #
-        # Stuetzstellen lassen sich nur GANZ wegwerfen -- eine halbe gibt es
-        # nicht. Vorher blieb deshalb als kopf immer die naechste stuetzstelle
-        # VOR dem schiff stehen, und die abklingende kopfkorrektur zog die
-        # ersten punkte um diesen rest zurueck. Der rest laeuft zwischen zwei
-        # verbrauchten stuetzstellen von 0 auf eine volle punktweite und
-        # springt dann zurueck: ein saegezahn mit der amplitude EINER
-        # PUNKTWEITE (gemessen kopfabstand 0.00 -> 1.00 stuetzweite). Weil
-        # das eine weltlaenge ist und der zoom welt und linie gleich
-        # vergroessert, sah es auf JEDER zoomstufe gleich aus -- die linie
-        # rueckte sichtbar in stufen statt stetig vor.
-        #
-        # Richtig ist, dem unveraenderten rest einfach die aktuelle
-        # schiffsposition als neuen kopf voranzustellen. Das erste segment
-        # ist dann ein echtes teilstueck, das stetig kuerzer wird, bis die
-        # naechste stuetzstelle verbraucht ist. Kein punkt hinter dem kopf
-        # bewegt sich dabei ueberhaupt.
-        tail = points[drop:] if drop > 0 else points
-        head = np.empty((1, points.shape[1]), dtype=np.float64)
-        head[0, 0] = sx
-        head[0, 1] = sy
-        head[0, 2] = now
-        if points.shape[1] > 3:
-            # Der kopf IST das schiff -- also auch seine tangente. Frueher
-            # wurde die der naechsten stuetzstelle uebernommen; damit haette
-            # das erste (stetig kuerzer werdende) teilstueck eine tangente
-            # getragen, die zur falschen stelle der bahn gehoert.
-            head[0, 3] = float(getattr(ship.velocity, 'x', 0.0))
-            head[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
-        points = np.concatenate((head, tail), axis=0)
-
-        # Immer uebernehmen, auch wenn gleich darauf abgebrochen wird: sonst
-        # rastet der halt ein. Bricht er ab, bevor der schnitt steht, bleibt
-        # die kurve stehen, waehrend das schiff weiterfliegt -- der
-        # kopfabstand waechst dann jeden frame weiter (gemessen 6.4e5 ->
-        # 3.2e6 m in fuenf frames) und die abbruchbedingung ist von da an
-        # dauerhaft erfuellt.
-        self.points = points
-        self._hold_synthetic_head = True
-        self._invalidate_derived_caches(soft=True)
 
         # HINTEN ANSTUECKELN, was vorn verbraucht wurde -> der horizont
         # bleibt konstant und die linie wandert mit, statt zu schrumpfen und
@@ -3857,7 +3969,7 @@ class Predictor:
         if remaining < refresh_at:
             # Vorrat zu klein -> normaler weg rechnet nach (und der halt
             # greift danach wieder). Das ist die failsafe-schwelle.
-            self._hold_synthetic_head = False
+            self._synthetic_head = False
             return False
 
         # Weicht das schiff von der gehaltenen kurve ab, stimmt sie nicht
@@ -3873,7 +3985,7 @@ class Predictor:
             gap = math.hypot(float(points[1, 0]) - sx,
                              float(points[1, 1]) - sy)
             if gap > max(span * 4.0, 1.0):
-                self._hold_synthetic_head = False
+                self._synthetic_head = False
                 return False
 
             # DER HALT BRAUCHT EINE OBERGRENZE FUER DEN SEITLICHEN VERSATZ.
@@ -5355,6 +5467,11 @@ class Predictor:
                 pass
 
             self.points = points
+            # Frisch gerechnet: die zeitspalte ist wieder exakt auf
+            # `snapshot["sim_time"]` bezogen, und points[0] ist die echte
+            # stuetzstelle des laufs, kein selbst vorangestellter kopf.
+            self._points_time_offset = 0.0
+            self._synthetic_head = False
             # NEUE kurve -> abgeleitete zwischenergebnisse (apsis-marker) sind
             # nicht bloss verschoben, sondern gehoeren zu einer anderen
             # geometrie. Ohne das reichte der weiche weg im halt bis zu
@@ -5433,7 +5550,10 @@ class Predictor:
             new_points = result
             self.points = new_points
 
-        # Siehe _swap_ready_result: neue kurve, neue marker.
+        # Siehe _swap_ready_result: neue kurve, neue marker -- und eine
+        # zeitspalte, die wieder auf ihrem eigenen schnappschuss sitzt.
+        self._points_time_offset = 0.0
+        self._synthetic_head = False
         self._invalidate_derived_caches()
         self.initialized = True
  
@@ -5611,7 +5731,7 @@ class Predictor:
                     self._hold_pending_swap = False
                     self._hold_resume_context = None
                     # Die neue kurve traegt keinen selbst vorangestellten kopf.
-                    self._hold_synthetic_head = False
+                    self._synthetic_head = False
                 elif not self._async_jobs_in_flight():
                     # Verworfen (version/zoom/rahmen) und nichts mehr
                     # unterwegs: nicht ewig warten, sondern den harten weg
@@ -5776,7 +5896,14 @@ class Predictor:
         except Exception:
             pass
 
-        swapped = self._swap_ready_result(ship, world)
+        # OHNE STARRE VERSCHIEBUNG -- genau wie unter dem halt. Der lauf ist
+        # von einem zustand ausgegangen, der beim eintreffen ein paar frames
+        # alt ist; die kurve deswegen quer zu schieben legt sie neben die
+        # bahn (siehe _anchor_first_point). Richtig ist, sie in absoluter
+        # lage und zeit stehen zu lassen -- `_anchor_first_point` wirft
+        # gleich darauf die punkte weg, deren zeit vergangen ist, und stellt
+        # dem rest das schiff als kopf voran.
+        swapped = self._swap_ready_result(ship, world, allow_rebase=False)
         target_points = self._get_target_point_cap()
 
         if not self.initialized:
@@ -5970,7 +6097,21 @@ class Predictor:
         try:
             markers, count = _find_apsis_markers_numba(
                 pts,
-                float(snapshot.get("sim_time", 0.0)),
+                # DIE BEZUGSZEIT MUSS ZU DEN PUNKTZEITEN PASSEN, NICHT ZUR UHR.
+                #
+                # Der kernel rechnet `pts[i, 2] - base_sim_time` in eine
+                # LOKALE zeit zurueck und propagiert damit den referenz-
+                # koerper aus `body_x`/`body_y` -- und die wurden bei
+                # `snapshot["sim_time"]` abgegriffen. Hat jemand die
+                # zeitspalte seither verschoben (die starre nachfuehrung in
+                # _anchor_first_point tut das), passt die spalte nicht mehr
+                # zum schnappschuss: der koerper wird um genau diesen versatz
+                # zu weit vorn gelesen, waehrend die kurve nur um die
+                # SCHIFFSbewegung mitgezogen wurde. Was uebrig bleibt, ist die
+                # relativbewegung -- und die schlaegt voll auf den
+                # angezeigten Pe/Ap-abstand durch.
+                float(snapshot.get("sim_time", 0.0))
+                + float(getattr(self, "_points_time_offset", 0.0)),
                 ref_index,
                 snapshot["body_x"],
                 snapshot["body_y"],
@@ -5986,9 +6127,11 @@ class Predictor:
                 int(self.apsis_max_markers),
                 # Der selbst vorangestellte kopf ist die WELT-position des
                 # schiffs und gehoert nicht zu dieser kurve -- siehe den
-                # trend-scan im kernel. Ohne halt ist er es nicht, dann ist
-                # dieser aufruf bit-identisch zu vorher.
-                1 if bool(getattr(self, '_hold_synthetic_head', False)) else 0,
+                # trend-scan im kernel. Das gilt jetzt in BEIDEN betriebsarten
+                # (echtzeit wie halt), weil beide dieselbe mechanik benutzen;
+                # ohne kopf steht das flag auf False und der aufruf ist
+                # bit-identisch zu vorher.
+                1 if bool(getattr(self, '_synthetic_head', False)) else 0,
             )
             self._apsis_markers = markers[:int(count)].copy()
         except Exception as exc:
@@ -6234,6 +6377,8 @@ class Predictor:
 
                 remove_count = min(remove_count, max(0, n - 1))
                 if remove_count > 0:
+                    # Siehe unten: der vorangestellte kopf ist mit weg.
+                    self._synthetic_head = False
                     try:
                         self._roll_states = self._roll_states[remove_count:]
                         if isinstance(self._roll_states, np.ndarray) and self._roll_states.shape[0] > 0:
@@ -6276,6 +6421,8 @@ class Predictor:
 
             remove_count = min(remove_count, max(0, n - 1))
             if remove_count > 0:
+                # Siehe unten: der vorangestellte kopf ist mit weg.
+                self._synthetic_head = False
                 try:
                     self.points = self.points[remove_count:]
                 except Exception:
@@ -6324,6 +6471,11 @@ class Predictor:
 
         remove_count = min(remove_count, max(0, n - 1))
         if remove_count > 0:
+            # Der selbst vorangestellte kopf (siehe
+            # _advance_points_along_curve) ist mit weggeschnitten worden --
+            # sonst wuerde die naechste runde ihn ein zweites mal entfernen
+            # und dabei eine ECHTE stuetzstelle verlieren, jeden frame eine.
+            self._synthetic_head = False
             try:
                 del pts[:remove_count]
             except Exception:

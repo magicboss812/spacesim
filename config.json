@@ -11,7 +11,7 @@
   "simulation": {
     "system_file": "solar_system.json",
     "focus_body": "Erde",
-    "initial_sim_dt": 900.0,
+    "initial_sim_dt": 6.0,
     "min_sim_dt": 1.0,
     "max_sim_dt": 1000000000000.0,
     "sim_dt_step_factor": 1.5,
