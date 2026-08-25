@@ -257,7 +257,7 @@ class ConfigLoader:
             ('zoom_factor', 'zoom_factor', float),
             ('zoom_smoothing', 'zoom_smoothing', float),
             ('pan_smoothing', 'pan_smoothing', float),
-            ('zoom_to_cursor', 'zoom_to_cursor', bool),
+            ('focus_smoothing', 'focus_smoothing', float),
             ('pan_inertia_enabled', 'pan_inertia_enabled', bool),
             ('pan_inertia_damping', 'pan_inertia_damping', float),
         ])
@@ -404,6 +404,17 @@ class ConfigLoader:
             ('show_apsis_markers', 'show_apsis_markers', bool),
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
             ('body_icon_radius_px', 'body_icon_radius_px', float),
+            # Auswahl-markierung (vier pfeile um den angeklickten koerper)
+            ('selection_marker_enabled', 'selection_marker_enabled', bool),
+            ('selection_arrow_length_px', 'selection_arrow_length_px', float),
+            ('selection_arrow_width_px', 'selection_arrow_width_px', float),
+            ('selection_gap_px', 'selection_gap_px', float),
+            ('selection_min_radius_px', 'selection_min_radius_px', float),
+            ('selection_max_radius_px', 'selection_max_radius_px', float),
+            ('selection_spin_deg_per_s', 'selection_spin_deg_per_s', float),
+            ('selection_pulse_period_s', 'selection_pulse_period_s', float),
+            ('selection_pulse_amount', 'selection_pulse_amount', float),
+            ('selection_pick_margin_px', 'selection_pick_margin_px', float),
             # Prozedurale vektor-optik der koerper (D2)
             ('body_vector_style', 'body_vector_style', bool),
             ('body_vector_min_radius_px', 'body_vector_min_radius_px', float),

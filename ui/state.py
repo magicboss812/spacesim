@@ -48,6 +48,15 @@ class UIState:
         self.frame_extension = BODY_CENTRED_NON_ROTATING
         self.target_overlay_enabled = False
 
+        # Angeklickter koerper (index in `bodies`) oder None.
+        #
+        # ABSICHTLICH ETWAS ANDERES ALS `reference_index`. Der bezugskoerper
+        # bestimmt, gegen was gerechnet und gezeichnet wird -- das ist eine
+        # entscheidung des spielers (taste R, die koerperliste im HUD) und
+        # darf nicht als nebenwirkung eines mausklicks umspringen. Die
+        # auswahl sagt nur "diesen koerper meine ich gerade".
+        self.selected_index = None
+
     # ------------------------------------------------------------- ableitung
 
     @property
@@ -60,6 +69,14 @@ class UIState:
     def reference_name(self):
         body = self.reference_body
         return getattr(body, 'name', '--') if body is not None else '--'
+
+    @property
+    def selected_body(self):
+        if self.selected_index is None:
+            return None
+        if not (0 <= self.selected_index < len(self.bodies)):
+            return None
+        return self.bodies[self.selected_index]
 
     @property
     def frame_mode_label(self):
@@ -107,6 +124,28 @@ class UIState:
         if self.reference_index in self.celestial_indices:
             self.reference_cursor = self.celestial_indices.index(self.reference_index)
         self._changed()
+
+    def select_body(self, index):
+        """Setzt die auswahl. Gibt True zurueck, wenn sie sich geaendert hat.
+
+        LOEST BEWUSST KEIN on_change AUS. Die benachrichtigung baut in
+        test.py den plotting-frame neu auf und macht die gehaltene vorhersage
+        ungueltig (`predictor.invalidate_hold`) -- ein voller
+        neuaufbau der trajektorie, pro mausklick, fuer eine reine
+        darstellungs-markierung. Der renderer liest `selected_index`
+        stattdessen je frame direkt.
+        """
+        if index is not None:
+            index = int(index)
+            if not (0 <= index < len(self.bodies)):
+                index = None
+        if index == self.selected_index:
+            return False
+        self.selected_index = index
+        return True
+
+    def clear_selection(self):
+        return self.select_body(None)
 
     def set_frame_extension(self, extension):
         if extension == self.frame_extension:

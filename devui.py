@@ -587,11 +587,12 @@ def draw_dev_panels(c: "DevContext"):
             _slider("pan smoothing", cam, 'pan_smoothing', 1.0, 60.0, "%.1f")
             _slider("zoom factor/notch", cam, 'zoom_factor', 1.05, 3.0, "%.2f")
             _slider("move speed (screens/s)", cam, 'move_speed', 0.05, 5.0, "%.2f")
-            _checkbox("zoom to cursor", cam, 'zoom_to_cursor')
+            _slider("focus smoothing", cam, 'focus_smoothing', 1.0, 30.0, "%.1f",
+                    tooltip="Rate des anflugs (focus_on / Home), nicht des schwenks.")
             _checkbox("pan inertia", cam, 'pan_inertia_enabled')
             _slider("inertia damping", cam, 'pan_inertia_damping', 0.5, 20.0, "%.1f")
-            if imgui.button("recentre on target"):
-                cam.follow_offset.clear()
+            if imgui.button("home (ship)"):
+                cam.recentre()
             imgui.same_line()
             if imgui.button("snap (no easing)"):
                 cam.snap_to_targets()

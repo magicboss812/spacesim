@@ -32,22 +32,27 @@ class Camera:
         self.scale = 1e-6  # Standard: 1 Pixel = 1.000.000 Meter
         self.target_scale = 1e-6
 
-        # Verfolgtes Objekt (None = freie Kamera)
-        self.target = None
-        # Welt-versatz zum verfolgten körper. Damit lässt sich beim verfolgen
-        # umherziehen, ohne die verfolgung zu verlieren: der körper bleibt
-        # angeheftet, die ansicht ist nur verschoben.
-        self.follow_offset = Vec2(0.0, 0.0)
-        # Gezeichnete (nachlaufende) fassung von follow_offset.
+        # Verfolgtes Objekt (None = freie Kamera).
         #
-        # WICHTIG: beim verfolgen wird NUR dieser versatz geglättet, niemals die
-        # absolute kameraposition. Eine exponentielle glättung auf ein bewegtes
-        # ziel behält einen bleibenden rückstand von v/k -- und v ist hier
+        # Die verfolgung ist ENTWEDER-ODER: solange sie besteht, sitzt der
+        # körper EXAKT in der bildmitte, und jeder schwenk (WASD, ziehen) löst
+        # sie auf. Es gibt keinen zustand "verfolgt, aber verschoben" mehr --
+        # früher gab es ihn (`follow_offset`), und er machte den zeitraffer
+        # unbrauchbar: ein versatz zum körper wird ja mitgeführt, die kamera
+        # rennt also mit bahngeschwindigkeit durchs system, obwohl der spieler
+        # nur zur seite geschaut hat. Nach dem schwenk steht die kamera stattdessen
+        # im weltraum still (weltgeschwindigkeit exakt 0); angeheftet wird nur
+        # wieder, wenn der spieler einen körper anwählt oder Home drückt.
+        self.target = None
+        # Restversatz eines LAUFENDEN anflugs (`focus_on`), der auf null
+        # ausläuft. Nur dieser versatz wird geglättet, niemals die absolute
+        # kameraposition: eine exponentielle glättung auf ein BEWEGTES ziel
+        # behält einen bleibenden rückstand von v/k -- und v ist hier
         # `bahngeschwindigkeit * sim_dt * fps`, also astronomisch: bei sim_dt=900
         # und 17 km/s sind das 9.2e8 m pro echtsekunde, was bei pan_smoothing=20
         # rund 46 px danebenliegt. Der körper stünde dauerhaft neben der
         # bildmitte, und der versatz wüchse linear mit dem zeitraffer.
-        self._render_follow_offset = Vec2(0.0, 0.0)
+        self._focus_offset = Vec2(0.0, 0.0)
 
         # Schwenkgeschwindigkeit der tastatur-steuerung, in BILDSCHIRM-HÖHEN
         # pro sekunde. (Früher wurde dieser wert als pixel/sekunde gedeutet --
@@ -67,9 +72,14 @@ class Camera:
         # damit sie bildratenunabhängig ist.
         self.zoom_smoothing = 16.0
         self.pan_smoothing = 20.0
+        # Eigene, LANGSAMERE rate für den anflug auf einen angeklickten körper
+        # (`focus_on`). pan_smoothing = 20 ist in ~0.15 s fertig -- das liest
+        # sich als sprung, nicht als fahrt. 4.5 sind rund 0.7 s.
+        self.focus_smoothing = 4.5
+        self._focus_active = False
 
-        # Zoom auf den mauszeiger statt auf die bildmitte.
-        self.zoom_to_cursor = True
+        # Körper, zu dem `Home` zurückkehrt (normalerweise das schiff).
+        self.home_body = None
 
         # Ziehen (mittlere/rechte maustaste) + nachlauf
         self.drag_buttons = (2, 3)
@@ -119,50 +129,114 @@ class Camera:
     # ------------------------------------------------------------------
 
     def follow(self, target_body):
-        """Setzt ein Objekt zur Verfolgung."""
+        """Setzt ein Objekt zur Verfolgung (SOFORT, ohne anflug)."""
         self.target = target_body
-        self.follow_offset.clear()
-        self._render_follow_offset.clear()
+        self._focus_offset.clear()
+        self._focus_active = False
+
+    def set_home_body(self, body):
+        """Körper, auf den `Home` die ansicht zurückholt (das schiff).
+
+        Die kamera kennt die weltinhalte sonst nicht; ohne diesen einen
+        expliziten verweis müsste die haupt schleife die taste abfangen,
+        bevor `handle_event` sie sieht -- zwei stellen für eine taste.
+        """
+        self.home_body = body
+
+    def focus_on(self, body):
+        """Fährt die ansicht GEGLÄTTET auf `body` und heftet sie dort an.
+
+        Der trick ist, dass hier NICHTS neu geglättet wird: die kamera
+        springt sofort auf den neuen körper um, und `_focus_offset` wird auf
+        genau die differenz gesetzt, die das bild unverändert lässt.
+        `_ease_position` läuft ihn dann auf null zu.
+
+        Warum nicht direkt die absolute position auf den körper zu glätten:
+        das ziel bewegt sich (bahngeschwindigkeit x zeitraffer), und eine
+        exponentielle glättung auf ein bewegtes ziel behält einen bleibenden
+        rückstand von v/k -- siehe die anmerkung an `_focus_offset`.
+        Der versatz dagegen läuft auf die KONSTANTE null zu, also endet der
+        anflug exakt auf dem körper, bei jeder raffungsstufe.
+
+        Bezugsrahmen: der bildmittelpunkt ist `frame(camera.position)`, und
+        körper wie kamera gehen durch dieselbe transformation. Ein versatz in
+        WELTkoordinaten ist deshalb im nicht-rotierenden rahmen 1:1 ein
+        bildschirmversatz, im richtungsrahmen zusätzlich mit der bahnrate des
+        bezugskörpers gedreht -- über die ~0.7 s des anflugs sind das bei der
+        Erde ~1e-7 rad. Eine rücktransformation ist hier also nicht nötig.
+        """
+        if body is None:
+            return
+        previous = self.position.copy()
+        self.target = body
+        self._focus_offset = previous - body.position
+        self._pan_velocity.clear()
+        self._focus_active = True
+
+    def recentre(self):
+        """Taste Home: geglättet zurück zum heimatkörper (dem schiff)."""
+        self.focus_on(self.home_body)
 
     def unfollow(self):
         """Beendet die Objektverfolgung.
 
         Die aktuelle ansicht wird als freies ziel übernommen, damit das lösen
-        der verfolgung keinen sprung erzeugt.
+        der verfolgung keinen sprung erzeugt -- und weil `target_position`
+        danach konstant ist, steht die kamera im weltraum still, statt die
+        bahngeschwindigkeit des körpers zu erben.
         """
         self.target = None
         self.target_position = self.position.copy()
-        self.follow_offset.clear()
-        self._render_follow_offset.clear()
+        self._focus_offset.clear()
+        self._focus_active = False
 
     def _effective_target_position(self):
         """Weltposition, auf die die kamera gerade zuläuft."""
         if self.target is not None:
-            return self.target.position + self.follow_offset
+            return self.target.position
         return self.target_position
 
     def _shift_target_position(self, delta):
-        """Verschiebt das kamera-ziel um `delta` (welt-meter).
+        """Schwenkt die ansicht um `delta` (welt-meter) -- und LÖST DABEI.
 
-        Beim verfolgen wandert der versatz zum körper, sonst das freie ziel --
-        so funktioniert dieselbe geste in beiden modi.
+        Ein schwenk ist die aussage "ich will woanders hinsehen", nicht "ich
+        will den körper weiter verfolgen, nur versetzt". Der zweite zustand
+        existierte einmal (`follow_offset`) und war im zeitraffer unbrauchbar:
+        er führt den versatz mit, die kamera fliegt also mit voller
+        bahngeschwindigkeit weiter, obwohl der spieler nur zur seite geschaut
+        hat -- und beim zoomen sieht man den versatz nachlaufen, als hinge die
+        kamera dem schiff hinterher.
+
+        Das lösen passiert genau EINMAL, beim ersten schwenk: danach ist
+        `target` schon None. Ohne diese bedingung würde `unfollow()` in jedem
+        frame `target_position` auf die (noch nachlaufende) position
+        zurücksetzen und die glättung damit aushebeln.
         """
         if self.target is not None:
-            self.follow_offset += delta
-        else:
-            self.target_position += delta
+            self.unfollow()
+        self.target_position += delta
 
     # ------------------------------------------------------------------
     # Zoom
     # ------------------------------------------------------------------
 
-    def zoom_by(self, factor, anchor_screen_pos=None):
-        """Multipliziert die ZIEL-skala und verankert optional am mauszeiger.
+    def zoom_by(self, factor):
+        """Multipliziert die ZIEL-skala. Der zoom ankert an der BILDMITTE.
 
-        Ankern heißt: der weltpunkt unter `anchor_screen_pos` liegt nach dem
-        zoom wieder unter derselben bildschirmposition. Gerechnet wird gegen
-        die ziel-werte, damit mehrere schnelle rasten sauber aufeinander
-        aufbauen statt gegen den nachlaufenden zwischenstand.
+        Das heißt: er verschiebt die kamera überhaupt nicht, er ändert nur die
+        skala. Damit ist der zoom die einzige geste, die den bildmittelpunkt
+        garantiert in ruhe lässt -- was beim verfolgen genau das gewünschte
+        ergebnis hat: der körper steht still, das bild wächst um ihn herum.
+
+        Vorher wurde auf den MAUSZEIGER geankert (die karten-konvention). Das
+        verschiebt das kamera-ziel bei jeder raste, und bei schnellem
+        auf-und-ab-zoomen sieht man die geglättete position dem ziel
+        hinterherlaufen -- als würde die kamera versuchen, das schiff
+        einzuholen. Genau dieses nachlaufen ist der grund, warum es weg ist;
+        wer eine andere stelle betrachten will, schwenkt dorthin.
+
+        Gerechnet wird gegen `target_scale`, nicht gegen die nachlaufende
+        `scale`: so bauen mehrere schnelle rasten sauber aufeinander auf.
         """
         try:
             factor = float(factor)
@@ -171,43 +245,8 @@ class Camera:
         if not (factor > 0.0) or not math.isfinite(factor):
             return
 
-        old_scale = self.target_scale
-        new_scale = max(self.min_scale, min(self.max_scale, old_scale * factor))
-        if new_scale == old_scale:
-            return
-
-        base = self._effective_target_position()
-        anchor = self._zoom_anchor(anchor_screen_pos, base, old_scale)
-
-        if anchor is not None:
-            anchor_world = self._screen_to_world_with(anchor, base, old_scale)
-            # Position bestimmen, bei der anchor_world unter demselben pixel liegt.
-            cx, cy = anchor
-            safe_new = max(new_scale, 1e-30)
-            desired_x = anchor_world.x - (cx - self.width / 2) / safe_new
-            desired_y = anchor_world.y + (cy - self.height / 2) / safe_new
-            self._shift_target_position(Vec2(desired_x - base.x, desired_y - base.y))
-
-        self.target_scale = new_scale
-
-    def _zoom_anchor(self, cursor_screen_pos, base, scale):
-        """Bildschirmpunkt, der beim zoomen stehenbleiben soll (oder None).
-
-        Beim VERFOLGEN ist das immer der verfolgte koerper -- nicht der
-        mauszeiger. Ankert man beim verfolgen auf den zeiger, verschiebt jede
-        zoom-raste den versatz zum koerper ein stueck weiter, und das schiff
-        wandert aus der bildmitte heraus. Auf den koerper geankert bleibt es
-        auf demselben pixel und die bildkomposition ueberlebt den zoom.
-        """
-        if self.target is not None:
-            body = self.target.position
-            return (
-                self.width / 2 + (body.x - base.x) * scale,
-                self.height / 2 - (body.y - base.y) * scale,
-            )
-        if self.zoom_to_cursor:
-            return cursor_screen_pos
-        return None
+        self.target_scale = max(self.min_scale,
+                                min(self.max_scale, self.target_scale * factor))
 
     # ------------------------------------------------------------------
     # Ziehen
@@ -234,15 +273,11 @@ class Camera:
             return
 
         delta = Vec2(dx, dy)
+        # Löst die verfolgung beim ersten schritt (siehe _shift_target_position)
+        # und verschiebt danach nur noch das freie ziel.
         self._shift_target_position(delta)
         # Direkte manipulation: ungeglättet mitziehen, sonst gummibandet es.
-        # Beim verfolgen ist position abgeleitet, also muss der GEZEICHNETE
-        # versatz mitwandern, nicht die position selbst.
-        if self.target is not None:
-            self._render_follow_offset += delta
-            self.position = self.target.position + self._render_follow_offset
-        else:
-            self.position += delta
+        self.position += delta
 
         if dt > 1e-6:
             self._pan_velocity.set(dx / dt, dy / dt)
@@ -330,30 +365,42 @@ class Camera:
         self.scale = max(self.min_scale, min(self.max_scale, new_scale))
 
     def _ease_position(self, dt):
-        alpha = self._smoothing_alpha(self.pan_smoothing, dt)
+        # Waehrend eines anflugs (`focus_on` / `recentre`) laeuft der versatz
+        # mit der langsameren focus-rate aus; danach wieder mit pan_smoothing,
+        # damit ziehen und nachlauf direkt bleiben.
+        rate = self.focus_smoothing if self._focus_active else self.pan_smoothing
+        alpha = self._smoothing_alpha(rate, dt)
 
         if self.target is not None:
-            # Verfolgung ist EXAKT: der körper sitzt immer genau dort, wo er
-            # hingehört. Geglättet wird ausschließlich der vom benutzer
-            # erzeugte versatz (ziehen, nachlauf) -- der ist beim loslassen
-            # konstant, also läuft er sauber aus, ohne bleibenden rückstand.
-            delta = self.follow_offset - self._render_follow_offset
-            if alpha >= 1.0 or delta.magnitude() * max(self.scale, 1e-30) < 0.5:
-                self._render_follow_offset = self.follow_offset.copy()
+            # Verfolgung ist EXAKT: der körper sitzt immer genau in der
+            # bildmitte. Geglättet wird ausschließlich der restversatz eines
+            # laufenden anflugs, und dessen ziel ist die KONSTANTE null --
+            # deshalb bleibt kein rückstand, egal wie schnell der körper fliegt.
+            #
+            # Ausserhalb eines anflugs ist `_focus_offset` exakt (0, 0) und
+            # `position` damit bitgenau `target.position`. Genau das macht den
+            # zoom bewegungsfrei: es gibt nichts, was nachlaufen könnte.
+            if alpha >= 1.0 or (self._focus_offset.magnitude()
+                                * max(self.scale, 1e-30) < 0.5):
+                self._focus_offset.clear()
+                # Angekommen: der anflug ist vorbei, ab hier wieder direkt.
+                self._focus_active = False
             else:
-                self._render_follow_offset += delta * alpha
-            self.position = self.target.position + self._render_follow_offset
+                self._focus_offset -= self._focus_offset * alpha
+            self.position = self.target.position + self._focus_offset
             return
 
         desired = self.target_position
         if alpha >= 1.0:
             self.position = desired.copy()
+            self._focus_active = False
             return
         delta = desired - self.position
         self.position += delta * alpha
         # Unter einem halben pixel abstand einrasten.
         if delta.magnitude() * max(self.scale, 1e-30) < 0.5:
             self.position = desired.copy()
+            self._focus_active = False
 
     # ------------------------------------------------------------------
     # Eingabe
@@ -378,7 +425,7 @@ class Camera:
                 notches = float(getattr(event, 'y', 0) or 0)
             if notches == 0.0:
                 return
-            self.zoom_by(step ** notches, anchor_screen_pos=pygame.mouse.get_pos())
+            self.zoom_by(step ** notches)
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if ui_wants_mouse:
@@ -403,10 +450,10 @@ class Camera:
             if event.key == pygame.K_f:
                 if self.target is not None:
                     self.unfollow()
-            # Ansicht auf den verfolgten körper zurückzentrieren
+            # Home holt die ansicht zum heimatkoerper (schiff) zurueck -- der
+            # weg zurueck, nachdem ein schwenk die verfolgung geloest hat.
             elif event.key == pygame.K_HOME:
-                self.follow_offset.clear()
-                self._pan_velocity.clear()
+                self.recentre()
             # simulation timestep steuerung (PageUp/PageDown)
             elif event.key == pygame.K_PAGEUP:
                 self.sim_dt *= self.sim_dt_factor
@@ -449,6 +496,7 @@ class Camera:
     def snap_to_targets(self):
         """Übernimmt zoom/position sofort (kein nachlauf). Für initialisierung."""
         self.scale = max(self.min_scale, min(self.max_scale, self.target_scale))
-        self._render_follow_offset = self.follow_offset.copy()
+        self._focus_offset.clear()
         self.position = self._effective_target_position().copy()
         self._pan_velocity.clear()
+        self._focus_active = False

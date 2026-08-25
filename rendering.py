@@ -299,6 +299,32 @@ class Renderer:
         # bleibt das icon konstant groß (skaliert nicht mehr mit der zoom-stufe).
         self.body_icon_radius_px = 4.0
 
+        # --- auswahl-markierung (vier pfeile um den angeklickten koerper) --
+        # Alle groessen sind DESIGN-einheiten und laufen durch ui_px(), also
+        # bildschirm-groessen wie beim schiffspfeil und bei den linienbreiten
+        # der koerper-optik: die markierung ist bei jeder zoomstufe und jeder
+        # aufloesung gleich gross, sie ist keine welt-geometrie.
+        self.selection_marker_enabled = True
+        self.selection_marker_color = (0.36, 0.86, 0.98, 0.92)
+        self.selection_arrow_length_px = 13.0   # spitze -> basis
+        self.selection_arrow_width_px = 11.0    # basisbreite
+        self.selection_gap_px = 7.0             # spitze <-> koerperrand
+        self.selection_min_radius_px = 9.0      # bei icon-grossen koerpern
+        self.selection_max_radius_px = 260.0    # bildfuellender koerper
+        self.selection_spin_deg_per_s = 22.0
+        self.selection_pulse_period_s = 1.6
+        self.selection_pulse_amount = 0.07
+        # Zusaetzlicher greifrand beim anklicken (design-einheiten). Ohne ihn
+        # waere ein 4-px-icon ein 4-px-ziel.
+        self.selection_pick_margin_px = 10.0
+        # Laufende phasen der markierung. Sie werden mit dem ECHTEN frame-delta
+        # fortgeschrieben (nicht je frame um einen festen betrag), damit die
+        # bewegung bei 30 wie bei 240 fps gleich schnell ist -- dieselbe regel
+        # wie bei jeder anderen bewegung im projekt.
+        self._selection_spin_phase = 0.0
+        self._selection_pulse_phase = 0.0
+        self.selected_body = None
+
         # --- schwellen und regler der koerper-optik ----------------------
         # Unterhalb von `body_vector_min_radius_px` sieht man von facetten
         # ohnehin nichts, also wird gar nichts gebaut und der koerper bleibt
@@ -1746,7 +1772,7 @@ class Renderer:
         except Exception:
             pass
 
-    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None, reference_body=None, ship_control=None, real_dt=0.0):
+    def render(self, bodies, camera, prediction_points=None, predictor=None, sim_time=None, reference_body=None, ship_control=None, real_dt=0.0, selected_body=None):
         frame_t0 = time.perf_counter()
         timings = {
             'bodies_ms': 0.0,
@@ -1759,6 +1785,8 @@ class Renderer:
         if sim_time is not None:
             self.set_frame_time(sim_time)
         self.current_reference_body = reference_body
+        self.selected_body = selected_body
+        self._advance_selection_phases(real_dt)
         self._dbg_ship_control = ship_control
         try:
             self._current_body_index_by_id = {id(body): idx for idx, body in enumerate(bodies)}
@@ -1891,6 +1919,11 @@ class Renderer:
                 prediction_points=prediction_points,
             )
             timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
+
+        # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
+        # grund wie die beschriftungen -- und vor ihnen, damit ein label nicht
+        # unter einem pfeil verschwindet.
+        self._draw_selection_marker(camera)
 
         # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,
         # damit der kantenfilter den text nicht verschmiert (siehe _draw_body).
@@ -2385,15 +2418,18 @@ class Renderer:
                 # glyphen ueber 55 % mehr pixel. Die beschriftung wird deshalb
                 # gesammelt und in render() NACH dem FXAA-resolve gezeichnet,
                 # so wie schiff und apsis-marker es schon immer wurden.
+                # Bei ausgewaehltem koerper steht dort der obere auswahl-pfeil.
+                lift = self.selection_label_lift_px(body)
                 if entry:
                     _, w, h = entry
                     label_x = float(lx) - (float(w) / 2.0)
                     # ueber den koerper setzen: top-down ist "oben" kleineres y
-                    label_y = float(ly) - float(radius_px) - 6.0 - float(h)
+                    label_y = float(ly) - float(radius_px) - lift - 6.0 - float(h)
                     self._deferred_labels.append((body.name, label_x, label_y))
                 else:
                     self._deferred_labels.append((body.name,
-                                                  float(lx) + float(radius_px) + 2.0,
+                                                  float(lx) + float(radius_px)
+                                                  + lift + 2.0,
                                                   float(ly) - 8.0))
             except Exception:
                 try:
@@ -2556,6 +2592,184 @@ class Renderer:
         if hasattr(point, 'x') and hasattr(point, 'y'):
             return float(point.x), float(point.y)
         return float(point[0]), float(point[1])
+
+    # ------------------------------------------------------------------
+    # Auswahl: anklicken und markieren
+    # ------------------------------------------------------------------
+
+    def _pick_radius_px(self, body, camera):
+        """Greifradius eines koerpers in bildschirm-pixeln.
+
+        Deckungsgleich mit dem, was `_draw_body` zeichnet: der echte radius,
+        nach unten auf die icon-groesse geklemmt (darunter IST der koerper das
+        icon). Das schiff ist ein pfeil fester bildschirmgroesse und bekommt
+        deshalb einen festen wert.
+        """
+        if getattr(body, 'is_ship', False):
+            return 12.0
+        true_radius_px = float(getattr(body, 'radius', 0.0)) * float(camera.scale)
+        return max(true_radius_px, float(self.body_icon_radius_px))
+
+    def pick_body(self, screen_pos, bodies, camera):
+        """Index des koerpers unter `screen_pos` (top-down pixel), sonst None.
+
+        Rechnet ueber DENSELBEN pfad wie das zeichnen (`_world_to_screen_xy`
+        mit `_frame_camera_xy`), damit die trefferflaeche im rotierenden wie
+        im nicht-rotierenden rahmen genau dort liegt, wo der koerper zu sehen
+        ist. Eine eigene, "einfachere" rechnung ueber `camera.world_to_screen`
+        waere in jedem bewegten plot-frame daneben.
+
+        Laeuft NUR beim klick, nicht je frame: 28 transformationen.
+        """
+        if not bodies:
+            return None
+        try:
+            cx = float(screen_pos[0])
+            cy = float(screen_pos[1])
+        except Exception:
+            return None
+
+        camera_frame_xy = self._frame_camera_xy(camera)
+        margin = self.ui_px(self.selection_pick_margin_px)
+
+        best_index = None
+        best_distance = 0.0
+        best_radius = 0.0
+        for index, body in enumerate(bodies):
+            try:
+                sx, sy = self._world_to_screen_xy(
+                    float(body.position.x), float(body.position.y),
+                    camera, camera_frame_xy=camera_frame_xy,
+                )
+            except Exception:
+                continue
+            if not (math.isfinite(sx) and math.isfinite(sy)):
+                continue
+            radius = self._pick_radius_px(body, camera)
+            grab = radius + margin
+            dx = sx - cx
+            dy = sy - cy
+            distance = math.hypot(dx, dy)
+            if distance > grab:
+                continue
+            # Naechster MITTELPUNKT gewinnt, nicht der groesste treffer: sonst
+            # verschluckt eine bildfuellende Sonne jeden mond, der als icon
+            # davor steht. Bei gleichem abstand der kleinere koerper -- das
+            # ist der spezifischere treffer.
+            if (best_index is None
+                    or distance < best_distance
+                    or (distance == best_distance and radius < best_radius)):
+                best_index = index
+                best_distance = distance
+                best_radius = radius
+        return best_index
+
+    def selection_label_lift_px(self, body):
+        """Wieviel die beschriftung eines koerpers hoeher sitzen muss.
+
+        Der obere pfeil steht genau dort, wo `_draw_body` sonst das label
+        anheftet -- sichtbar als text mit einem dreieck darin. Bewusst OHNE
+        den puls gerechnet, mit fester zugabe: eine mitatmende beschriftung
+        waere unruhiger als die ueberdeckung, die sie behebt.
+        """
+        if body is not self.selected_body or not self.selection_marker_enabled:
+            return 0.0
+        span = self.ui_px(float(self.selection_gap_px)
+                          + float(self.selection_arrow_length_px))
+        return span * (1.0 + 2.0 * float(self.selection_pulse_amount)) + 4.0
+
+    def _advance_selection_phases(self, real_dt):
+        """Dreh- und pulsphase der markierung fortschreiben.
+
+        Ueber das ECHTE frame-delta, nicht um einen festen betrag je frame:
+        sonst haengt die drehzahl an der bildrate.
+        """
+        dt = max(0.0, float(real_dt))
+        two_pi = 2.0 * math.pi
+        spin = math.radians(float(self.selection_spin_deg_per_s)) * dt
+        self._selection_spin_phase = (self._selection_spin_phase + spin) % two_pi
+        period = max(float(self.selection_pulse_period_s), 1e-3)
+        self._selection_pulse_phase = (
+            (self._selection_pulse_phase + two_pi * dt / period) % two_pi
+        )
+
+    def _selection_marker_vertices(self, cx, cy, body_radius_px):
+        """Die 12 ortho-eckpunkte der vier pfeile (4 dreiecke).
+
+        Gibt None zurueck, wenn nichts zu zeichnen ist. Reine rechnung, damit
+        der test sie ohne GL-kontext pruefen kann.
+        """
+        pulse = 1.0 + (float(self.selection_pulse_amount)
+                       * math.sin(self._selection_pulse_phase))
+        length = self.ui_px(self.selection_arrow_length_px) * pulse
+        half_width = 0.5 * self.ui_px(self.selection_arrow_width_px) * pulse
+        gap = self.ui_px(self.selection_gap_px)
+        # Das atmen sitzt im ABSTAND, nicht in der pfeilgroesse allein -- bei
+        # einem bildfuellenden koerper waeren 7 % von 13 px sonst unsichtbar.
+        breathe = length * float(self.selection_pulse_amount) * 2.0 * math.sin(
+            self._selection_pulse_phase)
+
+        radius = min(max(float(body_radius_px),
+                         self.ui_px(self.selection_min_radius_px)),
+                     self.ui_px(self.selection_max_radius_px))
+        ring = radius + gap + breathe
+        if not math.isfinite(ring) or ring <= 0.0:
+            return None
+
+        verts = []
+        base = self._selection_spin_phase
+        for k in range(4):
+            angle = base + k * (math.pi * 0.5)
+            dx = math.cos(angle)
+            dy = math.sin(angle)
+            # Spitze zeigt nach INNEN, auf den koerper.
+            tip_x = cx + dx * ring
+            tip_y = cy + dy * ring
+            back_x = cx + dx * (ring + length)
+            back_y = cy + dy * (ring + length)
+            # Normale zur pfeilachse, fuer die basisbreite.
+            nx = -dy * half_width
+            ny = dx * half_width
+            verts.append((tip_x, self._ortho_y(tip_y)))
+            verts.append((back_x + nx, self._ortho_y(back_y + ny)))
+            verts.append((back_x - nx, self._ortho_y(back_y - ny)))
+        return verts
+
+    def _draw_selection_marker(self, camera):
+        """Vier pfeile um den ausgewaehlten koerper. EIN zeichenaufruf.
+
+        Wird nach dem FXAA-resolve gezeichnet (wie die koerper-beschriftungen):
+        ein kantenfilter ueber vier duenne dreiecke verwaescht genau die
+        spitzen, die auf den koerper zeigen sollen.
+        """
+        body = self.selected_body
+        if body is None or not self.selection_marker_enabled:
+            return
+        if self._ortho_vao is None:
+            return
+        try:
+            sx, sy = self._world_to_screen_xy(
+                float(body.position.x), float(body.position.y), camera,
+                camera_frame_xy=self._frame_camera_xy(camera),
+            )
+        except Exception:
+            return
+        if not (math.isfinite(sx) and math.isfinite(sy)):
+            return
+        # Ausserhalb des bildes gibt es nichts zu markieren. Die marge deckt
+        # die pfeile ab, die noch hereinragen koennen.
+        reach = self.ui_px(self.selection_arrow_length_px
+                           + self.selection_gap_px
+                           + self.selection_max_radius_px)
+        if not self._is_on_screen(sx, sy, reach):
+            return
+
+        verts = self._selection_marker_vertices(
+            sx, sy, self._pick_radius_px(body, camera))
+        if not verts:
+            return
+        self._draw_ortho_shape(verts, self.selection_marker_color,
+                               moderngl.TRIANGLES)
 
     def _is_on_screen(self, sx, sy, margin_px):
         return (-margin_px <= sx <= self.width + margin_px and

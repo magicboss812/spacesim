@@ -17,7 +17,6 @@ from reference_frames import (
     BODY_CENTRED_NON_ROTATING,
     PlottingFrameAdapter,
     ReferenceFrameSelector,
-    resolve_plotting_camera_target_index,
 )
 
 def main():
@@ -135,7 +134,12 @@ def main():
     focus_aliases = {focus_name, 'earth', 'erde'}
     earth = next((b for b in bodies if getattr(b, 'name', '').lower() in focus_aliases), None)
     ship = next((b for b in bodies if getattr(b, 'is_ship', False)), None)
-    camera.follow(earth)
+    # Wer verfolgt wird, entscheidet apply_frame_selection() weiter unten.
+    # Hier stand einmal camera.follow(earth) -- wirkungslos, weil die
+    # rahmenwahl es sofort wieder auf das schiff setzte. Seit sie eine
+    # bestehende verfolgung BEIBEHAELT (damit ein angeflogener planet eine
+    # taste R ueberlebt), waere diese zeile keine tote mehr: sie wuerde den
+    # start auf die Erde statt auf das schiff legen.
 
     # Predictor initialisieren
     # num_points: Anzahl der Punkte (bestimmt die Reichweite)
@@ -290,16 +294,16 @@ def main():
         except Exception:
             pass
 
-        # kamera am schiff verankert halten damit frame/target-änderungen nicht springen
-        # zum ausgewählten referenzkörper.
-        if ship is not None:
-            camera.follow(ship)
-            camera_follow_name = ship.name
-        else:
-            active_params = frame_selector.frame_parameters()
-            follow_index = resolve_plotting_camera_target_index(active_params, w.body)
-            camera.follow(w.body[follow_index])
-            camera_follow_name = w.body[follow_index].name
+        # DIE KAMERA WIRD HIER NICHT MEHR ANGEFASST. Frueher stand hier
+        # bedingungslos `camera.follow(ship)`, damit ein rahmenwechsel die
+        # ansicht nicht springen laesst -- das ist aber gar nicht noetig:
+        # bildmitte ist `frame(camera.position)`, und kamera wie inhalt gehen
+        # durch dieselbe starre transformation, ein rahmenwechsel verschiebt
+        # also beide gleich. Wer die kamera bewegt, ist ausschliesslich der
+        # spieler: klick auf einen koerper, Home, WASD/ziehen. Sonst haette
+        # jede taste R oder 1/2 einen angeflogenen planeten wieder verlassen
+        # oder einen freien schwenk zurueckgerissen.
+        camera_follow_name = getattr(camera.target, 'name', 'frei')
 
         if state.target_overlay_enabled and state.ship_index is not None:
             frame_selector.set_target_frame(state.ship_index, reference_index)
@@ -314,6 +318,12 @@ def main():
             f"FRAME: {mode_text} | target_overlay={overlay_text} "
             f"| camera_follow={camera_follow_name}"
         )
+
+    # Startbindung: die kamera haengt am schiff. Das ist die EINZIGE stelle,
+    # die sie ohne zutun des spielers anheftet -- ab hier entscheiden nur noch
+    # klick, Home und schwenk darueber. Muss VOR dem ersten
+    # apply_frame_selection() stehen, sonst meldet dessen ausgabe 'frei'.
+    camera.follow(ship if ship is not None else w.body[ui_state.reference_index])
 
     ui_state.on_change = apply_frame_selection
     apply_frame_selection()
@@ -333,9 +343,37 @@ def main():
             warp_timescale_divisor=WARP_TIMESCALE_DIVISOR,
         )
 
+    # Taste Home holt die ansicht zum schiff zurueck -- der weg heraus aus
+    # einem angeflogenen planeten, ohne neue tastenbelegung.
+    camera.set_home_body(ship)
+
     # Startansicht ohne einflug: zoom und position sofort auf ihre ziele
     # setzen, statt sie aus dem ursprung heranlaufen zu lassen.
     camera.snap_to_targets()
+
+    # --- anklicken von koerpern --------------------------------------------
+    # Erster klick waehlt aus (der renderer setzt vier pfeile darum), ein
+    # zweiter klick auf denselben koerper fliegt die kamera hin. Ein klick auf
+    # leeren raum hebt die auswahl auf.
+    #
+    # Die geste wird ueber DOWN/UP zusammengesetzt statt auf MOUSEBUTTONDOWN
+    # allein zu reagieren: sonst wuerde jeder schwenk-anfang, der zufaellig auf
+    # einem koerper beginnt, die auswahl umwerfen. Erst ein zeigerweg unter
+    # `CLICK_SLOP_PX` gilt als klick.
+    CLICK_SLOP_PX = 4.0
+    click_press_pos = None
+
+    def handle_world_click(screen_pos):
+        """Auswahl / anflug. Aendert WEDER bezugskoerper NOCH bezugsrahmen."""
+        index = renderer.pick_body(screen_pos, w.body, camera)
+        if index is None:
+            ui_state.clear_selection()
+            return
+        if index == ui_state.selected_index:
+            # Zweiter klick auf den bereits gewaehlten koerper: hinfliegen.
+            camera.focus_on(w.body[index])
+            return
+        ui_state.select_body(index)
 
 
     def update(world, dt):
@@ -667,6 +705,24 @@ def main():
             # wird, auch wenn der zeiger ihn verlassen hat).
             if consumed_by_hud:
                 continue
+
+            # Linke maustaste: koerper auswaehlen / anfliegen. Die kamera
+            # selbst zieht mit der mittleren/rechten taste, hier gibt es also
+            # keinen streit um die geste -- nur der weg des zeigers zwischen
+            # DOWN und UP entscheidet, ob es ein klick war.
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                click_press_pos = (
+                    None if ui_wants_mouse
+                    else (float(event.pos[0]), float(event.pos[1]))
+                )
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if click_press_pos is not None:
+                    dx = float(event.pos[0]) - click_press_pos[0]
+                    dy = float(event.pos[1]) - click_press_pos[1]
+                    if (dx * dx + dy * dy) <= CLICK_SLOP_PX * CLICK_SLOP_PX:
+                        handle_world_click(event.pos)
+                click_press_pos = None
+
             camera.handle_event(
                 event,
                 ui_wants_mouse=ui_wants_mouse,
@@ -747,6 +803,7 @@ def main():
         renderer.render(
             w.body, camera, points, predictor=predictor, sim_time=w.time,
             reference_body=reference_body, ship_control=ship_control, real_dt=frame_dt,
+            selected_body=ui_state.selected_body,
         )
 
         # Overlays NACH der welt und VOR dem swap. render() macht den swap
