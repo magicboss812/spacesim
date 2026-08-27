@@ -1898,6 +1898,330 @@ finally:
     _pf.close()
 
 
+# ---------------------------------------------------------------------------
+# 21. DIE BAHN-ZEITSKALA DARF NICHT AM STAERKSTEN g HAENGEN.
+#
+# `world.characteristic_timescale` ist die einzige groesse, die sagt, wie
+# schnell die bahn ist -- sie begrenzt die raffung (test.py::clamp_warp_to_orbit,
+# Telemetry.warp_step_allowed, Hud._set_warp) UND die schrittweiten-decke des
+# predictors (rkn_max_dt_timescale_divisor). Sie waehlte den koerper mit dem
+# GROESSTEN g. Auf einer mondtransferbahn ist das jenseits von r ~ 2.6e8 m die
+# SONNE, obwohl das schiff fest an die Erde gebunden ist: gemessen springt der
+# wert dort von 1.4e5 auf 3.4e6 s (25x), und er springt wieder zurueck, sobald
+# der Mond naeher steht. Folge: ein einziger frame darf mehr als eine GANZE
+# umlaufzeit vorruecken, und die decke des predictors schwankt zwischen 1500 und
+# 17254 s -- die gezeichnete linie zeigt bei jedem sprung eine andere bahn.
+#
+# Gemessen wird deshalb die GROESSE, nicht die auswahlregel: stetigkeit entlang
+# der bahn und ein frame-schritt, der unter einem bruchteil der umlaufzeit
+# bleibt. Die gegenproben halten fest, dass der fernfeld-gewinn und der
+# LEO-wert dabei erhalten bleiben.
+print()
+print("21. bahn-zeitskala auf einer mondtransferbahn")
+
+_w21, _ship21, _p21 = build()
+_p21.close()
+# build() laesst die geskripteten koerper auf ihrer lade-position (0,0) --
+# erst update_planets() setzt sie auf ihre bahn. Ohne das steht die Sonne im
+# Erdmittelpunkt und jede zeitskala hier waere gegen sie gemessen.
+_w21.update_planets(0.0)
+_by21 = {b.name: b for b in _w21.body}
+_erde21 = _by21['Erde']
+_mu21 = _w21.G * _erde21.mass
+_RP21, _RA21 = 7.0e6, 4.05e8
+_A21 = 0.5 * (_RP21 + _RA21)
+_T21 = 2.0 * math.pi * math.sqrt(_A21 ** 3 / _mu21)
+
+
+def _tchar_at(radius):
+    """t_char, wenn das schiff bei diesem Erd-abstand auf der transferbahn steht."""
+    speed = math.sqrt(max(0.0, _mu21 * (2.0 / radius - 1.0 / _A21)))
+    _ship21.position.x = _erde21.position.x + radius
+    _ship21.position.y = _erde21.position.y
+    _ship21.velocity.x = 0.0
+    _ship21.velocity.y = speed
+    return float(_w21.characteristic_timescale(_ship21))
+
+
+# (a) stetigkeit: ein 2-%-schritt im radius darf den wert nicht vervielfachen.
+#
+# NAHE an einem koerper ist ein steiler verlauf richtig -- dort GEHOERT die
+# zeitskala gegen null, und ein 2-%-schritt im Erd-abstand ist beim Mond
+# vorbei ein vielfaches des MOND-abstands. Gemessen wird deshalb nur, wo das
+# schiff von jedem koerper mindestens eine Mond-SOI (6.6e7 m) entfernt ist:
+# genau dort sass der alte sprung, und er kam nicht aus der geometrie,
+# sondern aus dem UMSCHALTEN des ausgewaehlten koerpers.
+_MIN_SEP21 = 6.6e7
+
+
+def _clear_of_bodies21(radius):
+    _tchar_at(radius)                    # setzt die schiffsposition
+    for _b in _w21.body:
+        if _b is _ship21 or getattr(_b, 'is_ship', False):
+            continue
+        if not float(getattr(_b, 'mass', 0.0) or 0.0):
+            continue
+        if math.hypot(_b.position.x - _ship21.position.x,
+                      _b.position.y - _ship21.position.y) < _MIN_SEP21:
+            return False
+    return True
+
+
+_radii21 = [1.0e8 * (1.02 ** k) for k in range(85)]      # 1.0e8 .. 5.1e8 m
+_vals21 = [_tchar_at(r) for r in _radii21]
+_clear21 = [_clear_of_bodies21(r) for r in _radii21]
+_worst21 = 0.0
+_worst_r21 = 0.0
+_pairs21 = 0
+for _i in range(1, len(_vals21)):
+    if not (_clear21[_i] and _clear21[_i - 1]):
+        continue
+    _pairs21 += 1
+    _ratio = max(_vals21[_i] / _vals21[_i - 1], _vals21[_i - 1] / _vals21[_i])
+    if _ratio > _worst21:
+        _worst21 = _ratio
+        _worst_r21 = _radii21[_i]
+check(_pairs21 > 60,
+      "genug messpunkte fern der koerper (sonst prueft (a) nichts)",
+      f"{_pairs21} von {len(_radii21) - 1} paaren")
+check(_worst21 < 1.5,
+      "t_char ist fern der koerper stetig (2-%-radiusschritt)",
+      f"groesster sprung {_worst21:.2f}x bei r = {_worst_r21:.3e} m")
+
+# (b) ein frame darf nie mehr als ein viertel der umlaufzeit vorruecken.
+_TICK21 = 180.0
+_worst_frac21 = 0.0
+_worst_fr_r21 = 0.0
+for _r21, _v21 in zip(_radii21, _vals21):
+    _frame_s = max(_v21 / 3.0, 60.0 / _TICK21)          # warp_timescale_divisor
+    _frac = _frame_s / _T21
+    if _frac > _worst_frac21:
+        _worst_frac21 = _frac
+        _worst_fr_r21 = _r21
+check(_worst_frac21 < 0.25,
+      "erlaubter frame-schritt bleibt unter einem viertel der umlaufzeit",
+      f"groesster anteil {_worst_frac21:.3f} T bei r = {_worst_fr_r21:.3e} m "
+      f"(T = {_T21:.4e} s)")
+
+# (c) gegenprobe fernfeld: 1 AU von der Sonne muss weiter jahr/2pi ergeben,
+#     sonst waere (a)/(b) mit einer pauschal kleinen zahl zu erschleichen.
+_sonne21 = _by21['Sonne']
+_ship21.position.x = _sonne21.position.x + 1.496e11
+_ship21.position.y = _sonne21.position.y
+_ship21.velocity.x = 0.0
+_ship21.velocity.y = 29780.0
+_helio21 = float(_w21.characteristic_timescale(_ship21))
+_exact_helio21 = math.sqrt(1.496e11 ** 3 / (_w21.G * _sonne21.mass))
+check(abs(_helio21 / _exact_helio21 - 1.0) < 0.02,
+      "fernfeld unveraendert: 1 AU ergibt jahr/2pi",
+      f"{_helio21:.4e} s gegen {_exact_helio21:.4e} s")
+
+# (d) gegenprobe nahfeld: LEO muss weiter T/2pi ergeben.
+_leo_r21 = _erde21.radius + 4.0e5
+_leo21 = _tchar_at(_leo_r21)
+_exact_leo21 = math.sqrt(_leo_r21 ** 3 / _mu21)
+check(abs(_leo21 / _exact_leo21 - 1.0) < 0.02,
+      "nahfeld unveraendert: LEO ergibt T/2pi",
+      f"{_leo21:.4e} s gegen {_exact_leo21:.4e} s")
+
+
+# ---------------------------------------------------------------------------
+# 22. DER WELTZUSTAND DARF NICHT DAVON ABHAENGEN, WIE DER FRAME ZERLEGT WIRD.
+#
+# `test.py::step_simulation` zerlegt den frame in stuecke der groesse
+# `max(max_substep_seconds, warp-decke)` -- in echtzeit 1000 s, bei 1 y/s und
+# 180 fps 4375 s. Die zerlegung ist eine RECHENSACHE; dieselbe sim-zeit muss
+# denselben zustand ergeben, sonst rechnet der zeitraffer eine andere welt als
+# die echtzeit, und genau das ist der bericht "der zeitraffer aendert die
+# physik".
+#
+# Sie tat es. Nicht wegen des schiffs-integrators (der ist adaptiv und
+# konvergiert), sondern wegen der GESKRIPTETEN KOERPER: `orbit_position`
+# schrieb `theta += (v/r)*dt` fort -- ein Euler-schritt erster ordnung, dessen
+# schrittweite genau der chunk ist -- und benutzte dabei den radius zum ALTEN
+# winkel. Gemessen auf einer mondtransferbahn (rp 7e6 / ra 4.05e8 m) ueber
+# 25 tage: das perigaeum kam bei chunk 4375 s auf 9.05e6 m heraus, bei 1000 s
+# auf 7.04e6 m und bei 30 s auf 6.76e6 m. Eine gegenprobe mit verfeinerter
+# integrator-decke (3000 -> 30 s) bewegte dieselbe zahl um 0 m -- der fehler
+# sass also nicht im schiff.
+print()
+print("22. weltzustand unabhaengig von der chunk-groesse")
+
+
+def _advance_chunked22(w, ship, span, chunk):
+    """Wie test.py::step_simulation, aber mit vorgegebener stueckgroesse."""
+    n = max(1, int(math.ceil(span / chunk)))
+    dt = span / n
+    for _ in range(n):
+        w.update_dynamics(dt)
+        w.update_planets(dt)
+
+
+def _scene22(chunk, span):
+    config = ConfigLoader(None)
+    config.load()
+    bs = SystemLoader("solar_system.json").load()
+    w = World(G)
+    w.body = bs
+    config.apply_to_world(w)
+    w.update_planets(0.0)
+    ship = next(b for b in bs if b.is_ship)
+    erde = next(b for b in bs if b.name == "Erde")
+    mond = next(b for b in bs if b.name == "Mond")
+    mu = G * erde.mass
+    _rp22, _ra22 = 7.0e6, 4.05e8
+    _a22 = 0.5 * (_rp22 + _ra22)
+    ship.position = _Vec2(erde.position.x + _rp22, erde.position.y)
+    ship.velocity = _Vec2(0.0, math.sqrt(mu * (2.0 / _rp22 - 1.0 / _a22)))
+    _q0 = erde.position_at_time(w.time)
+    _q1 = erde.position_at_time(w.time + 10.0)
+    ship.velocity += _Vec2((_q1.x - _q0.x) / 10.0, (_q1.y - _q0.y) / 10.0)
+    _advance_chunked22(w, ship, span, chunk)
+    return ship.position, mond.position, erde.position
+
+
+# 6 tage = etwa ein halber umlauf dieser bahn, ohne mond-begegnung: gemessen
+# wird die zerlegung, nicht das chaos einer nahen vorbeifahrt.
+_SPAN22 = 6.0 * 86400.0
+_ref_ship22, _ref_mond22, _ref_erde22 = _scene22(100.0, _SPAN22)
+for _chunk22 in (1000.0, 4375.0):
+    _s22, _m22, _e22 = _scene22(_chunk22, _SPAN22)
+    _d_ship22 = math.hypot(_s22.x - _ref_ship22.x, _s22.y - _ref_ship22.y)
+    _d_mond22 = math.hypot(_m22.x - _ref_mond22.x, _m22.y - _ref_mond22.y)
+    check(_d_ship22 < 1.0e4,
+          f"chunk {_chunk22:.0f} s liefert dieselbe schiffsposition wie 100 s",
+          f"abstand {_d_ship22:.4e} m nach {_SPAN22 / 86400.0:.0f} tagen")
+    check(_d_mond22 < 1.0e3,
+          f"chunk {_chunk22:.0f} s liefert dieselbe Mond-position wie 100 s",
+          f"abstand {_d_mond22:.4e} m")
+
+
+# ---------------------------------------------------------------------------
+# 23. DER DRUCK AUF DIE RAFFUNGSTASTE DARF DIE GEZEICHNETE LINIE NICHT ANDERN.
+#
+# Im zeitraffer wird der horizont verlaengert, damit der halt nicht leerlaeuft
+# (predictor_warp_length_mult). Gezeichnet wird davon nur der un-geraffte teil
+# (set_display_length) -- der vorrat ist also unsichtbar und darf folglich
+# nichts an der sichtbaren kurve aendern. Er tat es auf zwei wegen, beide ueber
+# `wanted`: das punktbudget ist gedeckelt (der abstand vergroeberte sich um bis
+# zu 16x) und `horizon_arc` hebt die fernfeld-schrittdecke (2163 -> 8676 s).
+# Gemessen bei manuell 8x und 64x raffung wich die gezeichnete kurve dadurch um
+# **2.3e6 m** ab -- auf einer bahn mit perigaeum 1e7 m eine andere linie.
+#
+# Geprueft wird gegen die ECHTZEIT-linie aus demselben schiffszustand: der
+# spieler drueckt die taste, das schiff hat sich noch nicht bewegt.
+print()
+print("23. der zeitraffer aendert die gezeichnete linie nicht")
+
+from test import predictor_horizon_lengths as _horizon23
+
+_BASE_POINTS23 = 10000
+_BASE_SPACING23 = 1.0e6
+_BASE_LENGTH23 = _BASE_POINTS23 * _BASE_SPACING23
+_MAX_POINTS23 = 40000
+
+
+def _scene23():
+    """Mondtransferbahn -- lang, exzentrisch, das gemeldete szenario."""
+    config = ConfigLoader(None)
+    config.load()
+    bs = SystemLoader("solar_system.json").load()
+    w = World(G)
+    w.body = bs
+    config.apply_to_world(w)
+    w.update_planets(0.0)
+    ship = next(b for b in bs if b.is_ship)
+    erde = next(b for b in bs if b.name == "Erde")
+    mu = G * erde.mass
+    _rp, _ra = 7.0e6, 4.05e8
+    _a = 0.5 * (_rp + _ra)
+    _e = (_ra - _rp) / (_ra + _rp)
+    _p = _a * (1.0 - _e * _e)
+    _h = math.sqrt(mu * _p)
+    _r0 = 3.0e8
+    _nu = math.acos(max(-1.0, min(1.0, (_p / _r0 - 1.0) / _e)))
+    _vr = mu / _h * _e * math.sin(_nu)
+    _vt = _h / _r0
+    _cn, _sn = math.cos(_nu), math.sin(_nu)
+    ship.position = _Vec2(erde.position.x + _r0 * _cn, erde.position.y + _r0 * _sn)
+    ship.velocity = _Vec2(_vr * _cn - _vt * _sn, _vr * _sn + _vt * _cn)
+    _q1 = erde.position_at_time(w.time + 1.0)
+    ship.velocity += _Vec2(_q1.x - erde.position.x, _q1.y - erde.position.y)
+    p = Predictor(recompute_every_update=True, **config.predictor_kwargs())
+    config.apply_to_predictor(p)
+    p.async_compute = False
+    return w, ship, p
+
+
+def _drawn_line23(manual, warp_mult):
+    w, ship, p = _scene23()
+    drawn, wanted = _horizon23(_BASE_LENGTH23, manual, warp_mult,
+                               _MAX_POINTS23, _BASE_SPACING23)
+    p.set_display_length(drawn if wanted > drawn else None)
+    p.set_num_points(int(min(_MAX_POINTS23,
+                             max(1, math.ceil(wanted / _BASE_SPACING23)))))
+    p.set_length(wanted)
+    p._compute_full(ship, w)
+    p._compute_full(ship, w)       # eingeschwungen (_horizon_time_per_arc steht)
+    pts = np.array(p.points, dtype=np.float64)
+    p.close()
+    step = np.hypot(np.diff(pts[:, 0]), np.diff(pts[:, 1]))
+    arc = np.concatenate([[0.0], np.cumsum(step)])
+    return pts[arc <= drawn]
+
+
+def _hermite23(pts, ts):
+    """Kubisch mit den gespeicherten tangenten -- so zeichnet der renderer."""
+    col = pts[:, 2]
+    i = np.clip(np.searchsorted(col, ts, side='right') - 1, 0, len(col) - 2)
+    t0, t1 = col[i], col[i + 1]
+    h = np.where(t1 > t0, t1 - t0, 1.0)
+    u = (ts - t0) / h
+    u2, u3 = u * u, u * u * u
+    h00, h10, h01, h11 = 2 * u3 - 3 * u2 + 1, u3 - 2 * u2 + u, -2 * u3 + 3 * u2, u3 - u2
+    return (h00 * pts[i, 0] + h10 * h * pts[i, 3] + h01 * pts[i + 1, 0] + h11 * h * pts[i + 1, 3],
+            h00 * pts[i, 1] + h10 * h * pts[i, 4] + h01 * pts[i + 1, 1] + h11 * h * pts[i + 1, 4])
+
+
+for _manual23 in (1.0, 8.0):
+    _base23 = _drawn_line23(_manual23, 1.0)
+    for _wm23 in (16.0, 64.0):
+        _warped23 = _drawn_line23(_manual23, _wm23)
+        _lo23 = max(_base23[0, 2], _warped23[0, 2])
+        _hi23 = min(_base23[-1, 2], _warped23[-1, 2])
+        _ts23 = _base23[(_base23[:, 2] >= _lo23) & (_base23[:, 2] <= _hi23), 2]
+        _ax23, _ay23 = _hermite23(_warped23, _ts23)
+        _bx23, _by23 = _hermite23(_base23, _ts23)
+        _dev23 = float(np.max(np.hypot(_ax23 - _bx23, _ay23 - _by23)))
+        check(_dev23 <= 1.0,
+              f"manuell {_manual23:.0f}x: raffung x{_wm23:.0f} laesst die "
+              f"gezeichnete linie stehen",
+              f"groesste abweichung {_dev23:.4e} m ueber "
+              f"{(_hi23 - _lo23) / 86400.0:.1f} tage, "
+              f"{_warped23.shape[0]} gegen {_base23.shape[0]} punkte")
+
+# Gegenprobe: OHNE den deckel (also mit dem vollen raffungsfaktor auf dem
+# horizont) reisst dieselbe messung weit aus -- sonst pruefte §23 nichts.
+_base23 = _drawn_line23(8.0, 1.0)
+_w23, _s23, _p23 = _scene23()
+_p23.set_display_length(_BASE_LENGTH23 * 8.0)
+_p23.set_num_points(_MAX_POINTS23)
+_p23.set_length(_BASE_LENGTH23 * 8.0 * 64.0)     # ungedeckelt
+_p23._compute_full(_s23, _w23)
+_p23._compute_full(_s23, _w23)
+_pts23 = np.array(_p23.points, dtype=np.float64)
+_p23.close()
+_step23 = np.hypot(np.diff(_pts23[:, 0]), np.diff(_pts23[:, 1]))
+_unc23 = _pts23[np.concatenate([[0.0], np.cumsum(_step23)]) <= _BASE_LENGTH23 * 8.0]
+_ts23 = _base23[(_base23[:, 2] >= _unc23[0, 2]) & (_base23[:, 2] <= _unc23[-1, 2]), 2]
+_ax23, _ay23 = _hermite23(_unc23, _ts23)
+_bx23, _by23 = _hermite23(_base23, _ts23)
+_old23 = float(np.max(np.hypot(_ax23 - _bx23, _ay23 - _by23)))
+check(_old23 > 1.0e6,
+      "gegenprobe: ohne deckel wandert dieselbe linie um megameter",
+      f"groesste abweichung {_old23:.4e} m, nur noch {_unc23.shape[0]} punkte")
+
+
 print()
 if FAILURES:
     print(f"FEHLGESCHLAGEN: {len(FAILURES)}")

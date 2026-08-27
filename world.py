@@ -60,30 +60,62 @@ class world:
         self._epicycle_saved = {}
 
     def characteristic_timescale(self, ship):
-        """Zeitskala der bahnbewegung um den DOMINIERENDEN koerper, in sekunden.
+        """Zeitskala der bahnbewegung, in sekunden -- die KLEINSTE, die ein
+        koerper dem schiff auferlegt.
 
-        Fuer eine kreisbahn ist sqrt(r/|g|) genau T/2pi -- die zeit, in der sich
-        der geschwindigkeitsvektor nennenswert dreht. Sie ist die ehrliche
+        Je koerper ist `sqrt(r_i^3 / (G m_i))` = `sqrt(r_i / g_i)` genau die
+        kepler-zeitskala einer kreisbahn um ihn, also T/2pi -- die zeit, in der
+        sich der geschwindigkeitsvektor nennenswert dreht. Sie ist die ehrliche
         obergrenze fuer einen zeitraffer-schritt: rueckt ein frame um mehr als
         einen bruchteil davon vor, ist die bahn nicht mehr aufgeloest, ganz
-        gleich wie fein der integrator rechnet.
+        gleich wie fein der integrator rechnet. Genommen wird das MINIMUM ueber
+        alle koerper -- der straffste zuegel gewinnt.
 
         Warum nicht die umlaufzeit aus dem HUD? Weil die gegen den vom SPIELER
         gewaehlten bezugskoerper gerechnet wird. Wer im erdorbit die Sonne als
         bezug einstellt, bekaeme dort ein jahr statt zwei stunden -- die grenze
-        haenge dann an einer anzeigeeinstellung statt an der physik. Der
-        dominierende koerper ist der mit dem groessten G*m/r^2, also der, der
-        die bahn tatsaechlich bestimmt.
+        haenge dann an einer anzeigeeinstellung statt an der physik.
 
-        Rueckgabe None, wenn es keinen dominierenden koerper gibt.
+        > **NICHT den koerper mit dem groessten g nehmen.** Das stand hier bis
+        > 2026-08-27, und es ist auf jeder mond-transferbahn falsch. Jenseits
+        > von r ~ 2.6e8 m ist Erdbeschleunigung < sonnenbeschleunigung
+        > (4.4e-3 gegen 6.1e-3 m/s^2) -- das schiff ist dort aber laengst nicht
+        > frei, die Erd-SOI reicht bis 9.2e8 m und der Mond steht bei 3.8e8 m
+        > mittendrin. Die auswahl kippte also auf die SONNE und meldete deren
+        > zeitskala: gemessen auf einer bahn rp 7e6 / ra 4.05e8 m sprang der
+        > wert bei r = 2.6e8 m von 1.4e5 auf 3.4e6 s (25x), fiel am Mond auf
+        > 1.9e4 s zurueck und stieg dahinter wieder -- ueber einen
+        > 2-%-radiusschritt gemessen ein sprung um das **97-fache**.
+        >
+        > Beide verbraucher haengen daran, und beide brachen mit:
+        >
+        > 1. **Die raffungsgrenze** (`test.py::clamp_warp_to_orbit`,
+        >    `Telemetry.warp_step_allowed`, `Hud._set_warp`) erlaubte damit
+        >    `t_char/3` = 1.18e6 s je frame auf einer bahn mit T = 9.3e5 s --
+        >    **1.57 umlaufzeiten in EINEM frame**. Der integrator rechnet das
+        >    brav durch und liefert eine andere bahn: derselbe start, 25 tage,
+        >    perigaeum **1.107e7 m in echtzeit gegen 6.76e6 m im zeitraffer**.
+        > 2. **Die schrittweiten-decke des predictors** (`_make_snapshot`,
+        >    `rkn_max_dt_timescale_divisor`) wird als `t_char/30` gedeckelt.
+        >    Mit dem sprung ging sie im zeitraffer von 1500 auf 17254 s hoch
+        >    und beim naechsten kippen wieder zurueck -- die gezeichnete linie
+        >    zeigte bei jedem wechsel eine andere bahn (gemessen: dichteste
+        >    mond-annaeherung 1.156e7 gegen 1.134e7 m, bahnabweichung 6e6 m
+        >    ueber 60 tage).
+        >
+        > Das minimum je koerper hat den sprung nicht, weil es ein minimum
+        > STETIGER funktionen ist: derselbe schritt misst jetzt hoechstens
+        > 1.03x. Und es ist nicht bloss glatter, sondern richtiger -- in LEO
+        > und bei 1 AU liefert es T/2pi exakt, wo die alte fassung durch das
+        > `total_g` im nenner 0.03 % bzw. 0.5 % daneben lag.
+
+        Rueckgabe None, wenn kein koerper eine zeitskala liefert.
         """
         if ship is None:
             return None
         px = ship.position.x
         py = ship.position.y
-        best_g = 0.0
-        best_r2 = 0.0
-        total_g = 0.0
+        best = math.inf
         for b in self.body:
             if b is ship or getattr(b, 'is_ship', False):
                 continue
@@ -95,14 +127,14 @@ class world:
             r2 = dx * dx + dy * dy
             if r2 < 1e-6:
                 continue
-            g = self.G * mass / r2
-            total_g += g
-            if g > best_g:
-                best_g = g
-                best_r2 = r2
-        if best_g <= 0.0 or total_g <= 0.0:
+            # sqrt(r^3 / mu) -- als sqrt(r/g) geschrieben waere es dieselbe
+            # zahl, so spart es die zweite division.
+            t = math.sqrt(math.sqrt(r2) * r2 / (self.G * mass))
+            if t < best:
+                best = t
+        if not math.isfinite(best):
             return None
-        return math.sqrt(math.sqrt(best_r2) / total_g)
+        return best
 
     def set_warp_step_ceiling(self, sim_seconds_per_frame):
         """Decke fuer die integrator-schrittweite aus der raffung ableiten.

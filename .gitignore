@@ -1,0 +1,3 @@
+tests/energy_test.py
+tests/hamiltonian_diag.py
+__pycache__/

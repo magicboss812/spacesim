@@ -24,13 +24,17 @@ ungenauer".
 
 ZWEI STELLEN, AN DENEN MAN LEICHT DANEBENGREIFT:
 
-1. **Nicht die predictor-kernel wiederverwenden.** `predictor.py` propagiert
-   die scripted-koerper mit einer echten Kepler-loesung (mittlere anomalie +
-   Newton-iteration). `bodies.position_at_time`, das der welt-integrator
-   benutzt, rechnet statt dessen mit KONSTANTER winkelgeschwindigkeit
-   (`theta_t = theta_ref + omega_ref * dt`). Die beiden modelle stimmen nicht
-   ueberein. Hier wird bewusst das der welt nachgebildet -- sonst aendert
-   sich die physik, und genau das war ausgeschlossen.
+1. **Das koerpermodell ist die Kepler-loesung, und zwar in ALLEN DREIEN.**
+   Bis 2026-08-27 stand hier das gegenteil: die welt rechnete mit KONSTANTER
+   winkelgeschwindigkeit (`theta_t = theta_ref + omega_ref * dt`), der
+   predictor mit mittlerer anomalie und Newton-iteration, und diese datei
+   bildete bewusst das erstere nach. Das war der fehler, nicht die regel --
+   die naeherung ist nur an den apsiden richtig und ihr fehler waechst mit
+   dem ALTER DES BOOKMARKS, also mit der chunk-groesse, also mit der
+   raffungsstufe. `bodies.kepler_relative_xy` ist jetzt die eine quelle;
+   `_body_pos_at_time` unten ist ihre wortgleiche uebertragung. Wer eine der
+   beiden anfasst, muss die andere mitziehen -- `tests/warp_predictor_test.py`
+   §2 misst die bit-identitaet und faellt sofort darauf.
 2. **Die summe laeuft in koerper-reihenfolge.** Gleitkomma-addition ist nicht
    assoziativ; eine andere reihenfolge gibt andere letzte bits und damit eine
    andere energiedrift.
@@ -80,19 +84,52 @@ def _body_pos_at_time(index, t, bx, by, k_has, k_a, k_e, k_arg, k_parent,
         e = k_e[idx]
         mu = k_mu[idx]
 
-        ref_theta = k_ref_theta[idx]
+        nu0 = k_ref_theta[idx]
         delta_t = t - k_ref_time[idx]
 
-        # Konstante winkelgeschwindigkeit aus vis-viva am referenzpunkt --
-        # bewusst dieselbe naeherung wie in bodies.py, siehe modulkopf.
-        r_ref = a * (1.0 - e * e) / (1.0 + e * math.cos(ref_theta))
-        v_ref = math.sqrt(max(0.0, mu * (2.0 / r_ref - 1.0 / a)))
-        omega_ref = v_ref / max(1e-12, r_ref)
-        theta_t = ref_theta + omega_ref * delta_t
+        # Exakte Kepler-fortschreibung -- WORT FUER WORT
+        # bodies.kepler_relative_xy (und damit auch
+        # predictor._body_scripted_relative_xy_numba). Siehe modulkopf, punkt 1.
+        cos_nu0 = math.cos(nu0)
+        sin_nu0 = math.sin(nu0)
+        denom = 1.0 + e * cos_nu0
+        if abs(denom) <= 1e-14:
+            return acc_x + bx[idx], acc_y + by[idx]
 
-        r_t = a * (1.0 - e * e) / (1.0 + e * math.cos(theta_t))
-        x_orb = r_t * math.cos(theta_t)
-        y_orb = r_t * math.sin(theta_t)
+        sqrt_one_minus_e2 = math.sqrt(max(0.0, 1.0 - e * e))
+        sin_e0 = sqrt_one_minus_e2 * sin_nu0 / denom
+        cos_e0 = (e + cos_nu0) / denom
+        ecc_anomaly0 = math.atan2(sin_e0, cos_e0)
+        mean_anomaly0 = ecc_anomaly0 - e * math.sin(ecc_anomaly0)
+        mean_motion = math.sqrt(mu / (a * a * a))
+
+        mean_anomaly = mean_anomaly0 + mean_motion * delta_t
+        two_pi = 2.0 * math.pi
+        mean_anomaly = (mean_anomaly + math.pi) % two_pi
+        if mean_anomaly < 0.0:
+            mean_anomaly += two_pi
+        mean_anomaly -= math.pi
+
+        ecc_anomaly = mean_anomaly
+        for _ in range(12):
+            f = ecc_anomaly - e * math.sin(ecc_anomaly) - mean_anomaly
+            fp = 1.0 - e * math.cos(ecc_anomaly)
+            if abs(fp) <= 1e-14:
+                break
+            delta = f / fp
+            ecc_anomaly -= delta
+            if abs(delta) <= 1e-13:
+                break
+
+        cos_e = math.cos(ecc_anomaly)
+        sin_e = math.sin(ecc_anomaly)
+        r_t = a * (1.0 - e * cos_e)
+        if r_t <= 0.0 or not math.isfinite(r_t):
+            return acc_x + bx[idx], acc_y + by[idx]
+
+        nu = math.atan2(sqrt_one_minus_e2 * sin_e, cos_e - e)
+        x_orb = r_t * math.cos(nu)
+        y_orb = r_t * math.sin(nu)
 
         c = math.cos(k_arg[idx])
         s = math.sin(k_arg[idx])

@@ -19,6 +19,23 @@ from reference_frames import (
     ReferenceFrameSelector,
 )
 
+
+def predictor_horizon_lengths(base_length, manual_mult, warp_mult,
+                              max_points, base_spacing):
+    """(gezeichnete laenge, gerechnete laenge) fuer den vorhersage-horizont.
+
+    Modulebene und rein, damit `tests/warp_predictor_test.py` §23 sie messen
+    kann statt die regel nachzubauen. Die begruendung fuer den deckel steht
+    bei `apply_predictor_horizon()`.
+    """
+    drawn = float(base_length) * float(manual_mult)
+    budget_length = float(max_points) * float(base_spacing)
+    warp_mult = float(warp_mult)
+    if drawn > 0.0:
+        warp_mult = min(warp_mult, max(1.0, budget_length / drawn))
+    return drawn, drawn * warp_mult
+
+
 def main():
     import os
     import time
@@ -513,8 +530,42 @@ def main():
         """Horizont neu setzen, wenn sich basis*manuell*raffung geaendert hat."""
         if predictor.num_points <= 0:
             return
-        drawn = PREDICTOR_BASE_LENGTH * predictor_manual_mult
-        wanted = drawn * predictor_warp_length_mult()
+        # DIE RAFFUNGS-VERLAENGERUNG IST EIN VORRAT, KEIN BILD -- UND SIE DARF
+        # DIE GEZEICHNETE LINIE NICHT ANFASSEN.
+        #
+        # `wanted` geht an zwei stellen weiter, die beide auf die SICHTBARE
+        # kurve durchschlagen, obwohl der verlaengerte teil gar nicht
+        # gezeichnet wird (set_display_length unten):
+        #
+        # 1. `points_wanted` ist bei `PREDICTOR_MAX_POINTS` gedeckelt. Ist der
+        #    deckel erreicht, vergroebert jede weitere verlaengerung den
+        #    PUNKTABSTAND -- gemessen bei manuell 8x und 64x raffung: 40000
+        #    punkte auf dem gezeichneten stueck werden zu **626**, und die
+        #    gezeichnete kurve weicht dann selbst mit der kubischen
+        #    Hermite-auswertung um **2.3e6 m** von derselben bahn ab (linear
+        #    waeren es 6.8e6 m). Auf einer bahn mit perigaeum 1e7 m ist das
+        #    eine sichtbar andere linie.
+        # 2. `horizon_arc` in `Predictor._make_snapshot` ist `punkte x abstand`
+        #    und hebt damit die fernfeld-schrittdecke an. Gemessen dieselbe
+        #    lage: decke 2163 -> 8676 s, und die INTEGRIERTE bahn verschiebt
+        #    sich um **2.3e6 m** (mit fester decke: 8.4e4 m).
+        #
+        # Beides zusammen ist der bericht "die vorhersage sieht im zeitraffer
+        # ganz anders aus" -- rund 4.6e6 m auf einer linie, deren perigaeum
+        # 1e7 m misst, allein vom druck auf die raffungstaste.
+        #
+        # Der vorrat wird deshalb auf das begrenzt, was das PUNKTBUDGET beim
+        # basis-abstand noch traegt. Dann ist `wanted` nie groesser als
+        # `PREDICTOR_MAX_POINTS x PREDICTOR_BASE_SPACING`, der abstand bleibt
+        # exakt der der echtzeit -- und mit ihm `horizon_arc` und die decke.
+        # Hat der spieler mit '+' bereits ueber das budget hinaus verlaengert,
+        # faellt der raffungsfaktor auf 1: seine eigene vergroeberung bleibt
+        # (die ist gewollt und dokumentiert), die der raffung kommt nicht dazu.
+        drawn, wanted = predictor_horizon_lengths(
+            PREDICTOR_BASE_LENGTH, predictor_manual_mult,
+            predictor_warp_length_mult(),
+            PREDICTOR_MAX_POINTS, PREDICTOR_BASE_SPACING,
+        )
         # GEZEICHNET wird immer nur der un-geraffte horizont. Ohne das wickelt
         # sich die linie im zeitraffer mehrfach um die bahn, waehrend sie in
         # echtzeit einen einzigen bogen zeigt -- und die Ap/Pe-fahnen stapeln

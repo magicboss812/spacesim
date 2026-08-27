@@ -59,9 +59,46 @@ print("\n§2  zukunfts-spur == das modell des PLOT-FRAMES (Kepler)")
 #
 # Frueher stand hier die forderung, `future_track` sei bitgleich zu
 # `bodies.body.position_at_time`. Das war die falsche zwillingsfunktion:
-# jenes modell (konstante winkelrate) gehoert dem welt-integrator, nicht
-# dem praediktor -- `world_kernels.py` sagt das im kopf ausdruecklich.
-# Der fehler war im spiel als davonfliegender Mond sichtbar.
+# jenes modell rechnete mit KONSTANTER WINKELRATE und gehoerte dem
+# welt-integrator, nicht dem praediktor. Der fehler war im spiel als
+# davonfliegender Mond sichtbar.
+#
+# SEIT 2026-08-27 GIBT ES DIESEN UNTERSCHIED NICHT MEHR: die welt loest
+# ebenfalls Kepler (`bodies.kepler_relative_xy`), weil die konstante rate
+# ihre schrittweite von der chunk-groesse bezog und damit die physik an die
+# raffungsstufe haengte. `position_at_time` deckt sich jetzt bis auf 1 mm
+# mit dem rahmen-modell -- als gegenprobe taugt es also nicht mehr, und die
+# alte naeherung wird hier eigens nachgebaut. Sie steht damit nur noch an
+# der einen stelle, an der sie hingehoert: als das, was NICHT gerechnet
+# werden soll.
+
+
+def _constant_rate_position_at_time(b, t):
+    """Die bis 2026-08-27 benutzte naeherung -- `theta` mit fester rate.
+
+    Wortgleich zur alten `bodies.body.position_at_time`, damit die
+    gegenproben unten weiter einen echten unterschied messen.
+    """
+    if b.is_moon_of is None or not b.semi_major_axis:
+        return b.position.x, b.position.y
+    a = float(b.semi_major_axis)
+    e = float(b.eccentricity) if b.eccentricity else 0.0
+    mu = G * b.is_moon_of.mass
+    if mu <= 0.0:
+        return b.position.x, b.position.y
+    ref_theta = b._kepler_ref_theta
+    dt = t - b._kepler_ref_time
+    r_ref = a * (1.0 - e * e) / (1.0 + e * math.cos(ref_theta))
+    v_ref = math.sqrt(max(0.0, mu * (2.0 / r_ref - 1.0 / a)))
+    theta_t = ref_theta + (v_ref / max(1e-12, r_ref)) * dt
+    r_t = a * (1.0 - e * e) / (1.0 + e * math.cos(theta_t))
+    x_orb = r_t * math.cos(theta_t)
+    y_orb = r_t * math.sin(theta_t)
+    c = math.cos(b.arg_periapsis)
+    sn = math.sin(b.arg_periapsis)
+    px, py = x_orb * c - y_orb * sn, x_orb * sn + y_orb * c
+    qx, qy = _constant_rate_position_at_time(b.is_moon_of, t)
+    return px + qx, py + qy
 sonne = make_body("Sonne", 1.989e30, 6.957e8)
 saturn = make_body("Saturn", 5.683e26, 5.823e7, a=1.433e12, e=0.056, arg=0.31,
                    parent=sonne)
@@ -91,10 +128,10 @@ for b, label, scene in ((saturn, "ein glied (Saturn)", 1.433e12),
     # Gegenprobe: das welt-modell reisst dieselbe schranke um himmelweite
     # betraege -- sonst koennte der test den fehler nicht von der korrektur
     # unterscheiden.
-    old = np.array([[p.x, p.y] for p in (b.position_at_time(float(t)) for t in times)])
+    old = np.array([_constant_rate_position_at_time(b, float(t)) for t in times])
     old_worst = float(np.max(np.hypot(old[:, 0] - ref[:, 0], old[:, 1] - ref[:, 1])))
     check(old_worst > 1e6 * worst and old_worst > 1e9,
-          f"{label}: gegenprobe -- das welt-modell reisst sie klar",
+          f"{label}: gegenprobe -- die konstante winkelrate reisst sie klar",
           f"max|d| = {old_worst:.3e} m ({old_worst / max(worst, 1e-9):.1e}x)")
 
 # Und der punkt, an dem es im spiel schiefging: ein mond darf im rahmen
@@ -123,11 +160,19 @@ for _days in (3.87, 30.0, 90.0, 365.0):
 # daneben -- der Mond lief bis auf ein vielfaches der apoapsis hinaus.
 _t = np.linspace(0.0, 365.0 * 86400.0, 193)
 _o = np.array([_ef._body_world_position_exact(_erde, float(x)) for x in _t])
-_old_m = np.array([[p.x, p.y] for p in (_mond.position_at_time(float(x)) for x in _t)])
+_old_m = np.array([_constant_rate_position_at_time(_mond, float(x)) for x in _t])
 _old_r = np.hypot(_old_m[:, 0] - _o[:, 0], _old_m[:, 1] - _o[:, 1])
 check(_old_r.max() > 10.0 * _hi,
-      "gegenprobe: unter dem welt-modell flog der Mond davon",
+      "gegenprobe: unter der konstanten winkelrate flog der Mond davon",
       f"r bis {_old_r.max():.4e} m = {_old_r.max() / _hi:.0f}x apoapsis")
+
+# Und die aussage, die daraus geworden ist: das WELT-modell tut es nicht
+# mehr -- es ist jetzt dasselbe Kepler-modell wie das des rahmens.
+_world_m = np.array([[p.x, p.y] for p in (_mond.position_at_time(float(x)) for x in _t)])
+_world_r = np.hypot(_world_m[:, 0] - _o[:, 0], _world_m[:, 1] - _o[:, 1])
+check(_world_r.min() >= _lo * 0.999 and _world_r.max() <= _hi * 1.001,
+      "das welt-modell bleibt jetzt selbst in der schale (365 d)",
+      f"r {_world_r.min():.4e}..{_world_r.max():.4e}")
 
 # Der stapelweg darf den koerper-zustand nicht anfassen -- er laeuft im
 # render-frame, waehrend die welt dieselben objekte integriert.
