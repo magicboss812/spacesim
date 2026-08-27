@@ -24,11 +24,11 @@
   "physics": {
     "gravitational_constant": 6.6730831e-11,
     "integrator_mode": "rkn4",
-    "integrator_max_step": 30.0,
+    "integrator_max_step": 3000.0,
     "integrator_warp_substep_target": 40.0,
     "integrator_max_step_ceiling": 1000000.0,
     "integrator_min_step": 0.01,
-    "integrator_position_tolerance": 1.0,
+    "integrator_position_tolerance": 0.10,
     "integrator_velocity_tolerance": 0.001
   },
   "camera": {

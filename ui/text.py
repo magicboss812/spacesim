@@ -62,6 +62,12 @@ class TextRenderer:
         self._deferred = []
         self._font_paths = None
         self._digit_widths = {}
+        # Freigegebene texturen nach groesse, siehe _acquire_texture.
+        self._texture_pool = {}
+        self._texture_pool_count = 0
+        # Zuletzt geschriebene uniform-werte, siehe _blit.
+        self._last_viewport = None
+        self._last_color = None
 
         self._init_pipeline()
         self._rebuild_fonts()
@@ -267,6 +273,58 @@ class TextRenderer:
 
     # --------------------------------------------------------------- cache
 
+    # Wie viele freigegebene texturen hoechstens vorgehalten werden. Der
+    # deckel ist grosszuegig gegenueber dem, was ein frame umschlaegt
+    # (gemessen ~5 neue texte je frame), und klein gegenueber dem
+    # texturspeicher: eine zeile HUD-text ist ein paar kB.
+    _TEXTURE_POOL_MAX = 96
+
+    def _acquire_texture(self, size, data, antialias):
+        """Textur dieser groesse besorgen -- moeglichst eine wiederverwendete.
+
+        Der teure teil einer NEUEN beschriftung ist nicht das rastern,
+        sondern die GL-allokation: gemessen ~0.3 ms je `ctx.texture(...)`,
+        bei rund fuenf wechselnden texten (geschwindigkeit, hoehe, timer)
+        also ein spuerbarer posten JEDES frames. Die verdraengten texturen
+        haben fast immer wieder eine passende groesse -- eine ziffer mehr
+        oder weniger aendert die zeilenhoehe nicht -- also werden sie
+        eingesammelt und mit `write()` neu befuellt statt freigegeben.
+
+        Fuer den aufrufer aendert sich nichts: er bekommt eine textur mit
+        genau diesem inhalt und dieser groesse.
+        """
+        bucket = self._texture_pool.get(size)
+        if bucket:
+            texture = bucket.pop()
+            self._texture_pool_count -= 1
+            try:
+                texture.write(data)
+                mode = moderngl.LINEAR if antialias else moderngl.NEAREST
+                texture.filter = (mode, mode)
+                return texture
+            except Exception:
+                try:
+                    texture.release()
+                except Exception:
+                    pass
+        texture = self.ctx.texture(size, 4, data)
+        mode = moderngl.LINEAR if antialias else moderngl.NEAREST
+        texture.filter = (mode, mode)
+        return texture
+
+    def _retire_texture(self, texture, size):
+        """Verdraengte textur einsammeln statt freigeben (bis zum deckel)."""
+        if texture is None:
+            return
+        if self._texture_pool_count < self._TEXTURE_POOL_MAX:
+            self._texture_pool.setdefault(size, []).append(texture)
+            self._texture_pool_count += 1
+            return
+        try:
+            texture.release()
+        except Exception:
+            pass
+
     def clear_cache(self):
         for entry in list(self._cache.values()):
             try:
@@ -274,6 +332,14 @@ class TextRenderer:
             except Exception:
                 pass
         self._cache = {}
+        for bucket in self._texture_pool.values():
+            for texture in bucket:
+                try:
+                    texture.release()
+                except Exception:
+                    pass
+        self._texture_pool = {}
+        self._texture_pool_count = 0
 
     def _texture_for(self, text, role):
         font = self.font(role)
@@ -292,13 +358,12 @@ class TextRenderer:
             )
             data = pygame.image.tostring(surface, 'RGBA', True)
             w, h = surface.get_size()
-            texture = self.ctx.texture((w, h), 4, data)
             # Die pixelschrift wird NEAREST gefiltert. _blit zeichnet zwar
             # 1:1 und auf ganze pixel gerastet, wo LINEAR dasselbe ergaebe --
             # aber eine harte rasterung, die von der genauigkeit der
             # texturkoordinaten abhaengt, ist ein unnoetiges risiko.
-            mode = moderngl.LINEAR if antialias else moderngl.NEAREST
-            texture.filter = (mode, mode)
+            # (Den filter setzt _acquire_texture, auch bei wiederverwendung.)
+            texture = self._acquire_texture((w, h), data, antialias)
         except Exception:
             return None
 
@@ -308,7 +373,8 @@ class TextRenderer:
         if len(self._cache) >= self.cache_max:
             for old_key in list(self._cache.keys())[: max(1, self.cache_max // 4)]:
                 try:
-                    self._cache.pop(old_key)[0].release()
+                    old = self._cache.pop(old_key)
+                    self._retire_texture(old[0], (int(old[1]), int(old[2])))
                 except Exception:
                     pass
 
@@ -462,10 +528,16 @@ class TextRenderer:
         ortho_x = round(float(left))
         ortho_y = round(float(self.height) - float(top) - float(h))
         self._program['u_rect'].value = (ortho_x, ortho_y, float(w), float(h))
-        self._program['u_viewport'].value = (float(self.width), float(self.height))
-        self._program['u_color'].value = (
-            float(color[0]), float(color[1]), float(color[2]), float(color[3])
-        )
+        # u_viewport ist ueber den ganzen frame konstant und u_color ueber
+        # ganze textgruppen -- nur wechsel gehen an den treiber.
+        viewport = (float(self.width), float(self.height))
+        if self._last_viewport != viewport:
+            self._program['u_viewport'].value = viewport
+            self._last_viewport = viewport
+        rgba = (float(color[0]), float(color[1]), float(color[2]), float(color[3]))
+        if self._last_color != rgba:
+            self._program['u_color'].value = rgba
+            self._last_color = rgba
         texture.use(location=0)
         self._vao.render(moderngl.TRIANGLE_STRIP)
 
@@ -474,6 +546,9 @@ class TextRenderer:
     def resize(self, width, height, ui_scale=None):
         self.width = int(width)
         self.height = int(height)
+        # u_viewport haengt an der fenstergroesse -- cache verwerfen.
+        self._last_viewport = None
+        self._last_color = None
         if ui_scale is not None and abs(float(ui_scale) - self.ui_scale) > 1e-3:
             self.ui_scale = float(ui_scale)
             self._rebuild_fonts()

@@ -20,6 +20,7 @@ import numpy as np
 
 from bodies import body as Body
 from vec import Vec2, G
+from reference_frames import BodyCentredNonRotatingReferenceFrame
 import orbit_lines
 
 FAILURES = []
@@ -48,37 +49,96 @@ def make_body(name, mass, radius, a=None, e=0.0, arg=0.0, parent=None):
 
 
 # ----------------------------------------------------------------------
-print("\n§2  zukunfts-spur == skalares position_at_time")
+print("\n§2  zukunfts-spur == das modell des PLOT-FRAMES (Kepler)")
 # ----------------------------------------------------------------------
-# Der stapelweg muss operation fuer operation dasselbe rechnen wie
-# bodies.body.position_at_time -- inklusive der elternkette, denn genau
-# dieses modell benutzt der praediktor fuer die schwerkraft. Waeren beide
-# verschieden, wuerde die spur woanders liegen als die gezeichnete linie
-# hinfliegt.
+# Gezeichnet wird `spur(t)` durch den plot-frame, also `spur(t) -
+# ursprung(t)`. Der ursprung kommt aus `reference_frames`, und das rechnet
+# Kepler (mittlere anomalie + Newton) -- genau wie der praediktor, gegen
+# dessen linie die spur ja gelesen wird. Die spur MUSS demselben modell
+# folgen; jede abweichung landet ungefiltert in der gezeichneten linie.
+#
+# Frueher stand hier die forderung, `future_track` sei bitgleich zu
+# `bodies.body.position_at_time`. Das war die falsche zwillingsfunktion:
+# jenes modell (konstante winkelrate) gehoert dem welt-integrator, nicht
+# dem praediktor -- `world_kernels.py` sagt das im kopf ausdruecklich.
+# Der fehler war im spiel als davonfliegender Mond sichtbar.
 sonne = make_body("Sonne", 1.989e30, 6.957e8)
 saturn = make_body("Saturn", 5.683e26, 5.823e7, a=1.433e12, e=0.056, arg=0.31,
                    parent=sonne)
 titan = make_body("Titan", 1.345e23, 2.575e6, a=1.222e9, e=0.029, arg=1.9,
                   parent=saturn)
 for b, th in ((saturn, 0.83), (titan, 2.41)):
+    b.theta = th
     b._kepler_ref_theta = th
     b._kepler_ref_time = 12345.0
 
 times = np.linspace(12345.0, 12345.0 + 3.0 * 365.25 * 86400.0, 97)
 
-for b, label in ((saturn, "ein glied (Saturn)"), (titan, "zwei glieder (Titan)")):
+_frame = BodyCentredNonRotatingReferenceFrame(sonne)
+_frame.set_epoch_time(12345.0)
+
+for b, label, scene in ((saturn, "ein glied (Saturn)", 1.433e12),
+                        (titan, "zwei glieder (Titan)", 1.433e12)):
     track = orbit_lines.future_track(b, times)
     check(track.shape == (times.size, 2), f"{label}: form", str(track.shape))
-    ref = np.array([[p.x, p.y] for p in (b.position_at_time(float(t)) for t in times)])
-    worst = float(np.max(np.abs(track - ref)))
-    check(worst == 0.0, f"{label}: bitgleich zum skalaren weg",
-          f"max|d| = {worst:.3e} m")
+
+    # Das modell, aus dem der rahmen seinen ursprung zieht.
+    ref = np.array([_frame._body_world_position_exact(b, float(t)) for t in times])
+    worst = float(np.max(np.hypot(track[:, 0] - ref[:, 0], track[:, 1] - ref[:, 1])))
+    check(worst <= 1.0, f"{label}: deckt sich mit dem rahmen-modell",
+          f"max|d| = {worst:.3e} m = {worst / scene:.2e} der szene")
+
+    # Gegenprobe: das welt-modell reisst dieselbe schranke um himmelweite
+    # betraege -- sonst koennte der test den fehler nicht von der korrektur
+    # unterscheiden.
+    old = np.array([[p.x, p.y] for p in (b.position_at_time(float(t)) for t in times)])
+    old_worst = float(np.max(np.hypot(old[:, 0] - ref[:, 0], old[:, 1] - ref[:, 1])))
+    check(old_worst > 1e6 * worst and old_worst > 1e9,
+          f"{label}: gegenprobe -- das welt-modell reisst sie klar",
+          f"max|d| = {old_worst:.3e} m ({old_worst / max(worst, 1e-9):.1e}x)")
+
+# Und der punkt, an dem es im spiel schiefging: ein mond darf im rahmen
+# seines eigenen planeten seine bahnschale NIE verlassen -- bei keinem
+# horizont. Unter dem welt-modell tat er genau das.
+_erde = make_body("Erde", 5.972e24, 6.371e6, a=1.496e11, e=0.0167, parent=sonne)
+_mond = make_body("Mond", 7.342e22, 1.737e6, a=3.844e8, e=0.0549, parent=_erde)
+for b in (_erde, _mond):
+    b.theta = 0.0
+    b._kepler_ref_theta = 0.0
+    b._kepler_ref_time = 0.0
+
+_ef = BodyCentredNonRotatingReferenceFrame(_erde)
+_ef.set_epoch_time(0.0)
+_lo, _hi = 3.844e8 * (1.0 - 0.0549), 3.844e8 * (1.0 + 0.0549)
+for _days in (3.87, 30.0, 90.0, 365.0):
+    _t = np.linspace(0.0, _days * 86400.0, 193)
+    _o = np.array([_ef._body_world_position_exact(_erde, float(x)) for x in _t])
+    _m = orbit_lines.future_track(_mond, _t)
+    _r = np.hypot(_m[:, 0] - _o[:, 0], _m[:, 1] - _o[:, 1])
+    check(_r.min() >= _lo * 0.999 and _r.max() <= _hi * 1.001,
+          f"Mond bleibt im Erd-rahmen in seiner schale ({_days:g} d)",
+          f"r {_r.min():.4e}..{_r.max():.4e} (schale {_lo:.4e}..{_hi:.4e})")
+
+# Gegenprobe auf dem laengsten fenster: unter dem welt-modell war es weit
+# daneben -- der Mond lief bis auf ein vielfaches der apoapsis hinaus.
+_t = np.linspace(0.0, 365.0 * 86400.0, 193)
+_o = np.array([_ef._body_world_position_exact(_erde, float(x)) for x in _t])
+_old_m = np.array([[p.x, p.y] for p in (_mond.position_at_time(float(x)) for x in _t)])
+_old_r = np.hypot(_old_m[:, 0] - _o[:, 0], _old_m[:, 1] - _o[:, 1])
+check(_old_r.max() > 10.0 * _hi,
+      "gegenprobe: unter dem welt-modell flog der Mond davon",
+      f"r bis {_old_r.max():.4e} m = {_old_r.max() / _hi:.0f}x apoapsis")
 
 # Der stapelweg darf den koerper-zustand nicht anfassen -- er laeuft im
 # render-frame, waehrend die welt dieselben objekte integriert.
-check(saturn.theta == 0.0 and saturn._kepler_ref_time == 12345.0,
+check(saturn.theta == 0.83 and saturn._kepler_ref_time == 12345.0,
       "spur veraendert den koerper nicht",
       f"theta={saturn.theta} ref_t={saturn._kepler_ref_time}")
+
+# Einzel- und stapelaufruf muessen bitgleich sein -- es ist EIN rechenweg.
+_batch = orbit_lines.future_tracks((titan,), times)
+check(float(np.max(np.abs(_batch[id(titan)] - orbit_lines.future_track(titan, times)))) == 0.0,
+      "future_track und future_tracks sind bitgleich", "0.0 m")
 
 # Koerper ohne elter (Sonne) hat keine bahn: konstante position.
 sun_track = orbit_lines.future_track(sonne, times)

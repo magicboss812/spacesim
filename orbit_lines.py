@@ -26,12 +26,8 @@ from vec import G
 def future_track(body, times, memo=None):
     """Wo `body` zu den zeiten `times` stehen wird, (k, 2) in weltkoordinaten.
 
-    Stapelfassung von `bodies.body.position_at_time`, OPERATION FUER
-    OPERATION -- dieselben zwischengroessen in derselben reihenfolge. Das
-    ist kein selbstzweck: genau dieses modell (konstante winkelrate ab dem
-    epochen-lesezeichen) benutzt der praediktor fuer die schwerkraft, also
-    trifft die gezeichnete linie die hier gezeichnete spur auch wirklich.
-    Eine "genauere" kepler-loesung waere hier die FALSCHE antwort.
+    Duenner mantel um `future_tracks` -- EIN rechenweg, damit einzel- und
+    stapelaufruf nicht auseinanderlaufen koennen.
 
     `memo` ist ein dict fuer EINEN durchlauf mit EINEM `times`-array: die
     elternkette wird darin abgelegt, damit Saturn nicht einmal je mond neu
@@ -44,64 +40,179 @@ def future_track(body, times, memo=None):
         memo.clear()
     memo['_times_id'] = id(times)
 
-    key = id(body)
-    hit = memo.get(key)
+    hit = memo.get(id(body))
     if hit is not None:
         return hit
 
-    track = _track_uncached(body, times, memo)
-    memo[key] = track
-    return track
+    # Die ganze elternkette faellt ohnehin an -- also auch gleich merken.
+    for key, track in future_tracks((body,), times).items():
+        memo.setdefault(key, track)
+    return memo[id(body)]
+
+
+def future_tracks(bodies, times):
+    """Die spuren ALLER `bodies` (und ihrer eltern) auf EINEM zeitgitter.
+
+    Gibt `{id(koerper): (k, 2)-array}` zurueck, einschliesslich der
+    vorfahren -- die fallen beim aufsummieren der kette ohnehin an.
+
+    Modell: die KEPLER-loesung aus `predictor.py`
+    (`_body_scripted_relative_xy_numba`) -- mittlere anomalie `M0 + n*dt`,
+    Newton-iteration auf die exzentrische, daraus die wahre anomalie.
+
+    NICHT `bodies.body.position_at_time`, obwohl das hier frueher stand.
+    Jenes modell schreibt die winkelrate am epochen-lesezeichen fest
+    (`theta_t = theta_ref + omega_ref*dt`) und gilt nur fuer den
+    welt-integrator (`world_kernels.py`, siehe die notiz dort). Der
+    praediktor UND `reference_frames` rechnen beide Kepler -- und der
+    plot-frame zieht seinen ursprung aus `reference_frames`. Wer hier das
+    welt-modell benutzt, zeichnet `koerper_konstantrate(t) -
+    ursprung_kepler(t)`, und die differenz der beiden modelle landet in der
+    linie. Gemessen fuer den Mond im Erd-rahmen bei 90 tagen horizont: der
+    abstand lief von 5.9e7 bis 3.1e9 m, statt in seiner bahnschale
+    3.633e8..4.055e8 m zu bleiben -- der Mond flog scheinbar davon. Mit
+    Kepler bleibt er bei JEDEM horizont in der schale (gegen die
+    ursprungs-propagation des rahmens: < 4 mm bei 365 tagen).
+
+    Der fehler steckt ausschliesslich in der ELTERNKETTE. Die eigene
+    ellipse ist unter beiden modellen dieselbe kurve -- die konstante rate
+    verschiebt nur die phase darauf --, aber der ELTER wandert unter dem
+    falschen modell vom rahmen-ursprung weg und zieht das kind mit. Deshalb
+    war die Erde im Sonnen-rahmen unauffaellig: die Sonne steht fest, es
+    gibt keine kette.
+
+    Warum als STAPEL und nicht je koerper: die Newton-iteration konvergiert
+    nach drei bis vier schritten, der aufwand liegt also nicht in der
+    mathematik, sondern in numpys aufruf-overhead auf 192 kurzen arrays --
+    gemessen 172 us je koerper einzeln gegen 34 us im stapel. Alle koerper
+    teilen sich hier ohnehin EIN zeitgitter (das des praediktors), also
+    wird EINE (k, t)-iteration fuer alle zusammen geloest.
+    """
+    times = np.ascontiguousarray(times, dtype=np.float64)
+    nt = times.shape[0]
+
+    # -- 1. huelle: jeder koerper mit seiner ganzen elternkette, kinder
+    #    garantiert NACH ihren eltern (fuer das aufsummieren unten).
+    order = []
+    seen = set()
+
+    def visit(b, depth=0):
+        if b is None or id(b) in seen or depth > 16:
+            return
+        visit(getattr(b, 'is_moon_of', None), depth + 1)
+        if id(b) not in seen:
+            seen.add(id(b))
+            order.append(b)
+
+    for b in bodies:
+        visit(b)
+
+    # -- 2. bahnelemente einsammeln. Die abbruchbedingungen sind die des
+    #    kernels; wer durchfaellt, steht still (wie `position_at_time` es
+    #    fuer elternlose koerper tut).
+    solved = []      # (koerper, a, e, M0, n, sqrt(1-e^2), cos arg, sin arg)
+    for b in order:
+        parent = getattr(b, 'is_moon_of', None)
+        if parent is None:
+            continue
+        a = getattr(b, 'semi_major_axis', None)
+        if a is None or a <= 0.0:
+            continue
+        a = float(a)
+        e = float(b.eccentricity) if b.eccentricity else 0.0
+        if e < 0.0 or e >= 1.0:
+            continue
+        mu = G * float(parent.mass)
+        if mu <= 0.0:
+            continue
+        nu0 = float(b._kepler_ref_theta)
+        cos_nu0 = math.cos(nu0)
+        sin_nu0 = math.sin(nu0)
+        denom0 = 1.0 + e * cos_nu0
+        if abs(denom0) <= 1e-14:
+            continue
+        sqrt_one_minus_e2 = math.sqrt(max(0.0, 1.0 - e * e))
+        ecc0 = math.atan2(sqrt_one_minus_e2 * sin_nu0 / denom0,
+                          (e + cos_nu0) / denom0)
+        solved.append((
+            b, a, e,
+            ecc0 - e * math.sin(ecc0),              # M0
+            math.sqrt(mu / (a * a * a)),            # mittlere bewegung
+            sqrt_one_minus_e2,
+            math.cos(b.arg_periapsis), math.sin(b.arg_periapsis),
+        ))
+
+    rel = {}
+    if solved:
+        ns = len(solved)
+        a = np.empty(ns)
+        e = np.empty(ns)
+        m0 = np.empty(ns)
+        mm = np.empty(ns)
+        s1e2 = np.empty(ns)
+        ca = np.empty(ns)
+        sa = np.empty(ns)
+        for i, row in enumerate(solved):
+            (_b, a[i], e[i], m0[i], mm[i], s1e2[i], ca[i], sa[i]) = row
+
+        # Das lesezeichen bleibt dasselbe wie zuvor: `world.update_planets`
+        # schreibt (_kepler_ref_theta, _kepler_ref_time) jeden schritt auf
+        # den JETZIGEN zustand, und von dort zaehlt auch der praediktor
+        # seine `local_t`. Nur das fortschreibungs-gesetz wechselt.
+        ref_t = np.array([float(row[0]._kepler_ref_time) for row in solved])
+        dt = times[None, :] - ref_t[:, None]
+
+        e_c = e[:, None]
+        mean_anomaly = m0[:, None] + mm[:, None] * dt
+        # Auf [-pi, pi) falten. Ohne das laeuft Newton bei grossem `dt` auf
+        # einer weit entfernten wurzel an.
+        two_pi = 2.0 * math.pi
+        mean_anomaly -= two_pi * np.round(mean_anomaly / two_pi)
+
+        # `fp = 1 - e*cos E` liegt wegen e < 1 immer in [1-e, 1+e] und kann
+        # nicht null werden -- der nullschutz des kernels ist hier durch die
+        # e-pruefung oben schon erledigt.
+        ecc_anomaly = mean_anomaly.copy()
+        for _ in range(12):
+            delta = ((ecc_anomaly - e_c * np.sin(ecc_anomaly) - mean_anomaly)
+                     / (1.0 - e_c * np.cos(ecc_anomaly)))
+            ecc_anomaly -= delta
+            if float(np.abs(delta).max()) <= 1e-13:
+                break
+
+        cos_ecc = np.cos(ecc_anomaly)
+        sin_ecc = np.sin(ecc_anomaly)
+        r_t = a[:, None] * (1.0 - e_c * cos_ecc)
+        nu = np.arctan2(s1e2[:, None] * sin_ecc, cos_ecc - e_c)
+        x_orb = r_t * np.cos(nu)
+        y_orb = r_t * np.sin(nu)
+        rel_x = x_orb * ca[:, None] - y_orb * sa[:, None]
+        rel_y = x_orb * sa[:, None] + y_orb * ca[:, None]
+        for i, row in enumerate(solved):
+            rel[id(row[0])] = (rel_x[i], rel_y[i])
+
+    # -- 3. kette aufsummieren. `order` haelt eltern vor kindern, ein
+    #    einziger durchlauf genuegt.
+    out = {}
+    for b in order:
+        key = id(b)
+        offset = rel.get(key)
+        parent = getattr(b, 'is_moon_of', None)
+        base = out.get(id(parent)) if parent is not None else None
+        if offset is None or base is None:
+            out[key] = _constant_track(b, times)
+            continue
+        track = np.empty((nt, 2), dtype=np.float64)
+        track[:, 0] = base[:, 0] + offset[0]
+        track[:, 1] = base[:, 1] + offset[1]
+        out[key] = track
+    return out
 
 
 def _constant_track(body, times):
     out = np.empty((times.shape[0], 2), dtype=np.float64)
     out[:, 0] = float(body.position.x)
     out[:, 1] = float(body.position.y)
-    return out
-
-
-def _track_uncached(body, times, memo):
-    # Reihenfolge der abbrueche wie im skalaren original.
-    parent = getattr(body, 'is_moon_of', None)
-    if parent is None:
-        return _constant_track(body, times)
-
-    a = getattr(body, 'semi_major_axis', None)
-    if a is None or a == 0.0:
-        return _constant_track(body, times)
-
-    a = float(a)
-    e = float(body.eccentricity) if body.eccentricity else 0.0
-    mu = G * parent.mass
-    if mu <= 0.0:
-        return _constant_track(body, times)
-
-    ref_theta = body._kepler_ref_theta
-    delta_t = times - body._kepler_ref_time
-
-    # Skalar bleibt skalar: r_ref/v_ref/omega_ref haengen nicht an der zeit,
-    # und `math.*` liefert hier dieselben bits wie das original.
-    r_ref = a * (1.0 - e * e) / (1.0 + e * math.cos(ref_theta))
-    v_ref = math.sqrt(max(0.0, mu * (2.0 / r_ref - 1.0 / a)))
-    omega_ref = v_ref / max(1e-12, r_ref)
-    theta_t = ref_theta + omega_ref * delta_t
-
-    r_t = a * (1.0 - e * e) / (1.0 + e * np.cos(theta_t))
-    x_orb = r_t * np.cos(theta_t)
-    y_orb = r_t * np.sin(theta_t)
-
-    c = math.cos(body.arg_periapsis)
-    s = math.sin(body.arg_periapsis)
-    out = np.empty((times.shape[0], 2), dtype=np.float64)
-    out[:, 0] = x_orb * c - y_orb * s
-    out[:, 1] = x_orb * s + y_orb * c
-
-    if hasattr(parent, 'position_at_time'):
-        out += future_track(parent, times, memo)
-    else:
-        out[:, 0] += float(parent.position.x)
-        out[:, 1] += float(parent.position.y)
     return out
 
 
@@ -338,7 +449,15 @@ class OrbitLineSet:
                 span = float(sample_t[-1] - sample_t[0])
                 self._sample_step = abs(span) / max(1, idx.size - 1)
 
+        # Alle spuren auf einen schlag -- eine Newton-iteration fuer
+        # das ganze system statt einer je koerper (siehe future_tracks).
         memo = {}
+        if sample_t is not None:
+            memo.update(future_tracks(
+                [b for b in bodies
+                 if not getattr(b, 'is_ship', False) and soi_radius(b) is not None],
+                sample_t))
+            memo['_times_id'] = id(sample_t)
         active = set()
         for b in bodies:
             if getattr(b, 'is_ship', False):

@@ -109,6 +109,286 @@ try:
                 top += 1
         return keep
 
+    @_njit(cache=True, nogil=True)
+    def _clip_runs_numba(xs, ys, left, top, right, bottom):
+        """Liang-Barsky ueber die GANZE polylinie, laufweise zerlegt.
+
+        Wort-fuer-wort dieselbe zustandsmaschine wie
+        `Renderer._build_clipped_polyline_runs`: ein segment, das das
+        rechteck nicht schneidet, beendet den laufenden lauf; eine luecke
+        von mehr als 2 px zwischen dem ende des laufs und dem anfang des
+        naechsten geklippten segments ebenfalls.
+
+        Rueckgabe: (ox, oy, starts, counts). Lauf k sind die punkte
+        ox[starts[k] : starts[k]+counts[k]].
+        """
+        n = xs.shape[0]
+        # Je segment werden hoechstens zwei punkte geschrieben. Bei n < 2
+        # laeuft die schleife nicht und alle puffer bleiben leer -- kein
+        # sonderweg noetig (und damit ein einziger rueckgabetyp fuer numba).
+        max_out = 2 * (n - 1) if n > 1 else 0
+        ox = np.empty(max_out, dtype=np.float64)
+        oy = np.empty(max_out, dtype=np.float64)
+        starts = np.empty(n, dtype=np.int64)
+        counts = np.empty(n, dtype=np.int64)
+
+        n_runs = 0
+        m = 0
+        run_start = -1
+
+        for i in range(n - 1):
+            x0 = xs[i]
+            y0 = ys[i]
+            dx = xs[i + 1] - x0
+            dy = ys[i + 1] - y0
+
+            u1 = 0.0
+            u2 = 1.0
+            inside = True
+
+            # links
+            pi = -dx
+            qi = x0 - left
+            if pi == 0.0:
+                if qi < 0.0:
+                    inside = False
+            else:
+                t = qi / pi
+                if pi < 0.0:
+                    if t > u2:
+                        inside = False
+                    elif t > u1:
+                        u1 = t
+                elif t < u1:
+                    inside = False
+                elif t < u2:
+                    u2 = t
+
+            if inside:
+                # rechts
+                pi = dx
+                qi = right - x0
+                if pi == 0.0:
+                    if qi < 0.0:
+                        inside = False
+                else:
+                    t = qi / pi
+                    if pi < 0.0:
+                        if t > u2:
+                            inside = False
+                        elif t > u1:
+                            u1 = t
+                    elif t < u1:
+                        inside = False
+                    elif t < u2:
+                        u2 = t
+
+            if inside:
+                # oben
+                pi = -dy
+                qi = y0 - top
+                if pi == 0.0:
+                    if qi < 0.0:
+                        inside = False
+                else:
+                    t = qi / pi
+                    if pi < 0.0:
+                        if t > u2:
+                            inside = False
+                        elif t > u1:
+                            u1 = t
+                    elif t < u1:
+                        inside = False
+                    elif t < u2:
+                        u2 = t
+
+            if inside:
+                # unten
+                pi = dy
+                qi = bottom - y0
+                if pi == 0.0:
+                    if qi < 0.0:
+                        inside = False
+                else:
+                    t = qi / pi
+                    if pi < 0.0:
+                        if t > u2:
+                            inside = False
+                        elif t > u1:
+                            u1 = t
+                    elif t < u1:
+                        inside = False
+                    elif t < u2:
+                        u2 = t
+
+            if not inside:
+                if run_start >= 0:
+                    cnt = m - run_start
+                    if cnt >= 2:
+                        starts[n_runs] = run_start
+                        counts[n_runs] = cnt
+                        n_runs += 1
+                    else:
+                        m = run_start
+                    run_start = -1
+                continue
+
+            cx0 = x0 + u1 * dx
+            cy0 = y0 + u1 * dy
+            cx1 = x0 + u2 * dx
+            cy1 = y0 + u2 * dy
+
+            if run_start < 0:
+                run_start = m
+                ox[m] = cx0
+                oy[m] = cy0
+                m += 1
+                ox[m] = cx1
+                oy[m] = cy1
+                m += 1
+                continue
+
+            gx = cx0 - ox[m - 1]
+            gy = cy0 - oy[m - 1]
+            if math.sqrt(gx * gx + gy * gy) > 2.0:
+                cnt = m - run_start
+                if cnt >= 2:
+                    starts[n_runs] = run_start
+                    counts[n_runs] = cnt
+                    n_runs += 1
+                else:
+                    m = run_start
+                run_start = m
+                ox[m] = cx0
+                oy[m] = cy0
+                m += 1
+                ox[m] = cx1
+                oy[m] = cy1
+                m += 1
+            else:
+                ox[m] = cx1
+                oy[m] = cy1
+                m += 1
+
+        if run_start >= 0:
+            cnt = m - run_start
+            if cnt >= 2:
+                starts[n_runs] = run_start
+                counts[n_runs] = cnt
+                n_runs += 1
+            else:
+                m = run_start
+
+        return (ox, oy, starts[:n_runs], counts[:n_runs])
+
+    @_njit(cache=True, nogil=True)
+    def _max_gap_refine_numba(keep_idx, xs, ys, max_seg):
+        """Zu weit auseinanderliegende RDP-punkte wieder auffuellen.
+
+        Dieselbe schleife wie die Python-fassung in
+        `_runs_from_screen_points`, inklusive der bankier-rundung von
+        Pythons `round()` -- ein um eins verschobener stuetzindex waere
+        eine andere linie.
+        """
+        k = keep_idx.shape[0]
+        # Die ausgabe ist streng monoton steigend und bleibt unter dem
+        # letzten keep-index, kann also nie mehr als n punkte umfassen.
+        out = np.empty(xs.shape[0] + k + 1, dtype=np.int64)
+        out[0] = keep_idx[0]
+        m = 1
+        for i in range(1, k):
+            start_idx = out[m - 1]
+            end_idx = keep_idx[i]
+            if end_idx <= start_idx:
+                continue
+
+            sdx = xs[end_idx] - xs[start_idx]
+            sdy = ys[end_idx] - ys[start_idx]
+            seg_len = math.sqrt(sdx * sdx + sdy * sdy)
+
+            if seg_len > max_seg:
+                steps = int(math.ceil(seg_len / max_seg))
+                if steps < 2:
+                    steps = 2
+                span = end_idx - start_idx
+                for step_i in range(1, steps):
+                    v = span * (step_i / steps)
+                    fl = math.floor(v)
+                    frac = v - fl
+                    if frac > 0.5:
+                        cand = int(fl) + 1
+                    elif frac < 0.5:
+                        cand = int(fl)
+                    else:
+                        # Python rundet die haelfte zur GERADEN zahl.
+                        fi = int(fl)
+                        cand = fi if (fi % 2 == 0) else fi + 1
+                    cand += start_idx
+                    if cand <= out[m - 1]:
+                        cand = out[m - 1] + 1
+                    if cand >= end_idx:
+                        break
+                    out[m] = cand
+                    m += 1
+
+            if end_idx > out[m - 1]:
+                out[m] = end_idx
+                m += 1
+
+        return out[:m]
+
+    @_njit(cache=True, nogil=True)
+    def _densify_numba(xs, ys, max_segment):
+        """Segmente laenger als `max_segment` linear unterteilen.
+
+        Zwei durchgaenge (zaehlen, fuellen) statt einer wachsenden liste --
+        rechnerisch identisch zu `Renderer._densify_screen_run`.
+        """
+        n = xs.shape[0]
+        total = 1 if n > 0 else 0
+        for i in range(n - 1):
+            dx = xs[i + 1] - xs[i]
+            dy = ys[i + 1] - ys[i]
+            seg_len = math.sqrt(dx * dx + dy * dy)
+            if seg_len > max_segment:
+                parts = int(math.ceil(seg_len / max_segment))
+                if parts < 2:
+                    parts = 2
+                elif parts > 256:
+                    parts = 256
+                total += parts - 1
+            total += 1
+
+        dx_out = np.empty(total, dtype=np.float64)
+        dy_out = np.empty(total, dtype=np.float64)
+        m = 0
+        if n > 0:
+            dx_out[0] = xs[0]
+            dy_out[0] = ys[0]
+            m = 1
+        for i in range(n - 1):
+            x0 = xs[i]
+            y0 = ys[i]
+            dx = xs[i + 1] - x0
+            dy = ys[i + 1] - y0
+            seg_len = math.sqrt(dx * dx + dy * dy)
+            if seg_len > max_segment:
+                parts = int(math.ceil(seg_len / max_segment))
+                if parts < 2:
+                    parts = 2
+                elif parts > 256:
+                    parts = 256
+                for p in range(1, parts):
+                    t = p / parts
+                    dx_out[m] = x0 + dx * t
+                    dy_out[m] = y0 + dy * t
+                    m += 1
+            dx_out[m] = xs[i + 1]
+            dy_out[m] = ys[i + 1]
+            m += 1
+
+        return (dx_out[:m], dy_out[:m])
+
     _LINE_KERNELS_OK = True
 except Exception:
     _LINE_KERNELS_OK = False
@@ -138,6 +418,15 @@ class Renderer:
         self._line_vao = None
         self._ortho_program = None
         self._ortho_vao = None
+        # Zuletzt an die GL geschriebene uniform-/zustandswerte, siehe
+        # _set_uniform / _set_line_width.
+        self._line_viewport = None
+        self._line_color = None
+        self._ortho_viewport = None
+        self._ortho_color = None
+        self._texquad_viewport = None
+        self._texquad_color = None
+        self._gl_line_width = None
         self._body_program = None
         self._body_vao = None
 
@@ -430,6 +719,9 @@ class Renderer:
         # (z. B. das schiffs-speed-label, das sich fast jeden frame ändert)
         # würden sonst unbegrenzt GL-texturen anhäufen (vram-leak).
         self._label_texture_cache_max = 256
+        # Verdraengte texturen nach groesse, siehe _acquire_label_texture.
+        self._label_texture_pool = {}
+        self._label_texture_pool_count = 0
         # pro-frame-memo der kamera-position im aktiven frame: dieselbe
         # transformation wird sonst von _draw_body (pro körper!), trails und
         # prediction mehrfach pro frame berechnet.
@@ -960,12 +1252,47 @@ class Renderer:
             return
 
         n = self._write_poly_vertices(arr)
-        self.ctx.line_width = float(width)
-        self._line_program['u_viewport'].value = (float(self.width), float(self.height))
-        self._line_program['u_color'].value = (
+        self._set_line_width(width)
+        self._set_uniform(self._line_program, 'u_viewport', '_line_viewport',
+                          (float(self.width), float(self.height)))
+        self._set_uniform(self._line_program, 'u_color', '_line_color', (
             float(color[0]), float(color[1]), float(color[2]), float(color[3])
-        )
+        ))
         self._line_vao.render(moderngl.LINE_STRIP, vertices=n)
+
+    def _draw_line_segments(self, points, color=(1.0, 1.0, 1.0, 1.0), width=1.0):
+        """Zeichnet PAARWEISE strecken (GL_LINES) in der top-down-konvention.
+
+        Dieselbe pipeline und dieselbe abbildung wie `_draw_polyline`, nur
+        ohne den zwang, dass alle punkte EINEN zug bilden. Damit gehen
+        mehrere kleine, unverbundene figuren (etwa alle apsis-rauten einer
+        farbe) in einem einzigen draw an die GPU.
+        """
+        n = len(points)
+        if n < 2 or self._line_vao is None:
+            return
+
+        try:
+            arr = np.asarray(points, dtype=np.float32).reshape((-1, 2))
+            if not arr.flags['C_CONTIGUOUS']:
+                arr = np.ascontiguousarray(arr, dtype=np.float32)
+        except Exception:
+            return
+        # GL_LINES verbraucht die punkte paarweise; ein einzelner ueberzaehliger
+        # punkt wuerde verworfen, hier gar nicht erst hochgeladen.
+        if arr.shape[0] % 2:
+            arr = arr[:-1]
+        if arr.shape[0] < 2:
+            return
+
+        n = self._write_poly_vertices(arr)
+        self._set_line_width(width)
+        self._set_uniform(self._line_program, 'u_viewport', '_line_viewport',
+                          (float(self.width), float(self.height)))
+        self._set_uniform(self._line_program, 'u_color', '_line_color', (
+            float(color[0]), float(color[1]), float(color[2]), float(color[3])
+        ))
+        self._line_vao.render(moderngl.LINES, vertices=n)
 
     def _draw_ortho_shape(self, points, color, mode, width=1.0):
         """Zeichnet geometrie in der alten ortho-konvention (y nach oben).
@@ -986,12 +1313,50 @@ class Renderer:
 
         n = self._write_poly_vertices(arr)
         if mode in (moderngl.LINES, moderngl.LINE_STRIP):
-            self.ctx.line_width = float(width)
-        self._ortho_program['u_viewport'].value = (float(self.width), float(self.height))
-        self._ortho_program['u_color'].value = (
+            self._set_line_width(width)
+        self._set_uniform(self._ortho_program, 'u_viewport', '_ortho_viewport',
+                          (float(self.width), float(self.height)))
+        self._set_uniform(self._ortho_program, 'u_color', '_ortho_color', (
             float(color[0]), float(color[1]), float(color[2]), float(color[3])
-        )
+        ))
         self._ortho_vao.render(mode, vertices=n)
+
+    # ---- GL-zustandscache -------------------------------------------------
+    #
+    # Jedes `program['u_x'].value = ...` und jedes `ctx.line_width = ...` geht
+    # als eigener aufruf in den treiber. Der linien-zeichenweg setzt beides
+    # bei JEDEM aufruf neu -- gemessen ~300 uniform-schreibvorgaenge je frame,
+    # von denen sich die allermeisten gegenueber dem vorigen aufruf gar nicht
+    # geaendert haben (u_viewport ist ueber den ganzen frame konstant, u_color
+    # ueber ganze gruppen von linien). Der cache haelt nur den zuletzt
+    # GESCHRIEBENEN wert; geschrieben wird weiterhin jeder wechsel, die
+    # sichtbare ausgabe ist also unveraendert.
+
+    def _set_uniform(self, program, name, cache_attr, value):
+        if getattr(self, cache_attr, None) == value:
+            return
+        try:
+            program[name].value = value
+        except Exception:
+            return
+        setattr(self, cache_attr, value)
+
+    def _set_line_width(self, width):
+        width = float(width)
+        if self._gl_line_width == width:
+            return
+        self.ctx.line_width = width
+        self._gl_line_width = width
+
+    def _invalidate_gl_state_cache(self):
+        """Nach fenster-/kontextwechseln: alles wieder als unbekannt fuehren."""
+        self._line_viewport = None
+        self._line_color = None
+        self._ortho_viewport = None
+        self._ortho_color = None
+        self._texquad_viewport = None
+        self._texquad_color = None
+        self._gl_line_width = None
 
     def _clip_segment_to_rect(self, x0, y0, x1, y1, left, top, right, bottom):
         """
@@ -1096,16 +1461,30 @@ class Renderer:
         Important: preserve original segment topology. Never connect visible points
         across an offscreen gap.
 
-        `coords` sind dieselben punkte als (sx, sy)-arrays. Damit werden
-        segmente, die TRIVIAL ausserhalb liegen (beide enden jenseits
-        derselben kante), vorab in numpy aussortiert, statt fuer jedes der
-        ~3000 segmente einzeln zu klippen. Das ist keine naeherung: ein so
-        verworfenes segment kann das rechteck nicht schneiden, der klipper
-        haette also ohnehin None geliefert und den lauf abgebrochen -- genau
-        das tut die luecken-pruefung unten. Ohne `coords` laeuft alles wie
-        zuvor.
+        `coords` sind dieselben punkte als (sx, sy)-arrays. Liegen sie vor
+        (und ist numba da), laeuft die ganze zustandsmaschine als EIN
+        kernel-aufruf -- vorher war das die teuerste einzelne funktion des
+        frames (gemessen ~15 ms bei 4000 segmenten, praktisch alles
+        Python-schleifen-overhead). Ohne `coords` oder ohne numba bleibt der
+        Python-weg darunter, zeichenweise identisch.
+
+        Rueckgabe: liste von ``(n, 2)``-float64-arrays. Der ganze
+        linien-zeichenweg rechnet auf arrays weiter; die frueheren listen
+        aus (x, y)-tupeln wurden auf dem weg zur GPU ohnehin wieder in
+        arrays umgewandelt.
+
+        `screen_points` darf ``None`` sein, WENN `coords` vorliegt -- dann
+        sind die spalten die einzige darstellung der punkte und es wird gar
+        keine tupel-liste mehr gebaut.
         """
-        if screen_points is None or len(screen_points) < 2:
+        have_coords = coords is not None and np is not None
+        if screen_points is None:
+            if not have_coords:
+                return []
+            point_count = len(coords[0])
+        else:
+            point_count = len(screen_points)
+        if point_count < 2:
             return []
 
         left = -float(margin_px)
@@ -1113,10 +1492,37 @@ class Renderer:
         right = float(self.width) + float(margin_px)
         bottom = float(self.height) + float(margin_px)
 
-        segment_indices = None
-        if coords is not None and np is not None:
+        coords_match = have_coords and len(coords[0]) == point_count
+
+        # Aufrufer ohne spalten (bahnlinien, referenz-spuren) bekommen sie
+        # hier einmalig -- sonst laufen genau die durch den langsamen
+        # Python-klipper, waehrend die vorhersagelinie den kernel nutzt.
+        if not coords_match and np is not None and _LINE_KERNELS_OK:
+            try:
+                arr = np.asarray(screen_points, dtype=np.float64)
+                if arr.ndim == 2 and arr.shape[1] == 2 and arr.shape[0] == point_count:
+                    coords = (np.ascontiguousarray(arr[:, 0]),
+                              np.ascontiguousarray(arr[:, 1]))
+                    have_coords = True
+                    coords_match = True
+            except Exception:
+                pass
+
+        if coords_match and _LINE_KERNELS_OK:
             sx, sy = coords
-            if len(sx) == len(screen_points):
+            return self._clipped_runs_from_arrays(
+                sx, sy, left, top, right, bottom)
+
+        if screen_points is None:
+            # Ohne numba braucht der Python-weg unten die punkte einzeln.
+            sx, sy = coords
+            screen_points = list(zip(np.asarray(sx).tolist(),
+                                     np.asarray(sy).tolist()))
+
+        segment_indices = None
+        if have_coords:
+            sx, sy = coords
+            if coords_match:
                 out_left = sx < left
                 out_right = sx > right
                 out_top = sy < top
@@ -1182,6 +1588,33 @@ class Renderer:
         if len(run) >= 2:
             runs.append(run)
 
+        # Einheitliche rueckgabe mit dem kernel-weg: (n, 2)-arrays.
+        if np is None:
+            return runs
+        return [np.asarray(r, dtype=np.float64) for r in runs]
+
+    def _clipped_runs_from_arrays(self, sx, sy, left, top, right, bottom):
+        """Kernel-weg von `_build_clipped_polyline_runs`.
+
+        Ein numba-aufruf statt einer Python-schleife ueber alle segmente;
+        die laeufe werden anschliessend nur noch als sichten auf den
+        ausgabepuffer herausgeschnitten.
+        """
+        xs = np.ascontiguousarray(sx, dtype=np.float64)
+        ys = np.ascontiguousarray(sy, dtype=np.float64)
+        ox, oy, starts, counts = _clip_runs_numba(
+            xs, ys, float(left), float(top), float(right), float(bottom))
+        if starts.shape[0] == 0:
+            return []
+
+        runs = []
+        for k in range(starts.shape[0]):
+            a = int(starts[k])
+            b = a + int(counts[k])
+            run = np.empty((b - a, 2), dtype=np.float64)
+            run[:, 0] = ox[a:b]
+            run[:, 1] = oy[a:b]
+            runs.append(run)
         return runs
 
     def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density,
@@ -1538,6 +1971,16 @@ class Renderer:
                 except Exception:
                     pass
         self._label_texture_cache = {}
+        # Der pool haelt texturen der ALTEN schriftgroesse -- nach einem
+        # font-wechsel passt keine davon mehr, also mit weg.
+        for bucket in getattr(self, '_label_texture_pool', {}).values():
+            for texture in bucket:
+                try:
+                    texture.release()
+                except Exception:
+                    pass
+        self._label_texture_pool = {}
+        self._label_texture_pool_count = 0
         self._hud_line_surface_cache = {}
         self._hud_cache_key = None
 
@@ -1555,6 +1998,47 @@ class Renderer:
         if self._recompute_ui_scale():
             self._rebuild_fonts()
 
+    # Deckel des texturen-recyclings, siehe _acquire_label_texture.
+    _LABEL_TEXTURE_POOL_MAX = 64
+
+    def _acquire_label_texture(self, size, data):
+        """Beschriftungs-textur besorgen -- moeglichst eine wiederverwendete.
+
+        Wie in ui/text.py: der teure teil einer neuen beschriftung ist die
+        GL-allokation, nicht das rastern. Die apsis-labels tragen eine
+        entfernung im text und wechseln damit in JEDEM frame; ihre
+        verdraengten texturen haben aber immer wieder dieselbe groesse und
+        werden deshalb eingesammelt und per `write()` neu befuellt.
+        """
+        bucket = self._label_texture_pool.get(size)
+        if bucket:
+            texture = bucket.pop()
+            self._label_texture_pool_count -= 1
+            try:
+                texture.write(data)
+                texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                return texture
+            except Exception:
+                try:
+                    texture.release()
+                except Exception:
+                    pass
+        texture = self.ctx.texture(size, 4, data)
+        texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        return texture
+
+    def _retire_label_texture(self, texture, size):
+        if texture is None:
+            return
+        if self._label_texture_pool_count < self._LABEL_TEXTURE_POOL_MAX:
+            self._label_texture_pool.setdefault(size, []).append(texture)
+            self._label_texture_pool_count += 1
+            return
+        try:
+            texture.release()
+        except Exception:
+            pass
+
     def _get_label_texture(self, text, font):
         key = (text, font.get_height())
         entry = self._label_texture_cache.get(key)
@@ -1564,19 +2048,17 @@ class Renderer:
             surface = font.render(text, True, (255, 255, 255))
             texture_data = pygame.image.tostring(surface, 'RGBA', True)
             w, h = surface.get_size()
-            texture = self.ctx.texture((w, h), 4, texture_data)
-            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
             # cache deckeln (FIFO): ständig wechselnde texte (speed-label)
             # würden sonst unbegrenzt GL-texturen anhäufen. Stabile labels
             # (körpernamen) werden nach einer eviction einfach neu erzeugt.
+            # Die verdraengten TEXTUREN wandern in den pool, statt dass
+            # jedes frame neue angelegt werden.
             if len(self._label_texture_cache) >= self._label_texture_cache_max:
                 evict_n = max(1, self._label_texture_cache_max // 4)
                 for old_key in list(self._label_texture_cache.keys())[:evict_n]:
-                    old_texture = self._label_texture_cache.pop(old_key)[0]
-                    try:
-                        old_texture.release()
-                    except Exception:
-                        pass
+                    old = self._label_texture_cache.pop(old_key)
+                    self._retire_label_texture(old[0], (int(old[1]), int(old[2])))
+            texture = self._acquire_label_texture((w, h), texture_data)
             self._label_texture_cache[key] = (texture, w, h)
             return (texture, w, h)
         except Exception:
@@ -1606,10 +2088,14 @@ class Renderer:
         self._texquad_program['u_rect'].value = (
             round(float(x)), round(float(y)), float(width), float(height)
         )
-        self._texquad_program['u_viewport'].value = (float(self.width), float(self.height))
-        self._texquad_program['u_color'].value = (
+        # u_viewport ist ueber den ganzen frame konstant, u_color ueber
+        # ganze gruppen von beschriftungen -- nur wechsel schreiben.
+        self._set_uniform(self._texquad_program, 'u_viewport',
+                          '_texquad_viewport',
+                          (float(self.width), float(self.height)))
+        self._set_uniform(self._texquad_program, 'u_color', '_texquad_color', (
             float(color[0]), float(color[1]), float(color[2]), float(color[3])
-        )
+        ))
         texture.use(location=0)
         self._texquad_vao.render(moderngl.TRIANGLE_STRIP)
 
@@ -1752,14 +2238,22 @@ class Renderer:
             cg = min(1.0, max(0.0, base[1] / 255.0))
             cb = min(1.0, max(0.0, base[2] / 255.0))
 
-            screen_points = list(zip(sxs.tolist(), sys_.tolist()))
+            # ALS SPALTEN WEITERREICHEN. Die punkte liegen schon als arrays
+            # vor; die tupel-liste, die hier stand, wurde vom klipper und
+            # von _draw_polyline sofort wieder in arrays zurueckverwandelt
+            # -- bei bis zu 300 punkten je koerper und frame reine arbeit
+            # ohne ergebnis.
+            screen_points = np.empty((sxs.shape[0], 2), dtype=np.float64)
+            screen_points[:, 0] = sxs
+            screen_points[:, 1] = sys_
 
             if min_sx >= -margin and max_sx <= right and min_sy >= -margin and max_sy <= bottom:
                 # Spur liegt vollständig im sichtfenster: Liang-Barsky wäre für
                 # jedes segment ein no-op und lieferte exakt einen run.
                 runs = (screen_points,)
             else:
-                runs = self._visible_window_runs(screen_points, margin_px=margin)
+                runs = self._visible_window_runs(screen_points, margin_px=margin,
+                                                 coords=(sxs, sys_))
             for run in runs:
                 if len(run) < 2:
                     continue
@@ -2959,8 +3453,9 @@ class Renderer:
         return (-margin_px <= sx <= self.width + margin_px and
                 -margin_px <= sy <= self.height + margin_px)
 
-    def _visible_window_runs(self, screen_points, margin_px):
-        return self._build_clipped_polyline_runs(screen_points, margin_px)
+    def _visible_window_runs(self, screen_points, margin_px, coords=None):
+        return self._build_clipped_polyline_runs(screen_points, margin_px,
+                                                 coords=coords)
 
     def _effective_sampling_tolerance(self, camera):
         scale = abs(float(camera.scale))
@@ -2978,6 +3473,88 @@ class Renderer:
         # Allow smaller max-segment when zoomed in; keep a small floor to
         # avoid degenerate zero-length subdivisions.
         return max(0.5, step)
+
+    def _compact_min_step_indices(self, xs, ys, min_step2):
+        """Python-fassung von `_compact_min_step_numba` (fallback ohne numba).
+
+        Gibt die zu behaltenden INDIZES zurueck, nicht die punkte -- so
+        arbeitet der zeichenweg auch ohne numba durchgehend auf spalten.
+        """
+        n = len(xs)
+        if n == 0:
+            return []
+        keep = [0]
+        lx = float(xs[0])
+        ly = float(ys[0])
+        for i in range(1, n):
+            sx = float(xs[i])
+            sy = float(ys[i])
+            dx = sx - lx
+            dy = sy - ly
+            if dx * dx + dy * dy >= min_step2:
+                keep.append(i)
+                lx = sx
+                ly = sy
+        last = keep[-1]
+        if xs[last] != xs[n - 1] or ys[last] != ys[n - 1]:
+            keep.append(n - 1)
+        return keep
+
+    def _max_gap_refine_indices(self, keep_indices, xs, ys, max_seg):
+        """Python-fassung von `_max_gap_refine_numba` (fallback ohne numba)."""
+        refined = [int(keep_indices[0])]
+        for i in range(1, len(keep_indices)):
+            start_idx = refined[-1]
+            end_idx = int(keep_indices[i])
+            if end_idx <= start_idx:
+                continue
+
+            seg_dx = float(xs[end_idx]) - float(xs[start_idx])
+            seg_dy = float(ys[end_idx]) - float(ys[start_idx])
+            seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
+
+            if seg_len > max_seg:
+                steps = max(2, int(math.ceil(seg_len / max_seg)))
+                for step_i in range(1, steps):
+                    candidate = start_idx + int(round((end_idx - start_idx) * (step_i / steps)))
+                    if candidate <= refined[-1]:
+                        candidate = refined[-1] + 1
+                    if candidate >= end_idx:
+                        break
+                    refined.append(candidate)
+
+            if end_idx > refined[-1]:
+                refined.append(end_idx)
+
+        return np.asarray(refined, dtype=np.int64)
+
+    def _densify_screen_columns(self, xs, ys, max_segment_px):
+        """Wie `_densify_screen_run`, aber auf spalten -- gibt (n, 2) zurueck."""
+        n = int(len(xs))
+        out = np.empty((n, 2), dtype=np.float64)
+        if n < 2:
+            if n:
+                out[0, 0] = xs[0]
+                out[0, 1] = ys[0]
+            return out
+
+        max_segment = max(0.5, float(max_segment_px))
+        if _LINE_KERNELS_OK:
+            dx, dy = _densify_numba(
+                np.ascontiguousarray(xs, dtype=np.float64),
+                np.ascontiguousarray(ys, dtype=np.float64),
+                max_segment)
+            dense = np.empty((dx.shape[0], 2), dtype=np.float64)
+            dense[:, 0] = dx
+            dense[:, 1] = dy
+            return dense
+
+        run = np.empty((n, 2), dtype=np.float64)
+        run[:, 0] = xs
+        run[:, 1] = ys
+        return np.asarray(
+            self._densify_screen_run([tuple(p) for p in run], max_segment_px),
+            dtype=np.float64)
 
     def _densify_screen_run(self, run, max_segment_px):
         if len(run) < 2:
@@ -3231,6 +3808,21 @@ class Renderer:
             if len(run) <= budget:
                 limited.append(run)
                 points_left -= len(run)
+            elif np is not None and isinstance(run, np.ndarray):
+                # Gleiche stichprobe wie unten, nur als index-rechnung.
+                # np.round rundet -- wie Pythons round() -- die haelfte zur
+                # geraden zahl, die gewaehlten indizes sind also dieselben.
+                step = (len(run) - 1) / float(budget - 1)
+                idx = np.round(np.arange(budget, dtype=np.float64) * step)
+                idx = np.clip(idx, 0.0, float(len(run) - 1)).astype(np.int64)
+                if idx.shape[0] > 1:
+                    unique = np.empty(idx.shape[0], dtype=bool)
+                    unique[0] = True
+                    np.not_equal(idx[1:], idx[:-1], out=unique[1:])
+                    idx = idx[unique]
+                if idx.shape[0] >= 2:
+                    limited.append(run[idx])
+                points_left -= int(idx.shape[0])
             else:
                 step = (len(run) - 1) / float(budget - 1)
                 sampled = []
@@ -3457,6 +4049,17 @@ class Renderer:
             return
 
         r_px = float(self.apsis_marker_radius_px)
+
+        # EIN DRAW JE FARBE STATT EINEM JE MARKER. Die rauten sind vier
+        # unverbundene strecken; als LINES gezeichnet ergeben sie exakt
+        # dieselben vier segmente wie der bisherige LINE_STRIP ueber fuenf
+        # punkte, nur eben alle rauten einer farbe in einem aufruf.
+        # Gemessen: 16 marker = 16 draws + 32 uniform-schreibvorgaenge je
+        # frame, jetzt hoechstens zwei.
+        apo_segments = []
+        peri_segments = []
+        pending_labels = []
+
         for i in range(count):
             try:
                 m = markers[i]
@@ -3473,22 +4076,26 @@ class Renderer:
             if not self._is_on_screen(sx, sy, 32.0):
                 continue
 
-            if is_apo:
-                color = (0.45, 0.75, 1.0, 0.95)
-                label = "Ap"
-            else:
-                color = (1.0, 0.62, 0.25, 0.95)
-                label = "Pe"
+            label = "Ap" if is_apo else "Pe"
 
-            run = [
-                (sx, sy - r_px),
-                (sx + r_px, sy),
-                (sx, sy + r_px),
-                (sx - r_px, sy),
-                (sx, sy - r_px),
-            ]
-            self._draw_polyline(run, color=color, width=2.0)
+            # Nord -> Ost -> Sued -> West -> Nord, als vier strecken.
+            north = (sx, sy - r_px)
+            east = (sx + r_px, sy)
+            south = (sx, sy + r_px)
+            west = (sx - r_px, sy)
+            target = apo_segments if is_apo else peri_segments
+            target.extend((north, east, east, south, south, west, west, north))
 
+            pending_labels.append((label, dist, sx, sy))
+
+        if apo_segments:
+            self._draw_line_segments(apo_segments,
+                                     color=(0.45, 0.75, 1.0, 0.95), width=2.0)
+        if peri_segments:
+            self._draw_line_segments(peri_segments,
+                                     color=(1.0, 0.62, 0.25, 0.95), width=2.0)
+
+        for label, dist, sx, sy in pending_labels:
             text = f"{label} {self._format_apsis_distance(dist)}"
             try:
                 # Diamant + linie laufen über den line-shader (top-down, sy
@@ -3598,6 +4205,11 @@ class Renderer:
                 path_points, indices, camera, camera_frame_xy, margin_px)
 
         if batch is not None:
+            # `screen_points` ist auf diesem weg IMMER None: die spalten in
+            # `coords` sind die punkte. Die tupel-liste, die hier frueher
+            # entstand, wurde weiter unten ohnehin wieder in arrays
+            # zurueckverwandelt (gemessen 4000 tupel je frame, nur um sie
+            # danach wegzuwerfen).
             screen_points, visible_count, coords = batch
 
             # ZWISCHEN den groben stuetzstellen kubisch nachlegen -- so fein,
@@ -3622,8 +4234,10 @@ class Renderer:
                     if dense is not None:
                         screen_points, visible_count, coords = dense
 
-            stats['scanned'] = stats.get('scanned', 0) + len(screen_points)
-            stats['scanned_points'] = stats.get('scanned_points', 0) + len(screen_points)
+            scanned_count = (len(coords[0]) if screen_points is None
+                             else len(screen_points))
+            stats['scanned'] = stats.get('scanned', 0) + scanned_count
+            stats['scanned_points'] = stats.get('scanned_points', 0) + scanned_count
             stats['visible'] = stats.get('visible', 0) + visible_count
             return self._runs_from_screen_points(
                 screen_points, camera, tolerance_px, min_step_px,
@@ -3700,10 +4314,16 @@ class Renderer:
                                   camera_frame_xy, margin_px):
         """Alle stichproben-punkte in EINEM rutsch projizieren.
 
-        Gibt (screen_points, sichtbar_anzahl) zurueck oder None, wenn der
-        schnelle weg nicht anwendbar ist. Rechnerisch identisch zur schleife
-        in _adaptive_prediction_screen_points -- dieselbe rahmen-
+        Gibt ``(None, sichtbar_anzahl, (sx, sy))`` zurueck oder None, wenn
+        der schnelle weg nicht anwendbar ist. Rechnerisch identisch zur
+        schleife in _adaptive_prediction_screen_points -- dieselbe rahmen-
         transformation, derselbe massstab, dieselbe y-spiegelung.
+
+        Der erste eintrag ist bewusst None: die punkte leben ab hier nur
+        noch in den spalten (sx, sy). Die frueher hier gebaute liste aus
+        (x, y)-tupeln kostete bei 4000 punkten je frame mehr als die
+        projektion selbst und wurde vom zeichenweg sofort wieder in arrays
+        zurueckverwandelt.
 
         Motivation: gemessen lag die punktweise projektion bei 5.6 ms je
         frame, praktisch alles davon Python-aufruf-overhead ueber 3000
@@ -3716,7 +4336,8 @@ class Renderer:
         if path_points.ndim != 2 or path_points.shape[1] < 3:
             return None
         if len(indices) == 0:
-            return ([], 0)
+            empty = np.empty(0, dtype=np.float64)
+            return (None, 0, (empty, empty))
 
         frame = self._active_frame()
         transform = getattr(frame, 'to_this_frame_xy_arrays', None)
@@ -3746,7 +4367,7 @@ class Renderer:
         visible = int(np.count_nonzero(
             (sx >= -margin) & (sx <= self.width + margin)
             & (sy >= -margin) & (sy <= self.height + margin)))
-        return (list(zip(sx.tolist(), sy.tolist())), visible, (sx, sy))
+        return (None, visible, (sx, sy))
 
     # ------------------------------------------------------------------
     # Aufloesungsgetriebene verfeinerung
@@ -3994,97 +4615,103 @@ class Renderer:
             stats['draw_points'] = 0
             return []
 
+        # ARRAYS STATT TUPEL-LISTEN. Verdichtung, RDP, luecken-auffuellung
+        # und verdichtung-nach-innen sind alle indexoperationen auf denselben
+        # zwei koordinaten-spalten. Frueher wanderte die spur nach jeder
+        # stufe durch `list(zip(...tolist()))` und zurueck durch
+        # `np.asarray` -- bei 4000 punkten je frame gemessen der zweit-
+        # groesste einzelposten des zeichenwegs nach dem klippen selbst.
+        if coords is not None:
+            origin_x = float(coords[0][0])
+            origin_y = float(coords[1][0])
+        else:
+            origin_x = float(screen_points[0][0])
+            origin_y = float(screen_points[0][1])
+
+        min_step2 = float(min_step_px) * float(min_step_px)
+        tol2 = float(tolerance_px) * float(tolerance_px)
+        max_seg = max(0.5, float(max_segment_px))
+
         sampled_runs = []
 
         for run in runs:
+            run = np.asarray(run, dtype=np.float64)
+            if run.ndim != 2 or run.shape[0] < 2:
+                continue
+            rxs = np.ascontiguousarray(run[:, 0])
+            rys = np.ascontiguousarray(run[:, 1])
+
             run_starts_at_path_origin = (
-                abs(run[0][0] - screen_points[0][0]) < 1e-9 and
-                abs(run[0][1] - screen_points[0][1]) < 1e-9
+                abs(rxs[0] - origin_x) < 1e-9 and
+                abs(rys[0] - origin_y) < 1e-9
             )
 
-            min_step2 = min_step_px * min_step_px
-            if _LINE_KERNELS_OK and len(run) > 2:
-                # Numba-weg: dieselbe verdichtung und dieselbe RDP-rekursion,
-                # nur nicht mehr punkt fuer punkt in Python (gemessen ~1500
-                # abstands-aufrufe pro frame in der Python-fassung).
-                run_arr = np.asarray(run, dtype=np.float64)
-                rxs = np.ascontiguousarray(run_arr[:, 0])
-                rys = np.ascontiguousarray(run_arr[:, 1])
-                cidx = _compact_min_step_numba(rxs, rys, float(min_step2))
-                cx = rxs[cidx]
-                cy = rys[cidx]
-                compact = list(zip(cx.tolist(), cy.tolist()))
+            # Verdichtung: punkte naeher als min_step fallen weg.
+            if _LINE_KERNELS_OK:
+                cidx = _compact_min_step_numba(rxs, rys, min_step2)
             else:
-                compact = [run[0]]
-                for sx, sy in run[1:]:
-                    lx, ly = compact[-1]
-                    dx = sx - lx
-                    dy = sy - ly
-                    if dx * dx + dy * dy >= min_step2:
-                        compact.append((sx, sy))
-                if compact[-1] != run[-1]:
-                    compact.append(run[-1])
+                cidx = np.asarray(
+                    self._compact_min_step_indices(rxs, rys, min_step2),
+                    dtype=np.int64)
+            cx = rxs[cidx]
+            cy = rys[cidx]
 
-            if len(compact) > 2:
+            if cx.shape[0] > 2:
                 if _LINE_KERNELS_OK:
-                    # cx/cy stammen aus der numba-verdichtung oben -- wenn
-                    # len(compact) > 2, ist dieser weg garantiert gelaufen.
-                    keep_mask = _rdp_keep_numba(
-                        np.ascontiguousarray(cx), np.ascontiguousarray(cy),
-                        float(tolerance_px) * float(tolerance_px))
-                    keep_indices = np.nonzero(keep_mask)[0].tolist()
+                    keep_mask = _rdp_keep_numba(cx, cy, tol2)
+                    keep_indices = np.nonzero(keep_mask)[0]
                 else:
-                    keep_indices = self._rdp_indices(compact, tolerance_px)
+                    keep_indices = np.asarray(
+                        self._rdp_indices(list(zip(cx.tolist(), cy.tolist())),
+                                          tolerance_px),
+                        dtype=np.int64)
+
                 if run_starts_at_path_origin:
-                    preserve_count = min(32, len(compact))
-                    forced = set(range(preserve_count))
-                    merged = set(keep_indices)
-                    merged.update(forced)
-                    keep_indices = sorted(merged)
+                    preserve_count = min(32, cx.shape[0])
+                    # Die vereinigung mit 0..preserve_count-1 ist hier KEIN
+                    # allgemeiner mengen-schnitt: der zweite operand ist ein
+                    # LUECKENLOSER anfang, und `keep_indices` ist bereits
+                    # sortiert und doppelfrei. Damit ist das ergebnis genau
+                    # "0..preserve-1, dahinter alle keeps >= preserve" --
+                    # eine suche plus ein anhaengen, ohne die hash-tabelle,
+                    # die np.union1d aufbaut (gemessen 0.44 ms je aufruf,
+                    # zwei aufrufe je frame).
+                    cut = int(np.searchsorted(keep_indices, preserve_count,
+                                              side='left'))
+                    tail = keep_indices[cut:]
+                    merged = np.empty(preserve_count + tail.shape[0],
+                                      dtype=np.int64)
+                    merged[:preserve_count] = np.arange(preserve_count,
+                                                        dtype=np.int64)
+                    merged[preserve_count:] = tail
+                    keep_indices = merged
 
                 # Guard against over-aggressive simplification by enforcing
                 # a maximum screen-space gap between consecutive kept points.
-                if len(keep_indices) > 1:
-                    max_seg = max(0.5, float(max_segment_px))
-                    refined = [keep_indices[0]]
-                    for i in range(1, len(keep_indices)):
-                        start_idx = refined[-1]
-                        end_idx = keep_indices[i]
-                        if end_idx <= start_idx:
-                            continue
+                if keep_indices.shape[0] > 1:
+                    keep_indices = np.ascontiguousarray(
+                        keep_indices, dtype=np.int64)
+                    if _LINE_KERNELS_OK:
+                        keep_indices = _max_gap_refine_numba(
+                            keep_indices, cx, cy, max_seg)
+                    else:
+                        keep_indices = self._max_gap_refine_indices(
+                            keep_indices, cx, cy, max_seg)
 
-                        sx0, sy0 = compact[start_idx]
-                        sx1, sy1 = compact[end_idx]
-                        seg_dx = sx1 - sx0
-                        seg_dy = sy1 - sy0
-                        seg_len = math.sqrt(seg_dx * seg_dx + seg_dy * seg_dy)
-
-                        if seg_len > max_seg:
-                            steps = max(2, int(math.ceil(seg_len / max_seg)))
-                            for step_i in range(1, steps):
-                                candidate = start_idx + int(round((end_idx - start_idx) * (step_i / steps)))
-                                if candidate <= refined[-1]:
-                                    candidate = refined[-1] + 1
-                                if candidate >= end_idx:
-                                    break
-                                refined.append(candidate)
-
-                        if end_idx > refined[-1]:
-                            refined.append(end_idx)
-
-                    keep_indices = refined
-
-                sampled = [compact[i] for i in keep_indices]
+                sampled_x = cx[keep_indices]
+                sampled_y = cy[keep_indices]
             else:
-                sampled = compact
+                sampled_x = cx
+                sampled_y = cy
 
             # Densify only the RDP-kept points, not the raw scan.
             # Pre-RDP densification of sparse predictors could expand 3000 samples
             # to 75 000+ linearly-interpolated dummies that RDP discards anyway,
             # making _rdp_indices O(N²) on a huge but information-free array.
-            sampled = self._densify_screen_run(sampled, max_segment_px)
+            sampled = self._densify_screen_columns(
+                sampled_x, sampled_y, max_segment_px)
 
-            if len(sampled) >= 2:
+            if sampled.shape[0] >= 2:
                 sampled_runs.append(sampled)
 
         sampled_runs = self._cap_runs_by_screen_length(
@@ -4254,6 +4881,9 @@ class Renderer:
         self.width = width
         self.height = height
         self.ctx.viewport = (0, 0, width, height)
+        # u_viewport haengt an der fenstergroesse -- der zustandscache waere
+        # sonst genau ueber diesen wert veraltet.
+        self._invalidate_gl_state_cache()
         # WICHTIG: moderngl erkennt die groesse von ctx.screen nur EINMAL beim
         # anlegen des contexts. Nach einem resize meldet ctx.screen.size noch
         # die alte fenstergroesse -- und jedes ctx.screen.use() stellt daraus

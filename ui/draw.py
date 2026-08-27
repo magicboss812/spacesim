@@ -71,6 +71,7 @@ class UIDraw:
             self._instance_capacity = 0
             self._instance_count = 0
             self._instance_data = np.empty((0, self._INSTANCE_FLOATS), dtype='f4')
+            self._instance_flat = self._instance_data.reshape(-1)
             self._inst_vbo = None
             self._vao = None
             self._ensure_capacity(256)
@@ -89,6 +90,8 @@ class UIDraw:
         if self._instance_count:
             data[:self._instance_count] = self._instance_data[:self._instance_count]
         self._instance_data = data
+        # Flache sicht auf denselben speicher, siehe _submit.
+        self._instance_flat = data.reshape(-1)
         # GL-puffer und VAO neu aufbauen -- der VAO haelt den alten puffer.
         for obj in (self._vao, self._inst_vbo):
             try:
@@ -253,25 +256,24 @@ class UIDraw:
         n = self._instance_count
         if n >= self._instance_capacity:
             self._ensure_capacity(n + 1)
-        row = self._instance_data[n]
-        row[0] = left
-        row[1] = ortho_y
-        row[2] = width
-        row[3] = height
-        row[4] = expand
-        row[5] = rotation_rad
-        row[6:10] = radii
-        row[10:14] = fill
-        row[14:18] = fill2
-        row[18] = gradient
-        row[19:23] = border_color
-        row[23] = border_width
-        row[24:28] = shadow_color
-        row[28] = shadow_offset[0]
-        row[29] = shadow_offset[1]
-        row[30] = shadow_softness
-        row[31] = arc_params[0]
-        row[32] = arc_params[1]
+        # EINE zuweisung statt zwanzig. Jede einzelne schreiboperation auf
+        # einer numpy-zeile kostet einen kompletten ufunc-durchlauf; ueber
+        # die rund 200 formen eines HUD-frames war das gemessen der groesste
+        # einzelposten von _submit. Die reihenfolge der 33 werte ist
+        # dieselbe wie zuvor und muss zu _INSTANCE_FORMAT passen.
+        offset = n * self._INSTANCE_FLOATS
+        self._instance_flat[offset:offset + self._INSTANCE_FLOATS] = (
+            left, ortho_y, width, height, expand, rotation_rad,
+            radii[0], radii[1], radii[2], radii[3],
+            fill[0], fill[1], fill[2], fill[3],
+            fill2[0], fill2[1], fill2[2], fill2[3],
+            gradient,
+            border_color[0], border_color[1], border_color[2], border_color[3],
+            border_width,
+            shadow_color[0], shadow_color[1], shadow_color[2], shadow_color[3],
+            shadow_offset[0], shadow_offset[1], shadow_softness,
+            arc_params[0], arc_params[1],
+        )
         self._instance_count = n + 1
 
     def flush(self):
@@ -284,7 +286,11 @@ class UIDraw:
         if self._last.get('u_viewport') != viewport:
             self._last['u_viewport'] = viewport
             self._program['u_viewport'].value = viewport
-        self._inst_vbo.write(self._instance_data[:count].tobytes())
+        # Die zeilen 0..count sind zusammenhaengend im speicher, also direkt
+        # als puffer uebergeben statt ueber tobytes() zu kopieren -- das
+        # waeren bei ~200 formen und knapp 60 flushes je frame gut 1.5 MB
+        # kopie fuer nichts.
+        self._inst_vbo.write(self._instance_data[:count])
         self._vao.render(moderngl.TRIANGLE_STRIP, instances=count)
 
     def resize(self, width, height):

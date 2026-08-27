@@ -820,14 +820,35 @@ class _BodyEphemerisMixin:
 
         cache = self._position_cache
         bid = id(body)
-        for j in range(wx.shape[0]):
-            key = (bid, float(qt[j]))
-            hit = cache.get(key)
+        # Der abgleich laeuft ueber PYTHON-listen, nicht ueber die arrays:
+        # `qt[j]` und `wx[j] = ...` auf einem numpy-array kosten je rund
+        # eine groessenordnung mehr als der zugriff auf eine liste, und die
+        # schleife laeuft ueber alle knoten (~260) je koerper der
+        # eltern-kette und frame. Gerechnet wird dabei nichts anderes:
+        # dieselben werte, dieselbe reihenfolge, dieselben cache-eintraege.
+        qt_list = qt.tolist()
+        wx_list = wx.tolist()
+        wy_list = wy.tolist()
+        get = cache.get
+        hits = None
+        for j, t_j in enumerate(qt_list):
+            key = (bid, t_j)
+            hit = get(key)
             if hit is not None:
-                wx[j] = hit[0]
-                wy[j] = hit[1]
+                if hit[0] != wx_list[j] or hit[1] != wy_list[j]:
+                    wx_list[j] = hit[0]
+                    wy_list[j] = hit[1]
+                    if hits is None:
+                        hits = []
+                    hits.append(j)
             else:
-                cache[key] = (float(wx[j]), float(wy[j]))
+                cache[key] = (wx_list[j], wy_list[j])
+        if hits:
+            # Nur die stellen zurueckschreiben, an denen der cache
+            # tatsaechlich einen ANDEREN wert hielt.
+            idx = _np.asarray(hits, dtype=_np.int64)
+            wx[idx] = [wx_list[j] for j in hits]
+            wy[idx] = [wy_list[j] for j in hits]
         return wx, wy
 
     def _scripted_top_level_batch(self, body, dt):
