@@ -13,9 +13,11 @@ Geprueft wird:
   6. Die auswahl ruehrt weder bezugskoerper noch aenderungs-benachrichtigung an
   7. (GL) pick_body trifft das, was GEZEICHNET wird -- gemessen am pixel-
      schwerpunkt des koerpers, im nicht-rotierenden UND im richtungsrahmen
-  8. (GL) Die markierung liegt als vier pfeile um den koerper, und ohne
-     auswahl ist der frame bit-identisch zum frame davor
+  8. (GL) Die markierung liegt als vier pfeile um den koerper; abgeschaltet
+     ruehrt sie keinen pixel im pfeil-ring mehr an
   9. (GL) Dreh- und pulsphase sind bildratenunabhaengig
+ 10. (GL) Der name eines koerpers haengt an der AUSWAHL, nicht an der
+     zoomstufe -- auch ein als icon gezeichneter koerper wird angeschrieben
 
 Aufruf: python tests/selection_camera_test.py
 """
@@ -637,18 +639,38 @@ def white_pixels(image, y0, y1, x0, x1):
 
 
 band = (H * 0.5 - 58, H * 0.5 - 44, W * 0.5 - 40, W * 0.5 + 40)
-check(white_pixels(plain, *band) > 0,
-      "gegenprobe: ohne auswahl steht die beschriftung im pfeil-streifen",
-      f"{white_pixels(plain, *band)} px")
+
+# Die gegenprobe braucht ein bild MIT beschriftung, aber OHNE die anhebung.
+# Seit der name an der auswahl haengt (§10) ist das nicht mehr der frame
+# ohne auswahl, sondern der alte zoom-modus: dort schreibt sich der koerper
+# selbst an, und zwar an der ungehobenen stelle.
+renderer.body_label_mode = 'zoom'
+try:
+    unlifted = draw()
+finally:
+    renderer.body_label_mode = 'selected'
+
+check(white_pixels(unlifted, *band) > 0,
+      "gegenprobe: ohne anhebung steht die beschriftung im pfeil-streifen",
+      f"{white_pixels(unlifted, *band)} px")
 check(white_pixels(marked, *band) == 0,
       "mit auswahl ist der streifen des oberen pfeils frei von schrift",
       f"{white_pixels(marked, *band)} px, angehoben um {lift:.1f} px")
 
+# Abgeschaltet zeichnet die markierung selbst nichts mehr. Der bezugsframe
+# dafuer ist NICHT mehr der frame ohne auswahl -- der name des ausgewaehlten
+# koerpers steht weiter da, denn die beschriftung ist eine eigene sache und
+# haengt nicht am pfeil-schalter. Ohne pfeile faellt auch die anhebung weg,
+# der text sitzt also genau dort, wo `unlifted` ihn schon hat: der schalter
+# darf den frame auf GENAU dieses bild zurueckfuehren, pixel fuer pixel.
 renderer.selection_marker_enabled = False
 off = draw(selected=ERDE)
-check(np.array_equal(off, plain),
-      "abgeschaltet ist der frame BIT-IDENTISCH zum frame ohne auswahl")
 renderer.selection_marker_enabled = True
+
+check(np.array_equal(off, unlifted),
+      "abgeschaltet ist der frame BIT-IDENTISCH zu dem, der nur die "
+      "beschriftung traegt",
+      f"{int((off != unlifted).any(axis=2).sum())} abweichende pixel")
 
 
 print("\n9. drehung und puls haengen nicht an der bildrate")
@@ -688,6 +710,53 @@ for k in range(24):
 swing = max(extents) - min(extents)
 check(0.5 < swing < 8.0, "der puls atmet sichtbar, aber leicht",
       f"{swing:.2f} px")
+
+
+print("\n10. der name haengt an der AUSWAHL, nicht an der zoomstufe")
+
+# Weit genug heraus, dass Erde nur noch als positions-icon gezeichnet wird
+# -- genau der fall, in dem die alte regel (label ab ~5 px radius) schwieg.
+look_at(ERDE, 2.0)
+check(ERDE.radius * camera.scale < renderer.body_icon_radius_px,
+      "die probe steht wirklich in der icon-groesse",
+      f"{ERDE.radius * camera.scale:.2f} px < {renderer.body_icon_radius_px:.1f} px")
+
+# Die pfeile bleiben fuer diese sektion aus: so ist der unterschied zwischen
+# den frames NUR die schrift.
+renderer.selection_marker_enabled = False
+try:
+    icon_plain = draw(settle=True)
+    icon_marked = draw(selected=ERDE)
+    renderer.body_label_mode = 'zoom'
+    try:
+        icon_zoom = draw(selected=ERDE)
+    finally:
+        renderer.body_label_mode = 'selected'
+finally:
+    renderer.selection_marker_enabled = True
+
+
+def ink_diff(a, b):
+    return (np.abs(a.astype(np.int16) - b.astype(np.int16)).sum(axis=2) > 12)
+
+
+label_diff = ink_diff(icon_marked, icon_plain)
+check(label_diff.any(),
+      "ein als icon gezeichneter koerper wird angeschrieben, sobald er "
+      "ausgewaehlt ist", f"{int(label_diff.sum())} pixel")
+if label_diff.any():
+    lys, lxs = np.nonzero(label_diff)
+    check(lys.max() < H * 0.5 - renderer.body_icon_radius_px,
+          "und der text steht UEBER dem icon, nicht darauf",
+          f"unterster pixel y={int(lys.max())}, icon-mitte y={H * 0.5:.0f}")
+
+# Gegenprobe: mit der alten regel schweigt derselbe koerper. Das ist genau
+# der unterschied, den die voreinstellung "selected" macht -- ohne sie
+# pruefte die messung oben nur, dass irgendein pixel anders ist.
+zoom_diff = ink_diff(icon_zoom, icon_plain)
+check(not zoom_diff.any(),
+      "gegenprobe: im modus 'zoom' bleibt derselbe koerper unbeschriftet",
+      f"{int(zoom_diff.sum())} pixel")
 
 
 # =====================================================================

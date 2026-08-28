@@ -69,8 +69,10 @@ QUALITY_PRESETS = ("fast", "balanced", "accurate", "rk4")
 # ausgibt, aus derselben quelle gelesen -- graph und ausgabe koennen sich
 # damit nicht widersprechen. `frame` ist die fuenfte, aber keine gezeichnete:
 # sie ist nur der bezug (budget-strich, textzeile).
-TIMING_SERIES = ("pred_compute", "pred_draw", "rend_calc", "rend_draw", "frame")
-TIMING_PLOTTED = ("pred_compute", "pred_draw", "rend_calc", "rend_draw")
+TIMING_SERIES = ("pred_compute", "pred_draw", "rend_calc", "rend_draw",
+                 "frame", "ui_calc")
+TIMING_PLOTTED = ("pred_compute", "pred_draw", "rend_calc", "ui_calc",
+                  "rend_draw")
 _TIMING_INDEX = {name: i for i, name in enumerate(TIMING_SERIES)}
 
 # Wie schnell der achsen-spitzenwert zerfaellt. Nur eine hysterese gegen das
@@ -161,8 +163,15 @@ class TimingHistory:
 
     # ------------------------------------------------------------- schreiben
 
-    def push(self, pred_compute, pred_draw, rend_calc, rend_draw, frame):
-        """Eine probe. Heisser pfad -- keine allokation, kein dict, kein try."""
+    def push(self, pred_compute, pred_draw, rend_calc, rend_draw, frame,
+             ui_calc=0.0):
+        """Eine probe. Heisser pfad -- keine allokation, kein dict, kein try.
+
+        `ui_calc` steht hinten, obwohl es im panel zwischen rend_calc und
+        rend_draw gezeichnet wird: die zeilen-reihenfolge ist TIMING_SERIES,
+        die zeichen-reihenfolge TIMING_PLOTTED, und das anhaengen haelt die
+        vorhandenen zeilen-indizes stabil.
+        """
         if self.paused:
             return
         i = self._cursor
@@ -172,6 +181,7 @@ class TimingHistory:
         rows[2][i] = rend_calc
         rows[3][i] = rend_draw
         rows[4][i] = frame
+        rows[5][i] = ui_calc
         i += 1
         if i >= self._capacity:
             i = 0
@@ -320,7 +330,9 @@ class DevContext:
           pred_compute -- dauer EINER predictor-rechnung. Laeuft auf einem
                           worker-thread, gehoert also NICHT ins bildbudget.
           pred_draw    -- projizieren/abtasten + zeichnen der linie (haupt-thread)
-          rend_calc    -- render() ohne den swap (haupt-thread)
+          rend_calc    -- renderer.render() selbst (haupt-thread)
+          ui_calc      -- spieler-HUD + devtools, zwischen render() und
+                          present() (haupt-thread)
           rend_draw    -- der swap selbst, inklusive der VSync-wartezeit
         """
         history = self.timings
@@ -334,6 +346,7 @@ class DevContext:
         pred_draw = 0.0
         rend_calc = 0.0
         rend_draw = 0.0
+        ui_calc = 0.0
         renderer = self.renderer
         if renderer is not None:
             stats = getattr(renderer, '_last_prediction_render_stats', None)
@@ -342,15 +355,13 @@ class DevContext:
             timings = getattr(renderer, 'last_frame_timings', None)
             if type(timings) is dict:
                 rend_draw = _ms(timings.get('swap_or_present_ms'))
-                rend_calc = _ms(timings.get('frame_ms')) - rend_draw
-                # frame_ms und swap_or_present_ms werden an zwei verschiedenen
-                # stellen geschrieben (render() bzw. present()). Wer render()
-                # ohne present() aufruft -- die GL-tests tun das -- hinterlaesst
-                # sie inkonsistent, und die differenz wird negativ.
-                if rend_calc < 0.0:
-                    rend_calc = 0.0
+                # frame_ms IST render() selbst -- present() schreibt es nicht
+                # mehr um. Nichts abzuziehen, nichts abzuschneiden.
+                rend_calc = _ms(timings.get('frame_ms'))
+                ui_calc = _ms(timings.get('overlay_ms'))
 
-        history.push(pred_compute, pred_draw, rend_calc, rend_draw, _ms(frame_ms))
+        history.push(pred_compute, pred_draw, rend_calc, rend_draw,
+                     _ms(frame_ms), ui_calc)
 
 
 def _fmt_si(value, unit="m"):
@@ -410,8 +421,14 @@ _TIMING_GRAPHS = (
      "draw = die polylinien und die Ap/Pe-marker."),
     ("rend_calc", "render calc",
      (1.00, 0.74, 0.32, 1.0), True,
-     "Haupt-thread: render() ohne den swap, also frame_ms - swap_or_present_ms.\n"
-     "Enthaelt koerper, spuren, FXAA, HUD und den predictor-anteil oben."),
+     "Haupt-thread: renderer.render() selbst (timings['frame_ms']).\n"
+     "Enthaelt koerper, bahnlinien, spuren, FXAA und den predictor-anteil\n"
+     "oben -- NICHT mehr das spieler-HUD, das steht jetzt in ui_calc."),
+    ("ui_calc", "ui calc (spieler-HUD + devtools)",
+     (0.62, 0.55, 1.00, 1.0), True,
+     "Haupt-thread: alles zwischen render() und present() -- ui_root.render()\n"
+     "und diese oberflaeche hier. Lief frueher unsichtbar in rend_calc mit\n"
+     "und war dort etwa die haelfte der zahl."),
     ("rend_draw", "render draw (swap + VSync-wartezeit)",
      (0.92, 0.48, 0.85, 1.0), True,
      "present() -> pygame.display.flip(). Bei aktivem VSync ist das\n"
@@ -704,6 +721,42 @@ def draw_dev_panels(c: "DevContext"):
             imgui.text(f"snap: {sc.snap_mode or 'off'}")
             _slider("rotation speed", sc, 'rotation_speed', 0.1, 20.0, "%.2f")
             _slider("thrust acc (m/s2)", sc, 'thrust_acc', 1.0, 5000.0, "%.0f", log=True)
+        if c.renderer is not None:
+            imgui.separator()
+            imgui.text("darstellung (ship_art.py)")
+            _checkbox("vektor-grafik", c.renderer, 'ship_sprite_enabled',
+                      "Aus = der alte dreiecks-pfeil.")
+            _slider("scale", c.renderer, 'ship_render_scale', 0.25, 6.0, "%.2f",
+                    tooltip="Groesse der schiffs-grafik.\n"
+                            "Sie haengt an der bildschirm-, nicht an der\n"
+                            "welt-geometrie: der regler aendert nichts an der\n"
+                            "physik, und die groesse bleibt ueber jede\n"
+                            "zoomstufe hinweg gleich.")
+            _slider("laenge (design-px)", c.renderer, 'ship_length_px', 20.0, 240.0, "%.0f",
+                    tooltip="Basislaenge bei scale = 1, in design-einheiten\n"
+                            "(ui_px() rechnet sie auf die aufloesung um).")
+            _slider("fahne im leerlauf", c.renderer, 'ship_plume_idle', 0.0, 1.0, "%.2f",
+                    tooltip="Grundhelligkeit der abgasfahne ohne schub.\n"
+                            "Unter schub faehrt sie immer auf 1.0.")
+            imgui.separator()
+            imgui.text("zoom-schrumpfung")
+            _checkbox("aktiv", c.renderer, 'ship_zoom_shrink_enabled',
+                      "Aus = feste bildschirmgroesse auf jeder zoomstufe.")
+            zoom_now = getattr(c.renderer, '_ship_zoom_factor', 1.0)
+            imgui.text(f"faktor jetzt {zoom_now:.3f}")
+            _slider("kleinster faktor", c.renderer, 'ship_zoom_shrink_min',
+                    0.1, 1.0, "%.2f",
+                    tooltip="Groesse ganz herausgezoomt, als anteil der\n"
+                            "vollen groesse.")
+            _slider("start (px/m)", c.renderer, 'ship_zoom_shrink_start_scale',
+                    1e-12, 1e-3, "%.3e", log=True,
+                    tooltip="Kamera-skala, ab der das schiff zu schrumpfen\n"
+                            "beginnt. Darueber volle groesse.")
+            _slider("ende (px/m)", c.renderer, 'ship_zoom_shrink_end_scale',
+                    1e-15, 1e-4, "%.3e", log=True,
+                    tooltip="Kamera-skala, ab der der kleinste faktor steht.\n"
+                            "Muss unter dem start liegen, sonst wird die\n"
+                            "schrumpfung ignoriert.")
 
     # -------------------------------------------------------------- Debug
     if imgui.collapsing_header("Debug flags"):

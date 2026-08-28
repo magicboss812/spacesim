@@ -205,13 +205,15 @@ check(axis, 2.0, 'achse faellt zurueck')
 check_true(hist.axis_max('pred_compute', dt=0.0) >= 2.0,
            'dt=0 ist kein sonderfall', f"{hist.axis_max('pred_compute', dt=0.0)}")
 
-# Die gemeinsame achse ist das maximum ueber die vier gezeichneten serien --
-# und darf die (nicht gezeichnete) frame-serie NICHT enthalten.
+# Die gemeinsame achse ist das maximum ueber die GEZEICHNETEN serien -- und
+# darf die (nicht gezeichnete) frame-serie NICHT enthalten.
 hist = TimingHistory(capacity=8)
 for _ in range(8):
     hist.push(pred_compute=1.0, pred_draw=3.0, rend_calc=7.0, rend_draw=2.0,
-              frame=900.0)
-check(hist.shared_axis_max(dt=1.0 / 180.0), 10.0, 'gemeinsame achse ueber die vier')
+              frame=900.0, ui_calc=4.0)
+check(hist.shared_axis_max(dt=1.0 / 180.0), 10.0,
+      'gemeinsame achse ueber die gezeichneten serien')
+check(list(hist.series('ui_calc')), [4.0] * 8, 'ui_calc ist eine eigene serie')
 
 # ------------------------------------------------------------ DevContext-pfad
 print()
@@ -222,7 +224,8 @@ ctx = DevContext(predictor=pred, renderer=rend, tick_rate=180.0)
 check_true(isinstance(ctx.timings, TimingHistory), 'DevContext hat einen puffer')
 
 pred.last_compute_ms = 17.0
-rend.last_frame_timings = {'frame_ms': 9.0, 'swap_or_present_ms': 3.5}
+rend.last_frame_timings = {'frame_ms': 9.0, 'swap_or_present_ms': 3.5,
+                           'overlay_ms': 4.25}
 rend._last_prediction_render_stats = {'prepare_ms': 1.25, 'draw_ms': 0.75}
 ctx.sample_timings(11.0)
 
@@ -230,15 +233,20 @@ check(ctx.timings.count, 1, 'eine probe')
 check(ctx.timings.stats('pred_compute')[0], 17.0, 'pred_compute = last_compute_ms')
 check(ctx.timings.stats('pred_draw')[0], 2.0, 'pred_draw = prepare + draw')
 check(ctx.timings.stats('rend_draw')[0], 3.5, 'rend_draw = swap_or_present_ms')
-check(ctx.timings.stats('rend_calc')[0], 5.5, 'rend_calc = frame_ms - swap')
+# frame_ms IST render() selbst -- present() schreibt es nicht mehr um, also
+# wird hier nichts mehr abgezogen. Alles zwischen render() und present()
+# (spieler-HUD, devtools) steht getrennt in overlay_ms -> ui_calc; frueher
+# lief es unsichtbar in rend_calc mit.
+check(ctx.timings.stats('rend_calc')[0], 9.0, 'rend_calc = frame_ms')
+check(ctx.timings.stats('ui_calc')[0], 4.25, 'ui_calc = overlay_ms')
 check(ctx.timings.stats('frame')[0], 11.0, 'frame = schleifenzeit')
 
-# rend_calc darf nie negativ werden: present() schreibt frame_ms NACH
-# swap_or_present_ms, aber ein zwischenstand (oder ein test, der render()
-# ohne present() aufruft) kann die beiden inkonsistent hinterlassen.
-rend.last_frame_timings = {'frame_ms': 2.0, 'swap_or_present_ms': 8.0}
+# Ein renderer, dessen present() nie gelaufen ist (die GL-tests rufen nur
+# render()), hat gar kein overlay_ms. Das darf keine luecke reissen.
+rend.last_frame_timings = {'frame_ms': 2.0, 'swap_or_present_ms': 0.0}
 ctx.sample_timings(2.0)
-check(ctx.timings.stats('rend_calc')[0], 0.0, 'rend_calc wird bei 0 abgeschnitten')
+check(ctx.timings.stats('rend_calc')[0], 2.0, 'ohne present() bleibt rend_calc stehen')
+check(ctx.timings.stats('ui_calc')[0], 0.0, 'ohne overlay_ms ist ui_calc null')
 
 # Fehlende objekte duerfen die hauptschleife nicht sprengen.
 empty = DevContext(tick_rate=180.0)
@@ -246,7 +254,8 @@ empty.sample_timings(4.0)
 check(empty.timings.count, 1, 'ohne predictor/renderer trotzdem eine probe')
 check(empty.timings.stats('frame')[0], 4.0, 'frame-zeit auch ohne renderer')
 # Muell in den timings-dicts (None, strings) darf nicht durchschlagen.
-rend.last_frame_timings = {'frame_ms': None, 'swap_or_present_ms': 'x'}
+rend.last_frame_timings = {'frame_ms': None, 'swap_or_present_ms': 'x',
+                           'overlay_ms': object()}
 rend._last_prediction_render_stats = None
 pred.last_compute_ms = None
 ctx.sample_timings(None)
@@ -258,7 +267,8 @@ print("kosten des abtastens im bildbudget")
 pred = FakePredictor()
 pred.last_compute_ms = 17.0
 rend = FakeRenderer()
-rend.last_frame_timings = {'frame_ms': 9.0, 'swap_or_present_ms': 3.5}
+rend.last_frame_timings = {'frame_ms': 9.0, 'swap_or_present_ms': 3.5,
+                           'overlay_ms': 4.25}
 rend._last_prediction_render_stats = {'prepare_ms': 1.25, 'draw_ms': 0.75}
 ctx = DevContext(predictor=pred, renderer=rend, tick_rate=180.0)
 

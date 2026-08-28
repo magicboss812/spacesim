@@ -17,6 +17,7 @@ import numpy as np
 from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
 import body_style
 import orbit_lines
+import ship_art
 
 # Numba-fassungen der reinen zahlenschleifen im linien-zeichenweg
 # (min-step-verdichtung und RDP-vereinfachung). Wort-fuer-wort dieselbe
@@ -588,6 +589,56 @@ class Renderer:
         # (kein leerer frame, keine doppelzeichnung). Beim weiteren herauszoomen
         # bleibt das icon konstant groß (skaliert nicht mehr mit der zoom-stufe).
         self.body_icon_radius_px = 4.0
+
+        # --- wann ein koerper seinen namen zeigt --------------------------
+        # `"selected"` (voreinstellung): nur der angewaehlte koerper wird
+        # angeschrieben -- dafuer IMMER, auch wenn er weit herausgezoomt nur
+        # noch als icon gezeichnet wird. `"zoom"` ist das alte verhalten
+        # (jeder koerper ab `body_label_min_radius_px` bildschirmradius),
+        # `"both"` beides zusammen.
+        self.body_label_mode = "selected"
+        self.body_label_min_radius_px = 5.0
+
+        # --- schiffs-grafik (ship_art.py) ---------------------------------
+        # Die vektor-zeichnung aus dem design-mockup. Sie wird wie der alte
+        # pfeil in FESTEN bildschirm-pixeln gezeichnet: das schiff behaelt
+        # seine groesse ueber jede zoomstufe hinweg, es ist bewusst KEINE
+        # welt-geometrie (bei realistischem massstab waere es bei jeder
+        # spielbaren zoomstufe kleiner als ein pixel).
+        self.ship_sprite_enabled = True
+        # Laenge (nase bis duesen-lippe) in DESIGN-einheiten; ui_px() rechnet
+        # sie auf die aktuelle aufloesung um. `ship_render_scale` ist der
+        # spieler-regler daneben (dev-UI, reiter "Ship").
+        self.ship_length_px = 78.0
+        self.ship_render_scale = 1.0
+        self.ship_accent_color = ship_art.DEFAULT_ACCENT
+        # Grundhelligkeit der abgasfahne ohne schub; unter schub faehrt sie
+        # auf 1.0 hoch (siehe _draw_ship_sprite).
+        self.ship_plume_idle = 0.22
+        self._ship_geometry_cache = None
+        self._ship_plume_level = 0.0
+        # --- zoom-abhaengige verkleinerung des schiffs -------------------
+        # Das schiff bleibt in bildschirm-pixeln gezeichnet (siehe oben),
+        # aber NICHT ueber jede zoomstufe gleich gross: weit herausgezoomt --
+        # wenn das ganze system ins bild passt und der koerper darunter
+        # laengst nur noch ein icon ist -- ueberdeckt eine 78-px-silhouette
+        # die halbe bahn. Ab `ship_zoom_shrink_start_scale` (px je meter)
+        # faehrt der massstab deshalb nach unten, bis er bei
+        # `ship_zoom_shrink_end_scale` auf `ship_zoom_shrink_min` steht.
+        #
+        # Die ueberblendung ist bewusst KEINE stufe und auch nicht linear in
+        # der zoomstufe: sie laeuft als smoothstep im LOG-raum der skala
+        # (zoom ist multiplikativ, genau wie camera._ease_scale es rechnet),
+        # damit die groesse beim durchzoomen weich wandert statt an einer
+        # schwelle umzuspringen.
+        self.ship_zoom_shrink_enabled = True
+        self.ship_zoom_shrink_start_scale = 1e-6   # darueber: volle groesse
+        self.ship_zoom_shrink_end_scale = 1e-9     # darunter: minimalgroesse
+        self.ship_zoom_shrink_min = 0.55
+        # Je frame in render() aus camera.scale nachgezogen, damit alle
+        # zeichenwege (grafik, pfeil-fallback, label-abstand) denselben
+        # faktor sehen -- sie bekommen die kamera nicht alle uebergeben.
+        self._ship_zoom_factor = 1.0
 
         # --- auswahl-markierung (vier pfeile um den angeklickten koerper) --
         # Alle groessen sind DESIGN-einheiten und laufen durch ui_px(), also
@@ -2504,6 +2555,7 @@ class Renderer:
                 f"orbit_lines_drawn={self.debug_info.get('orbit_lines_drawn', 0)} "
                 f"hud_ms={timings.get('hud_ms', 0.0):.3f} "
                 f"fxaa_ms={timings.get('fxaa_ms', 0.0):.3f} "
+                f"overlay_ms={timings.get('overlay_ms', 0.0):.3f} "
                 f"swap_or_present_ms={timings.get('swap_or_present_ms', 0.0):.3f}",
                 flush=True,
             )
@@ -2518,6 +2570,7 @@ class Renderer:
             'orbit_lines_ms': 0.0,
             'hud_ms': 0.0,
             'fxaa_ms': 0.0,
+            'overlay_ms': 0.0,
             'swap_or_present_ms': 0.0,
         }
 
@@ -2526,6 +2579,11 @@ class Renderer:
         self.current_reference_body = reference_body
         self.selected_body = selected_body
         self._advance_selection_phases(real_dt)
+        self._ship_zoom_factor = self._ship_zoom_shrink_factor(
+            getattr(camera, 'scale', None))
+        # Fuer alles, was tief im zeichenweg ein echtes zeit-delta braucht
+        # (die abgasfahne des schiffs) und keinen eigenen parameter hat.
+        self._frame_real_dt = max(0.0, float(real_dt))
         self._dbg_ship_control = ship_control
         try:
             self._current_body_index_by_id = {id(body): idx for idx, body in enumerate(bodies)}
@@ -2683,8 +2741,11 @@ class Renderer:
         # (ImGui-devtools, spaeter das custom-HUD), brauchen die luecke
         # zwischen "welt fertig gezeichnet" und "swap".
         timings['swap_or_present_ms'] = 0.0
+        timings['overlay_ms'] = 0.0
         timings['frame_ms'] = (time.perf_counter() - frame_t0) * 1000.0
         self._render_t0 = frame_t0
+        # Ende von render(). Bezugspunkt fuer `overlay_ms` -- siehe present().
+        self._render_end = time.perf_counter()
         self.last_frame_timings = timings
         self._emit_render_benchmark(timings)
 
@@ -2692,6 +2753,15 @@ class Renderer:
         """Fuehrt den buffer-swap aus und schreibt die swap-zeit in die timings.
 
         Von der hauptschleife aufzurufen, NACHDEM alle overlays gezeichnet sind.
+
+        `frame_ms` bleibt dabei stehen: es ist die dauer von render() SELBST.
+        Frueher wurde es hier auf "render-start bis nach dem swap" gesetzt,
+        und weil `rend_calc` daraus als `frame_ms - swap` gebildet wird, lief
+        alles, was zwischen render() und present() gezeichnet wird -- vor
+        allem das spieler-HUD (`ui_root.render()`, gemessen ~8 ms median) --
+        stillschweigend unter "render calc". Das ist die haelfte der zahl,
+        und sie stand an der falschen stelle. Die luecke heisst jetzt
+        `overlay_ms` und wird getrennt ausgewiesen.
         """
         swap_t0 = time.perf_counter()
         pygame.display.flip()
@@ -2699,9 +2769,13 @@ class Renderer:
         timings = self.last_frame_timings
         if isinstance(timings, dict):
             timings['swap_or_present_ms'] = swap_ms
-            start = getattr(self, '_render_t0', None)
-            if start is not None:
-                timings['frame_ms'] = (time.perf_counter() - start) * 1000.0
+            end = getattr(self, '_render_end', None)
+            if end is not None:
+                overlay_ms = (swap_t0 - end) * 1000.0
+                # Wer render() ohne present() aufruft (die GL-tests tun das),
+                # hinterlaesst einen alten `_render_end` -- dann waere die
+                # differenz unsinnig gross oder negativ.
+                timings['overlay_ms'] = overlay_ms if overlay_ms >= 0.0 else 0.0
 
     def draw_ship_thrust_vector(self, ship, camera):
         if ship is None:
@@ -2783,7 +2857,7 @@ class Renderer:
             d = directions.get(mode)
             if d is None:
                 return
-            # `theta` ist im uhrzeigersinn gemessen (siehe _draw_ship_arrow und
+            # `theta` ist im uhrzeigersinn gemessen (siehe _draw_ship_sprite und
             # schiff.apply_thrust: nasenrichtung = (cos theta, -sin theta)).
             # Damit die nase auf der frame-richtung d landet, muss also
             # (cos theta_f, -sin theta_f) == d gelten -> d.y negiert messen.
@@ -3002,7 +3076,7 @@ class Renderer:
                 theta_frame = self._active_frame().transform_heading(self._frame_time_s, theta_frame)
             except Exception:
                 pass
-            self._draw_ship_arrow(body, x, y, r, g, b, theta_override=theta_frame)
+            self._draw_ship_sprite(body, x, y, r, g, b, theta_override=theta_frame)
             # Schiffs-Label mit camera.world_to_screen zeichnen, um
             # konsistente Welt->Bildschirm-Abbildung zu gewährleisten und
             # FBO/Projektions-Inkonsistenzen zu vermeiden, die Label-Flackern
@@ -3012,15 +3086,22 @@ class Renderer:
                 # camera.world_to_screen: in rotierenden plot-frames weichen
                 # beide voneinander ab und das label loest sich vom schiff.
                 lx, ly = x, y
+                # Die labels stehen ueber/unter der SILHOUETTE, nicht in einem
+                # festen pixel-abstand: der schiffs-massstab ist regelbar
+                # (renderer.ship_render_scale), ein fester abstand wuerde die
+                # beschriftung sonst mitten in den rumpf legen.
+                half_h = self._ship_half_height_px()
+                name_y = float(ly) - half_h - 19.0
+                speed_y = float(ly) + half_h + 9.0
                 entry = self._get_label_texture(body.name, self.font_small)
                 if entry:
                     _, w, h = entry
                     self._blit_text_topdown(
-                        body.name, float(lx) - (float(w) / 2.0), float(ly) - 26.0,
+                        body.name, float(lx) - (float(w) / 2.0), name_y,
                         self.font_small,
                     )
                 else:
-                    self._blit_text_topdown(body.name, float(lx) + 12.0, float(ly) - 26.0,
+                    self._blit_text_topdown(body.name, float(lx) + 12.0, name_y,
                                             self.font_small)
                 speed = self._ship_frame_speed_m_s(body)
                 if getattr(self, "debug_frame", False):
@@ -3044,11 +3125,11 @@ class Renderer:
                     if speed_entry:
                         _, sw, _ = speed_entry
                         self._blit_text_topdown(
-                            speed_text, float(lx) - (float(sw) / 2.0), float(ly) + 16.0,
+                            speed_text, float(lx) - (float(sw) / 2.0), speed_y,
                             self.font_small,
                         )
                     else:
-                        self._blit_text_topdown(speed_text, float(lx) + 12.0, float(ly) + 16.0,
+                        self._blit_text_topdown(speed_text, float(lx) + 12.0, speed_y,
                                                 self.font_small)
             except Exception:
                 try:
@@ -3083,6 +3164,9 @@ class Renderer:
             # keine doppelzeichnung), konstante bildschirmgröße beim herauszoomen.
             self.debug_info['bodies_as_icon'] = self.debug_info.get('bodies_as_icon', 0) + 1
             self._draw_body_icon(x, y, icon_radius_px, r, g, b)
+            # Der name haengt NICHT an der zeichengroesse: ein angewaehlter
+            # mond soll auch als 4-px-icon lesbar beschriftet sein.
+            self._queue_body_label(body, x, y, icon_radius_px, screen_pos)
             return
 
         # --- Voller körper (disc + glow + atmosphäre) bei echter größe ---
@@ -3150,43 +3234,272 @@ class Renderer:
             self.debug_info['bodies_vector'] = (
                 self.debug_info.get('bodies_vector', 0) + 1)
 
-        if radius > 5:
-            # Label-Position mittels camera.world_to_screen berechnen, um
-            # inkonsistente Koordinatensysteme zwischen FBO und Hauptpuffer zu vermeiden.
+        self._queue_body_label(body, x, y, radius_px, screen_pos)
+
+    def _wants_body_label(self, body, radius_px):
+        """Ob der name dieses koerpers gerade angeschrieben wird.
+
+        `body_label_mode` entscheidet, WAS die beschriftung ausloest --
+        `"selected"` die auswahl, `"zoom"` der bildschirmradius (das alte
+        verhalten), `"both"` beides. Der auswahl-fall haengt bewusst NICHT
+        an der groesse: sonst haette gerade der weit entfernte koerper, den
+        man anklickt, um ihn zu finden, keinen namen.
+        """
+        mode = str(getattr(self, 'body_label_mode', 'selected')).strip().lower()
+        selected = (body is not None and body is self.selected_body)
+        try:
+            big = float(radius_px) > float(self.body_label_min_radius_px)
+        except (TypeError, ValueError):
+            big = False
+        if mode == 'zoom':
+            return big
+        if mode == 'both':
+            return selected or big
+        return selected
+
+    def _queue_body_label(self, body, lx, ly, radius_px, screen_pos=None):
+        """Den namen eines koerpers fuer die zeichnung NACH dem FXAA vormerken.
+
+        NICHT sofort zeichnen: koerper laufen in den FXAA-FBO, und FXAA ist
+        ein kantenfilter -- ueber gerastertem text macht er aus 34.7 % voll
+        deckenden pixeln 5.3 % und verschmiert die glyphen ueber 55 % mehr
+        pixel. Die beschriftung wird deshalb gesammelt und in render() NACH
+        dem FXAA-resolve gezeichnet, so wie schiff und apsis-marker es schon
+        immer wurden.
+
+        `lx, ly` ist die FRAME-AWARE bildschirmposition aus
+        `_world_to_screen_xy`, nicht `camera.world_to_screen`: in rotierenden
+        plot-frames weichen beide voneinander ab und das label loest sich vom
+        koerper. `radius_px` ist der bezugsradius, an dem der text haengt --
+        der echte bildschirmradius beim vollen koerper, die icon-groesse beim
+        icon.
+        """
+        if not self._wants_body_label(body, radius_px):
+            return
+        try:
+            # Bei ausgewaehltem koerper steht ueber ihm der obere
+            # auswahl-pfeil -- `lift` hebt den text darueber hinweg.
+            lift = self.selection_label_lift_px(body)
+            entry = self._get_label_texture(body.name, self.font_small)
+            if entry:
+                _, w, h = entry
+                label_x = float(lx) - (float(w) / 2.0)
+                # ueber den koerper setzen: top-down ist "oben" kleineres y
+                label_y = float(ly) - float(radius_px) - lift - 6.0 - float(h)
+                self._deferred_labels.append((body.name, label_x, label_y))
+            else:
+                self._deferred_labels.append((body.name,
+                                              float(lx) + float(radius_px)
+                                              + lift + 2.0,
+                                              float(ly) - 8.0))
+        except Exception:
             try:
-                # frame-aware position verwenden (siehe schiffs-label oben)
-                lx, ly = x, y
-                entry = self._get_label_texture(body.name, self.font_small)
-                # NICHT sofort zeichnen: koerper laufen in den FXAA-FBO, und
-                # FXAA ist ein kantenfilter -- ueber gerastertem text macht er
-                # aus 34.7 % voll deckenden pixeln 5.3 % und verschmiert die
-                # glyphen ueber 55 % mehr pixel. Die beschriftung wird deshalb
-                # gesammelt und in render() NACH dem FXAA-resolve gezeichnet,
-                # so wie schiff und apsis-marker es schon immer wurden.
-                # Bei ausgewaehltem koerper steht dort der obere auswahl-pfeil.
-                lift = self.selection_label_lift_px(body)
-                if entry:
-                    _, w, h = entry
-                    label_x = float(lx) - (float(w) / 2.0)
-                    # ueber den koerper setzen: top-down ist "oben" kleineres y
-                    label_y = float(ly) - float(radius_px) - lift - 6.0 - float(h)
-                    self._deferred_labels.append((body.name, label_x, label_y))
-                else:
-                    self._deferred_labels.append((body.name,
-                                                  float(lx) + float(radius_px)
-                                                  + lift + 2.0,
-                                                  float(ly) - 8.0))
+                self._draw_body_label(
+                    body.name,
+                    screen_pos if screen_pos is not None else (lx, ly),
+                    radius_px)
             except Exception:
-                try:
-                    self._draw_body_label(body.name, screen_pos, radius_px)
-                except Exception:
-                    pass
+                pass
+
+    def _ship_zoom_shrink_factor(self, camera_scale):
+        """Massstabs-faktor des schiffs fuer die aktuelle zoomstufe.
+
+        1.0 bei `ship_zoom_shrink_start_scale` und darueber,
+        `ship_zoom_shrink_min` bei `ship_zoom_shrink_end_scale` und darunter,
+        dazwischen ein smoothstep im LOG-raum der skala. Log, weil zoom
+        multiplikativ ist (`camera._ease_scale` interpoliert aus demselben
+        grund logarithmisch): linear in `scale` gerechnet waere die ganze
+        ueberblendung in der obersten dekade verbraucht und der rest ein
+        sprung. Smoothstep statt gerade, damit auch die ENDEN der rampe
+        knickfrei sind -- ein linearer verlauf springt am start- und
+        endpunkt sichtbar in der aenderungsrate.
+
+        Reine rechnung, kein GL -- damit sie ohne kontext pruefbar ist.
+        """
+        if not bool(getattr(self, 'ship_zoom_shrink_enabled', True)):
+            return 1.0
+        try:
+            scale = float(camera_scale)
+            start = float(self.ship_zoom_shrink_start_scale)
+            end = float(self.ship_zoom_shrink_end_scale)
+            floor = float(self.ship_zoom_shrink_min)
+        except (TypeError, ValueError):
+            return 1.0
+        floor = max(0.05, min(1.0, floor))
+        if not (math.isfinite(scale) and scale > 0.0):
+            return 1.0
+        if not (start > 0.0 and end > 0.0 and end < start):
+            # Unbrauchbar konfiguriert (vertauscht oder gleich): lieber die
+            # alte feste groesse als eine division durch null.
+            return 1.0
+        if scale >= start:
+            return 1.0
+        if scale <= end:
+            return floor
+        t = math.log(start / scale) / math.log(start / end)
+        t = t * t * (3.0 - 2.0 * t)
+        return 1.0 + (floor - 1.0) * t
+
+    def _ship_length_px(self):
+        """Gezeichnete schiffslaenge in echten bildschirm-pixeln.
+
+        Basislaenge (design-einheiten -> `ui_px`) x spieler-regler
+        `ship_render_scale` x zoom-schrumpfung. EIN weg fuer alle
+        zeichenpfade, damit grafik, pfeil-fallback und label-abstand nicht
+        auseinanderlaufen.
+        """
+        return (self.ui_px(self.ship_length_px)
+                * max(0.01, float(self.ship_render_scale))
+                * max(0.05, float(getattr(self, '_ship_zoom_factor', 1.0))))
+
+    def _ship_half_height_px(self):
+        """Halbe hoehe der gezeichneten schiffs-grafik in bildschirm-pixeln.
+
+        Bezugsgroesse fuer alles, was NEBEN dem schiff sitzt (labels). Faellt
+        auf die halbe breite des alten pfeils zurueck, wenn die grafik aus ist.
+        """
+        geo = self._ship_geometry() if self.ship_sprite_enabled else None
+        if geo is None:
+            return 7.0 * max(0.05, float(getattr(self, '_ship_zoom_factor', 1.0)))
+        return self._ship_length_px() * 0.5 * geo.height / geo.length
+
+    def _ship_geometry(self):
+        """Die gebaute schiffs-grafik, gecacht bis die akzentfarbe wechselt."""
+        cache = self._ship_geometry_cache
+        if cache is not None and cache.accent == self.ship_accent_color:
+            return cache
+        try:
+            cache = ship_art.build(self.ship_accent_color)
+        except Exception as exc:
+            print(f"RENDERER WARNING: schiffs-grafik konnte nicht gebaut werden ({exc})")
+            self.ship_sprite_enabled = False
+            return None
+        self._ship_geometry_cache = cache
+        return cache
+
+    def _ship_plume_intensity(self, body, real_dt):
+        """Helligkeit der abgasfahne, weich zwischen leerlauf und schub.
+
+        `body.last_thrust_direction` wird in test.py je frame geleert und von
+        `schiffcontrol` gesetzt, sobald schub anliegt -- es ist also ein
+        echtes "brennt gerade"-signal. Nur schub NACH VORN zuendet die
+        hauptduese: beim rueckwaerts-schub (pfeil ab) sitzen die duesen an
+        der nase, hinten glimmt dann nur der leerlauf.
+        """
+        idle = max(0.0, min(1.0, float(self.ship_plume_idle)))
+        target = idle
+        thrust = getattr(body, 'last_thrust_direction', None)
+        if thrust is not None:
+            try:
+                # Der vergleich laeuft in WELTkoordinaten: theta und der
+                # schubvektor sind beide absolut, die frame-transformierte
+                # zeichenrichtung waere hier der falsche massstab.
+                theta_world = float(getattr(body, 'theta', 0.0))
+                dot = (float(thrust.x) * math.cos(theta_world)
+                       - float(thrust.y) * math.sin(theta_world))
+                if dot > 0.0:
+                    target = 1.0
+            except Exception:
+                target = 1.0
+        # Zeitkonstante ~80 ms, mit dem ECHTEN frame-delta gerechnet, damit
+        # das aufflammen bei 30 wie bei 240 fps gleich schnell ist.
+        dt = max(0.0, float(real_dt))
+        k = 1.0 if dt <= 0.0 else min(1.0, dt / 0.08)
+        self._ship_plume_level += (target - self._ship_plume_level) * k
+        return self._ship_plume_level
+
+    def _draw_ship_sprite(self, body, x, y, r, g, b, theta_override=None):
+        """Das schiff aus `ship_art` zeichnen -- in festen bildschirm-pixeln.
+
+        Die grafik liegt im lokalen schiffsraum vor (+x = nase, +y nach oben,
+        einheit "SVG-pixel"). Hier wird sie einmal je frame gedreht, auf die
+        gewuenschte bildschirmlaenge skaliert und an die schiffsposition
+        geschoben; die batches aus `ship_art` sind nur slices in dieses eine
+        transformierte array.
+        """
+        geo = self._ship_geometry() if self.ship_sprite_enabled else None
+        if geo is None:
+            self._draw_ship_arrow(body, x, y, r, g, b, theta_override=theta_override)
+            return
+
+        theta = float(theta_override) if theta_override is not None else float(getattr(body, 'theta', 0.0))
+
+        # Die grafik laeuft ueber die ORTHO-pipeline (y nach oben), die
+        # uebergebene position kommt aber aus _world_to_screen_xy (top-down).
+        # Ohne diese umrechnung landet das schiff an der ueber die
+        # bildschirmmitte gespiegelten stelle -- exakt mittig faellt das nicht
+        # auf, abseits der mitte steht es weit neben seiner bahn.
+        y = self._ortho_y(y)
+
+        # `theta` ist im UHRZEIGERSINN gemessen: schiff.apply_thrust schiebt
+        # entlang Vec2(cos theta, -sin theta), das ist die weltrichtung der
+        # nase. Die grafik muss also ebenfalls (cos, -sin) zeigen.
+        hx = math.cos(theta)
+        hy = -math.sin(theta)
+        # Stash the ACTUAL drawn nose screen-direction so diagnostics can compare
+        # the real ship pixels against the drawn vectors (non-circular check).
+        self._last_arrow_screen_dir = (hx, hy)
+
+        scale = self._ship_length_px() / geo.length
+
+        # Eine drehmatrix fuer das GANZE array: (x', y') = (hx*x - hy*y,
+        # hy*x + hx*y). Rechtshaendig, y zeigt in der ortho-konvention nach
+        # oben -- die grafik wird also nicht gespiegelt.
+        rot = np.array(((hx, hy), (-hy, hx)), dtype=np.float64)
+        pts = geo.verts @ rot
+        pts *= scale
+        pts[:, 0] += x
+        pts[:, 1] += y
+
+        def draw(ops, alpha_gain):
+            for mode, rgba, width, start, count in ops:
+                alpha = float(rgba[3]) * alpha_gain
+                if alpha <= 0.002:
+                    continue
+                # Die koerperfarbe des schiffs wirkt als tint: bei dem weissen
+                # standard-schiff ist das die identitaet, ein eingefaerbtes
+                # schiff behaelt aber seine kennfarbe.
+                color = (rgba[0] * r, rgba[1] * g, rgba[2] * b, alpha)
+                if mode == 'lines':
+                    self._draw_ortho_shape(
+                        pts[start:start + count], color, moderngl.LINES,
+                        width=min(4.0, max(1.0, width * scale)),
+                    )
+                else:
+                    self._draw_ortho_shape(
+                        pts[start:start + count], color, moderngl.TRIANGLES,
+                    )
+
+        plume = self._ship_plume_intensity(body, getattr(self, '_frame_real_dt', 0.0))
+        if plume > 0.0:
+            draw(geo.plume_ops, plume)
+        draw(geo.ops, 1.0)
+
+        if self.debug_predictor:
+            # cyan cross = uebergebene screen-position (= der ursprung der grafik)
+            size = 3.0
+            self._draw_ortho_shape(
+                [(x - size, y), (x + size, y), (x, y - size), (x, y + size)],
+                color=(0.0, 1.0, 1.0, 1.0),
+                mode=moderngl.LINES,
+            )
 
     def _draw_ship_arrow(self, body, x, y, r, g, b, theta_override=None):
-        # in festen bildschirm-pixeln zeichnen damit schiffgröße beim zoomen konstant bleibt.
-        arrow_length = 18.0
-        arrow_half_width = 7.0
-        tail_offset = 6.0
+        """Der alte dreiecks-pfeil.
+
+        Rueckfallweg, wenn `ship_sprite_enabled` aus ist oder `ship_art` sich
+        nicht bauen liess -- bis auf die grafik identisch zu
+        `_draw_ship_sprite` (gleiche pixel-groesse, gleiche nasenrichtung).
+        """
+        # in bildschirm-pixeln zeichnen, damit die schiffgröße nicht mit der
+        # welt-geometrie skaliert. Die zoom-schrumpfung (siehe
+        # _ship_zoom_shrink_factor) gilt hier genauso wie fuer die grafik --
+        # sonst waere der fallback weit herausgezoomt ploetzlich der groessere
+        # von beiden.
+        zoom = max(0.05, float(getattr(self, '_ship_zoom_factor', 1.0)))
+        arrow_length = 18.0 * zoom
+        arrow_half_width = 7.0 * zoom
+        tail_offset = 6.0 * zoom
 
         theta = float(theta_override) if theta_override is not None else float(getattr(body, 'theta', 0.0))
 

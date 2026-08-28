@@ -404,6 +404,20 @@ class ConfigLoader:
             ('show_apsis_markers', 'show_apsis_markers', bool),
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
             ('body_icon_radius_px', 'body_icon_radius_px', float),
+            # Wann ein koerper seinen namen zeigt: "selected" | "zoom" | "both"
+            ('body_label_mode', 'body_label_mode', str),
+            ('body_label_min_radius_px', 'body_label_min_radius_px', float),
+            # Schiffs-grafik (ship_art.py)
+            ('ship_sprite_enabled', 'ship_sprite_enabled', bool),
+            ('ship_length_px', 'ship_length_px', float),
+            ('ship_render_scale', 'ship_render_scale', float),
+            ('ship_accent_color', 'ship_accent_color', str),
+            ('ship_plume_idle', 'ship_plume_idle', float),
+            # Zoom-abhaengige verkleinerung des schiffs (px je meter)
+            ('ship_zoom_shrink_enabled', 'ship_zoom_shrink_enabled', bool),
+            ('ship_zoom_shrink_start_scale', 'ship_zoom_shrink_start_scale', float),
+            ('ship_zoom_shrink_end_scale', 'ship_zoom_shrink_end_scale', float),
+            ('ship_zoom_shrink_min', 'ship_zoom_shrink_min', float),
             # Auswahl-markierung (vier pfeile um den angeklickten koerper)
             ('selection_marker_enabled', 'selection_marker_enabled', bool),
             ('selection_arrow_length_px', 'selection_arrow_length_px', float),

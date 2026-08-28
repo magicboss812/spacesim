@@ -899,9 +899,14 @@ def main():
         if print_timings:
             rt = getattr(renderer, 'last_frame_timings', {}) or {}
             ps = getattr(renderer, '_last_prediction_render_stats', {}) or {}
-            rend_total = float(rt.get('frame_ms', 0.0))
+            # `frame_ms` ist die dauer von render() selbst (present() ruehrt
+            # es nicht mehr an), also ist rend_calc genau das. Was zwischen
+            # render() und present() gezeichnet wird -- spieler-HUD und
+            # dev-oberflaeche -- steht getrennt als ui_calc; frueher lief es
+            # unsichtbar unter rend_calc und hat die zahl verdoppelt.
+            rend_calc = float(rt.get('frame_ms', 0.0))
             rend_draw = float(rt.get('swap_or_present_ms', 0.0))
-            rend_calc = rend_total - rend_draw
+            ui_calc = float(rt.get('overlay_ms', 0.0))
             pred_calc = float(getattr(predictor, 'last_compute_ms', 0.0))
             pred_draw = float(ps.get('prepare_ms', 0.0)) + float(ps.get('draw_ms', 0.0))
 
@@ -923,7 +928,8 @@ def main():
                 timing_hz_swaps = swaps_now
             print(
                 f"TIMING: pred_calc={pred_calc:.1f}ms pred_draw={pred_draw:.1f}ms "
-                f"rend_calc={rend_calc:.1f}ms rend_draw={rend_draw:.1f}ms "
+                f"rend_calc={rend_calc:.1f}ms ui_calc={ui_calc:.1f}ms "
+                f"rend_draw={rend_draw:.1f}ms "
                 f"frame={frame_ms:.1f}ms "
                 f"pred_hz={timing_pred_hz:.0f} pipe={int(getattr(predictor, '_pipeline_depth_used', 1))}",
                 flush=True,
