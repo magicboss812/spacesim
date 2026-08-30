@@ -159,6 +159,10 @@ world.update_planets(0.0)
 
 renderer = Renderer(W, H, enable_fxaa=False, ctx=gl)
 config.apply_to_renderer(renderer)
+# Aus demselben grund wie in ship_scale_test: die messungen unten zaehlen
+# helle pixel gegen einen dunklen grund, und die hintergrund-ebene faerbt
+# JEDEN pixel. Sie gehoert nicht zu dem, was hier geprueft wird.
+renderer.background.enabled = False
 camera = Camera(None, W, H)
 config.apply_to_camera(camera)
 

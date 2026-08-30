@@ -63,6 +63,12 @@ class Camera:
         # Zoom-Grenzen
         self.min_scale = 1e-30
         self.max_scale = 1e+10
+        #: Zusaetzliche, PHYSIKALISCHE obergrenze des hineinzoomens: der
+        #: schirm zeigt nie weniger als so viele meter in der breite. `scale`
+        #: ist px je meter und haengt an der fensterbreite, eine feste
+        #: `max_scale` waere also bei jeder aufloesung eine andere strecke.
+        #: 0 oder None schaltet die grenze ab.
+        self.min_visible_span_m = 12.0
 
         # Zoomschritt pro Mausrad-Raste (aus config.json ueberschreibbar)
         self.zoom_factor = 1.5
@@ -190,6 +196,20 @@ class Camera:
         self._focus_offset.clear()
         self._focus_active = False
 
+    def _scale_ceiling(self):
+        """Die tatsaechliche zoom-obergrenze (px je meter).
+
+        `max_scale` ist die harte, konfigurierte decke; `min_visible_span_m`
+        legt zusaetzlich fest, wie wenig welt der schirm hoechstens zeigen
+        darf. Beides zusammen, damit ein groesseres fenster nicht automatisch
+        weiter hineinzoomen laesst.
+        """
+        ceiling = float(self.max_scale)
+        span = getattr(self, 'min_visible_span_m', 0.0) or 0.0
+        if span > 0.0 and self.width > 0:
+            ceiling = min(ceiling, float(self.width) / float(span))
+        return max(ceiling, float(self.min_scale))
+
     def _effective_target_position(self):
         """Weltposition, auf die die kamera gerade zuläuft."""
         if self.target is not None:
@@ -246,7 +266,8 @@ class Camera:
             return
 
         self.target_scale = max(self.min_scale,
-                                min(self.max_scale, self.target_scale * factor))
+                                min(self._scale_ceiling(),
+                                    self.target_scale * factor))
 
     # ------------------------------------------------------------------
     # Ziehen
@@ -344,7 +365,8 @@ class Camera:
         return 1.0 - math.exp(-rate * dt)
 
     def _ease_scale(self, dt):
-        target = max(self.min_scale, min(self.max_scale, self.target_scale))
+        target = max(self.min_scale,
+                     min(self._scale_ceiling(), self.target_scale))
         self.target_scale = target
         if self.scale <= 0.0:
             self.scale = target
@@ -362,7 +384,8 @@ class Camera:
         # Auf dem letzten promille einrasten, sonst läuft es ewig nach.
         if abs(log_target - log_now) < 1e-4:
             new_scale = target
-        self.scale = max(self.min_scale, min(self.max_scale, new_scale))
+        self.scale = max(self.min_scale,
+                         min(self._scale_ceiling(), new_scale))
 
     def _ease_position(self, dt):
         # Waehrend eines anflugs (`focus_on` / `recentre`) laeuft der versatz
@@ -495,7 +518,8 @@ class Camera:
 
     def snap_to_targets(self):
         """Übernimmt zoom/position sofort (kein nachlauf). Für initialisierung."""
-        self.scale = max(self.min_scale, min(self.max_scale, self.target_scale))
+        self.scale = max(self.min_scale,
+                         min(self._scale_ceiling(), self.target_scale))
         self._focus_offset.clear()
         self.position = self._effective_target_position().copy()
         self._pan_velocity.clear()

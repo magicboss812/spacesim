@@ -717,9 +717,9 @@ print("\n10. der name haengt an der AUSWAHL, nicht an der zoomstufe")
 # Weit genug heraus, dass Erde nur noch als positions-icon gezeichnet wird
 # -- genau der fall, in dem die alte regel (label ab ~5 px radius) schwieg.
 look_at(ERDE, 2.0)
-check(ERDE.radius * camera.scale < renderer.body_icon_radius_px,
+check(ERDE.radius * camera.scale < renderer.body_icon_min_radius_px,
       "die probe steht wirklich in der icon-groesse",
-      f"{ERDE.radius * camera.scale:.2f} px < {renderer.body_icon_radius_px:.1f} px")
+      f"{ERDE.radius * camera.scale:.2f} px < {renderer.body_icon_min_radius_px:.1f} px")
 
 # Die pfeile bleiben fuer diese sektion aus: so ist der unterschied zwischen
 # den frames NUR die schrift.
@@ -746,7 +746,7 @@ check(label_diff.any(),
       "ausgewaehlt ist", f"{int(label_diff.sum())} pixel")
 if label_diff.any():
     lys, lxs = np.nonzero(label_diff)
-    check(lys.max() < H * 0.5 - renderer.body_icon_radius_px,
+    check(lys.max() < H * 0.5 - renderer.body_icon_min_radius_px,
           "und der text steht UEBER dem icon, nicht darauf",
           f"unterster pixel y={int(lys.max())}, icon-mitte y={H * 0.5:.0f}")
 

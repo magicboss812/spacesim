@@ -8,6 +8,7 @@ from pygame.locals import *
 import moderngl
 import math
 import os
+import struct
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -15,9 +16,12 @@ import time
 import numpy as np
 
 from reference_frames import IdentityReferenceFrame, apparent_orbital_directions
+import background
+import body_icon
 import body_style
 import orbit_lines
 import ship_art
+from background import BackgroundLayer
 
 # Numba-fassungen der reinen zahlenschleifen im linien-zeichenweg
 # (min-step-verdichtung und RDP-vereinfachung). Wort-fuer-wort dieselbe
@@ -417,6 +421,13 @@ class Renderer:
         self._quad_vbo = None
         self._line_program = None
         self._line_vao = None
+        self._background_program = None
+        self._background_vao = None
+        self._star_program = None
+        self._star_vao = None
+        self._star_vbo = None
+        self._star_corner_vbo = None
+        self._star_vbo_count = 0
         self._ortho_program = None
         self._ortho_vao = None
         # Zuletzt an die GL geschriebene uniform-/zustandswerte, siehe
@@ -427,6 +438,8 @@ class Renderer:
         self._ortho_color = None
         self._texquad_viewport = None
         self._texquad_color = None
+        self._background_viewport = None
+        self._star_viewport = None
         self._gl_line_width = None
         self._body_program = None
         self._body_vao = None
@@ -439,6 +452,24 @@ class Renderer:
         self._body_surface_program = None
         self._body_line_program = None
         self._body_style_gpu = {}
+        # Die positions-marke: EIN geteiltes quad fuer alle koerper, das
+        # zellmuster steckt in vier uint32 als uniform. Deshalb kein puffer
+        # je koerper und nichts, was pro frame belegt wuerde.
+        self._body_icon_program = None
+        self._body_icon_vao = None
+        self._body_icon_cache = {}
+        self._icon_viewport = None
+        self._icon_tier_alpha = None
+        self._icon_grid = None
+        self._icon_edge = None
+        self._icon_gap = None
+        self._icon_rim = None
+        self._icon_rim_dark = None
+        self._icon_shade = None
+        self._icon_halo = None
+        self._icon_extent = None
+        self._icon_radius = None
+        self._icon_unit = None
         # Gebaut wird NEBENLAEUFIG. Der bau ist reine rechnung (numpy, keine
         # GL-aufrufe), nur das hochladen muss im hauptthread passieren --
         # gemessen der billige teil. Synchron gebaut kostete der erste frame
@@ -573,6 +604,12 @@ class Renderer:
         self.show_debug_hud = False
         self.show_apsis_markers = True
         self.apsis_marker_radius_px = 5.0
+        # Die marker blenden aus, wenn die bahn AM SCHIRM klein wird (nicht
+        # nach zoom-schwelle): unter `fade_min_px` apsis-radius unsichtbar,
+        # ab `fade_full_px` voll -- so ueberlagern sie bei weit-sicht nicht
+        # die schiffs- und planeten-marken.
+        self.apsis_marker_fade_min_px = 12.0
+        self.apsis_marker_fade_full_px = 46.0
         self._prediction_line_cache_key_value = None
         self._prediction_line_cache_points = None
         self._prediction_line_cache_stats = {}
@@ -588,7 +625,68 @@ class Renderer:
         # bis zu dieser größe und das icon übernimmt nahtlos bei identischer größe
         # (kein leerer frame, keine doppelzeichnung). Beim weiteren herauszoomen
         # bleibt das icon konstant groß (skaliert nicht mehr mit der zoom-stufe).
-        self.body_icon_radius_px = 4.0
+        # 8.0 statt der frueheren 4.0: die marke traegt ein zellmuster, und
+        # bei 4 px waere eine zelle rund 1.1 px breit -- das ist kein muster
+        # mehr, sondern Matsch. Bei 8 px sind es 3.2 px je zelle.
+        # Die MINDESTgroesse -- zugleich die schwelle, unter der ein koerper
+        # komplett gegen die marke getauscht wird (siehe body_icon_max_radius_px
+        # und body_icon_size_influence fuer die obere seite der skalierung).
+        self.body_icon_min_radius_px = 8.0
+
+        # --- die positions-marke (body_icon.py) ---------------------------
+        # `"pixel"` = das gesaete zellmuster, `"disc"` = die alte flache
+        # scheibe. Die variante waehlt zwischen den beiden entwuerfen.
+        self.body_icon_style = "pixel"
+        self.body_icon_variant = body_icon.DEFAULT_VARIANT
+        # Globaler seed-versatz: derselbe koerper bekommt bei jedem wert eine
+        # eigene marke, ohne `style_seed` in solar_system.json anzufassen --
+        # der schnelle weg, eine ganze neue serie durchzuprobieren.
+        self.body_icon_seed_offset = 0
+        # Der detailgrad. Groesser = mehr zellen, NICHT groessere marke.
+        self.body_icon_grid = body_icon.DEFAULT_GRID
+        # Bis hierher wird die marke ueber den echten koerper geblendet.
+        # Ohne dieses band poppt der tausch: eine pixelmarke sieht nun einmal
+        # anders aus als eine schattierte scheibe mit limbus, auch bei genau
+        # gleichem radius.
+        # Die HOECHSTgroesse, bis zu der die marke nach dem PHYSISCHEN
+        # koerper-radius wachsen darf (siehe body_icon_size_influence).
+        self.body_icon_max_radius_px = 48.0
+        # Wie stark der physische koerper-radius die marken-groesse skaliert.
+        # 0 = jede marke bleibt bei body_icon_min_radius_px (heutiges
+        # verhalten), 1 = die marke folgt voll dem log-skalierten radius,
+        # geklemmt auf [min, max]. Dazwischen linear gemischt.
+        self.body_icon_size_influence = 0.0
+        # Spanne der PHYSISCHEN koerper-radien im geladenen system (m), fuer
+        # die log-skalierung -- `_update_icon_radius_range` setzt sie einmal
+        # je frame aus der echten koerperliste. Der platzhalter hier greift
+        # nur, solange noch kein frame gezeichnet wurde (z.b. in tests, die
+        # `_body_icon_draw_radius_px` direkt aufrufen).
+        self._icon_radius_range_m = (1.0, 1.0)
+        # Das ueberblend-band endet bei body_icon_min_radius_px * diesem
+        # FAKTOR (nicht bei einem absoluten pixelwert): eine absolute grenze
+        # verlor zweimal den anschluss, als der radius von hand verstellt
+        # wurde (min=32 mit dem alten fade=13 stand verkehrt herum; min=16
+        # brauchte manuell nachgerechnete 25.6). Ein faktor > 1 kann das nicht
+        # mehr, weil er sich am jeweils aktuellen minimum bemisst.
+        self.body_icon_fade_factor = 1.6
+        self.body_icon_halo_alpha = 0.30
+        # Breite der umriss-glaettung in pixeln. 0 = harte kante (und damit
+        # pixelweise bewegung), 1 = ein pixel deckungsrampe.
+        self.body_icon_edge_px = 1.0
+        # Anteil einer zelle, der als SPALT frei bleibt. Er macht aus einer
+        # flaeche gleichfarbiger nachbarn wieder ein sichtbares raster --
+        # dieselbe rolle wie `1 - 0.18*pixel_round` beim hintergrund-gitter.
+        self.body_icon_cell_gap = 0.0
+        # Streuung der Helligkeit je Zelle. Drei Stufen allein geben zu wenig
+        # Tiefe -- gleich eingestufte Nachbarn verschmelzen sonst zu einer
+        # Flaeche. Der Wert haengt nur an (Zelle, Seed) und flimmert deshalb
+        # nicht, wenn sich die Marke bewegt.
+        self.body_icon_shade_jitter = 0.30
+        # Der UMRISS jeder Zelle: welcher Anteil ihrer Breite nachdunkelt und
+        # wie stark. Das ist der "gemalte" Rand, der aus der Marke ein Raster
+        # aus einzelnen Feldern macht -- in beiden Achsen gleich.
+        self.body_icon_cell_rim = 1.0
+        self.body_icon_cell_rim_dark = 0.42
 
         # --- wann ein koerper seinen namen zeigt --------------------------
         # `"selected"` (voreinstellung): nur der angewaehlte koerper wird
@@ -741,6 +839,13 @@ class Renderer:
         self._reference_traj_last_sample_time = None
         self._reference_traj_points = {}
 
+        # Hintergrund-ebene (background.py): sternenfeld + dreiecksgitter.
+        # Reiner zustand, kein GL -- die GL-seite haengt an
+        # _init_background_pipeline / _draw_background. Alle schalter darin
+        # sind zugleich die schluessel des `background`-abschnitts der
+        # config und die regler des ImGui-panels.
+        self.background = BackgroundLayer()
+
         # Bahnlinien der koerper (orbit_lines.py). Die deckkraft kommt aus
         # der dichtesten annaeherung der praediktor-linie an die ZUKUENFTIGE
         # position des koerpers, gemessen in vielfachen seiner
@@ -762,7 +867,18 @@ class Renderer:
         self.orbit_line_knot_angle = 0.05
         self.orbit_line_end_caps = True
         self.orbit_line_end_cap_px = 4.5
+        # Faint volllinie: EIN ganzer umlauf des koerpers, hinter der hellen
+        # enthuellten spur, mit regelbarer (niedriger) deckkraft. Eigene,
+        # groebere knoten-tabelle -- das fenster ist eine ganze periode.
+        self.orbit_line_full_orbit_enabled = True
+        self.orbit_line_full_alpha_mult = 0.30
+        self.orbit_line_full_knot_angle = 0.12
+        self.orbit_line_full_samples = 256
+        self.orbit_line_full_max_span_s = 7.5e7
         self._orbit_line_set = None
+        # Knotentabellen der faint volllinien, eine je (rahmen, fenster),
+        # ueber die frames gehalten. Siehe _draw_orbit_lines.
+        self._full_orbit_tables = {}
         self._shader_dir = os.path.join(os.path.dirname(__file__), 'shaders')
 
         self._label_texture_cache = {}
@@ -1117,6 +1233,7 @@ class Renderer:
         self._init_ortho_pipeline()
         self._init_body_pipeline()
         self._init_texquad_pipeline()
+        self._init_background_pipeline()
 
     def _load_shader_source(self, filename):
         path = os.path.join(self._shader_dir, filename)
@@ -1213,6 +1330,35 @@ class Renderer:
             self._body_vao = None
 
         self._init_body_style_pipeline()
+        self._init_body_icon_pipeline()
+
+    def _init_body_icon_pipeline(self):
+        """Programm der positions-marke.
+
+        Teilt sich das statische einheits-quad mit der body- und der
+        FXAA-pipeline; die marke braucht keine eigene geometrie, weil das
+        zellmuster im fragment-shader aufgeloest wird.
+        """
+        program = self._compile_shader_program(
+            'body_icon.vert', 'body_icon.frag', 'body_icon')
+        if program is None:
+            self._body_icon_program = None
+            self._body_icon_vao = None
+            return
+        try:
+            self._body_icon_vao = self.ctx.vertex_array(
+                program, [(self._ensure_quad_vbo(), '2f', 'a_corner')]
+            )
+            self._body_icon_program = program
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"body_icon: {exc}"
+            print(f"Shader pipeline fallback (body_icon): {exc}")
+            try:
+                program.release()
+            except Exception:
+                pass
+            self._body_icon_program = None
+            self._body_icon_vao = None
 
     def _init_body_style_pipeline(self):
         """Programme fuer die vektor-zeichnung der koerper.
@@ -1252,6 +1398,239 @@ class Renderer:
                 pass
             self._texquad_program = None
             self._texquad_vao = None
+
+    def _init_background_pipeline(self):
+        """Hintergrund-ebene: vollbild-quad (gitter) + punkt-sprites (sterne).
+
+        Beide programme degradieren einzeln zu None; fehlt eines, zeichnet der
+        hintergrund die jeweils andere schicht weiter.
+        """
+        program = self._compile_shader_program(
+            'background.vert', 'background.frag', 'background')
+        if program is None:
+            self._background_program = None
+            self._background_vao = None
+        else:
+            try:
+                self._background_vao = self.ctx.vertex_array(
+                    program, [(self._ensure_quad_vbo(), '2f', 'a_pos')]
+                )
+                self._background_program = program
+            except Exception as exc:
+                self.debug_info['shader_error'] = f"background: {exc}"
+                print(f"Shader pipeline fallback (background): {exc}")
+                try:
+                    program.release()
+                except Exception:
+                    pass
+                self._background_program = None
+                self._background_vao = None
+
+        star = self._compile_shader_program('star.vert', 'star.frag', 'star')
+        if star is None:
+            self._star_program = None
+            self._star_vao = None
+            return
+        self._star_program = star
+        self._star_vao = None      # entsteht beim ersten VBO-schreiben
+
+    def _ensure_star_buffer(self):
+        """Laedt die sterntabelle in den instanz-VBO, wenn die dichte wechselt.
+
+        Der puffer ist STATISCH: parallaxe und funkelphase stehen je stern
+        darin, drift und zeit sind uniforms. Es wird also nur bei einer
+        dichteaenderung geschrieben, nicht je bild.
+
+        Gezeichnet wird als INSTANZIERTES quad, nicht als punkt-sprite --
+        `gl_PointCoord` liefert auf dem NVIDIA-treiber dieses rechners
+        konstant (0, 0) und liess damit die zellmaske jedes sternfragment
+        verwerfen. Begruendung in shaders/star.vert.
+        """
+        if self._star_program is None:
+            return None
+        table = self.background.star_table()
+        if table is None or table.shape[0] == 0:
+            return None
+        if not self.background.take_stars_dirty() and self._star_vao is not None:
+            return self._star_vao
+
+        data = np.ascontiguousarray(table, dtype='f4')
+        if self._star_vbo is not None:
+            try:
+                self._star_vbo.release()
+            except Exception:
+                pass
+        if self._star_vao is not None:
+            try:
+                self._star_vao.release()
+            except Exception:
+                pass
+        try:
+            if self._star_corner_vbo is None:
+                # Einheitsquadrat 0..1 in TRIANGLE_STRIP-reihenfolge, von
+                # allen instanzen geteilt.
+                corner = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                                  dtype='f4')
+                self._star_corner_vbo = self.ctx.buffer(corner.tobytes())
+            self._star_vbo = self.ctx.buffer(data.tobytes())
+            self._star_vao = self.ctx.vertex_array(
+                self._star_program,
+                [
+                    (self._star_corner_vbo, '2f', 'a_corner'),
+                    # '/i' = je INSTANZ ein satz, nicht je vertex.
+                    (self._star_vbo, '2f 4f 1f/i',
+                     'a_pos', 'a_param', 'a_phase'),
+                ],
+            )
+            self._star_vbo_count = int(data.shape[0])
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"star buffer: {exc}"
+            print(f"Star buffer fallback: {exc}")
+            self._star_vao = None
+            self._star_vbo = None
+            self._star_vbo_count = 0
+        return self._star_vao
+
+    def _draw_background(self, camera, real_dt):
+        """Zeichnet sternenfeld und gitter -- die unterste schicht.
+
+        Laeuft VOR allem anderen in denselben framebuffer und ersetzt damit
+        praktisch den clear (der bleibt trotzdem stehen, falls die ebene
+        abgeschaltet oder ein programm ausgefallen ist).
+
+        Die ebene liegt bewusst INNERHALB des FXAA-passes: sie ist die
+        unterste schicht, alles andere spaeter herauszuziehen wuerde die
+        reihenfolge zerreissen. Bei deckkraeften um 3 % ist der kantenfilter
+        hier ohnehin nahe an einer identitaet -- anders als bei text, siehe
+        .claude/rules/rendering.md.
+        """
+        bg = self.background
+        if not bg.enabled:
+            return
+
+        # Das STERNENFELD haengt an der echten eigenbewegung des verfolgten
+        # koerpers (absolut, damit ein rahmenwechsel es nicht ruckt); steht die
+        # kamera frei, uebernimmt der schwenk.
+        #
+        # ACHTUNG: hier stand einmal `focus.velocity`. Das ist fuer
+        # himmelskoerper IMMER (0, 0) -- solar_system.json setzt es so, und
+        # world.update_planets schreibt nur die kepler-POSITION. Das feld stand
+        # damit bei jedem koerper ausser dem Schiff still. Uebergeben wird
+        # deshalb die position, abgeleitet wird in background._focus_speed.
+        focus = getattr(camera, 'target', None)
+        focus_world_xy = None
+        focus_frame_xy = None
+        if focus is not None:
+            position = getattr(focus, 'position', None)
+            if position is not None:
+                focus_world_xy = (float(position.x), float(position.y))
+                focus_frame_xy = self._frame_transform_xy(*focus_world_xy)
+
+        # Das GITTER ist ein festes lattice im aktiven plot-frame. Sein anker
+        # ist damit schlicht die kameraposition darin -- der bezugskoerper
+        # steht darauf still, mond und schiff wandern darueber, ein schwenk
+        # schiebt es genau so weit wie die welt. Der bezugskoerper muss hier
+        # nicht gesondert hinein: er STECKT bereits in der frame-transform.
+        cam_xy = self._frame_camera_xy(camera)
+        grid_target = bg.grid_target_xy(cam_xy, focus_frame_xy)
+        # Wogegen der anker gemessen ist. Wechselt der schluessel (R / 1 / 2,
+        # oder das blickziel bei anchor="focus"), ist der sprung im ziel kein
+        # flug -- die ebene uebernimmt ihn dann, statt ihn abzufahren.
+        frame = self._active_frame()
+        grid_key = (frame.__class__.__name__,
+                    str(getattr(frame, 'label', '')),
+                    bg.grid_anchor,
+                    getattr(focus, 'name', None)
+                    if bg.grid_anchor == "focus" else None)
+
+        bg.update(
+            real_dt,
+            camera.scale,
+            getattr(camera, 'target_scale', camera.scale),
+            (float(camera.position.x), float(camera.position.y)),
+            focus_world_xy=focus_world_xy,
+            # Nur der KOERPER, nicht der rahmen: die sterne rechnen in
+            # absoluten weltkoordinaten, ein rahmenwechsel aendert daran
+            # nichts und darf die ableitung nicht neu ansetzen.
+            focus_key=(id(focus), getattr(focus, 'name', None)),
+            sim_time=self._frame_time_s,
+            grid_target=grid_target,
+            grid_key=grid_key,
+            viewport=(self.width, self.height),
+        )
+
+        anchor_xy = bg.anchor_xy()
+
+        viewport = (float(self.width), float(self.height))
+        accent = bg.accent_rgb()
+        # Virtuelle pixelgroesse in DESIGN-einheiten -- wie jede andere
+        # UI-groesse, sonst zerfaellt das raster bei anderer aufloesung.
+        pixel = max(1.0, self.ui_px(bg.pixel_size))
+        pixel_round = min(1.0, max(0.0, float(bg.pixel_round)))
+
+        # ------------------------------------------------- gitter/grundflaeche
+        if self._background_program is not None and self._background_vao is not None:
+            levels = bg.levels(camera.scale, anchor_xy[0], anchor_xy[1]) \
+                if bg.grid_enabled else []
+            count = min(len(levels), background.MAX_LEVELS)
+
+            program = self._background_program
+            self._set_uniform(program, 'u_viewport', '_background_viewport',
+                              viewport)
+            self._write_uniform(program, 'u_accent', accent)
+            self._write_uniform(program, 'u_grid_opacity', float(bg.grid_opacity))
+            self._write_uniform(program, 'u_pixel', pixel)
+            self._write_uniform(program, 'u_pixel_round', pixel_round)
+            self._write_uniform(program, 'u_level_count', int(count))
+            if count:
+                # Die uniform-arrays werden IMMER voll geschrieben: ein rest
+                # aus dem letzten bild wuerde sonst mitgezeichnet, sobald
+                # u_level_count wieder steigt.
+                pad = background.MAX_LEVELS - count
+                self._write_uniform(program, 'u_level_sp',
+                                    [lv.spacing_px for lv in levels[:count]] + [0.0] * pad)
+                self._write_uniform(program, 'u_level_alpha',
+                                    [lv.alpha for lv in levels[:count]] + [0.0] * pad)
+                self._write_uniform(program, 'u_level_node',
+                                    [lv.node_alpha for lv in levels[:count]] + [0.0] * pad)
+                # ACHTUNG: `u_level_phase` ist ein vec2-ARRAY. moderngl will
+                # dafuer eine liste von PAAREN -- eine flache liste wirft
+                # "Value after * must be an iterable, not float". Das ist
+                # genau der fehler, der hier einmal drin war: der schreib-
+                # versuch schlug still fehl, die phasen blieben null, und das
+                # gitter klebte am bildschirm statt an der welt.
+                phases = [(lv.phase_a, lv.phase_b) for lv in levels[:count]]
+                phases.extend([(0.0, 0.0)] * pad)
+                self._write_uniform(program, 'u_level_phase', phases)
+
+            # Das quad ueberschreibt jeden pixel -- ohne blending, sonst
+            # mischt es sich mit der clear-farbe.
+            self.ctx.disable(moderngl.BLEND)
+            self._background_vao.render(moderngl.TRIANGLE_STRIP)
+            self.ctx.enable(moderngl.BLEND)
+
+        # --------------------------------------------------------- sternenfeld
+        if not bg.stars_enabled:
+            return
+        vao = self._ensure_star_buffer()
+        if vao is None or self._star_vbo_count <= 0:
+            return
+
+        program = self._star_program
+        self._set_uniform(program, 'u_viewport', '_star_viewport', viewport)
+        self._write_uniform(program, 'u_pan',
+                            (float(bg.star_pan_px[0]), float(bg.star_pan_px[1])))
+        self._write_uniform(program, 'u_time', float(bg.time_s))
+        self._write_uniform(program, 'u_opacity', float(bg.star_opacity))
+        self._write_uniform(program, 'u_star_zoom', float(bg.star_zoom))
+        self._write_uniform(program, 'u_zoom_amount', float(bg.zoom_amount()))
+        self._write_uniform(program, 'u_pixel', pixel)
+        self._write_uniform(program, 'u_pixel_round', pixel_round)
+
+        # Ein quad je stern, alle vier ecken aus demselben puffer. Kein
+        # PROGRAM_POINT_SIZE, kein gl_PointCoord -- siehe star.vert.
+        vao.render(moderngl.TRIANGLE_STRIP, vertices=4,
+                   instances=self._star_vbo_count)
 
     def _ensure_poly_vbo(self):
         """Geteilter dynamischer vertex-puffer für polylines und ortho-geometrie."""
@@ -1392,6 +1771,42 @@ class Renderer:
             return
         setattr(self, cache_attr, value)
 
+    def _write_uniform(self, program, name, value):
+        """Uniform ohne cache schreiben.
+
+        Gegenstueck zu `_set_uniform`: fuer werte, die sich ohnehin JEDES bild
+        aendern (gitterphasen, sterndrift, zeit) waere der vergleich teurer
+        als der schreibvorgang.
+
+        Ein fehlschlag wird NICHT verschluckt, sondern einmal je uniform in
+        `debug_info` vermerkt und einmal gedruckt. Ein still fehlschlagender
+        schreibversuch sieht sonst aus wie ein shader-fehler: der uniform
+        behaelt seinen wert (in der GL: null), und man sucht die ursache im
+        GLSL statt im aufrufer. Genau so ging einmal `u_level_phase` als
+        flache liste statt als liste von paaren durch.
+        """
+        try:
+            program[name].value = value
+        except Exception as exc:
+            key = f"uniform:{name}"
+            if key not in self.debug_info:
+                self.debug_info[key] = f"{type(exc).__name__}: {exc}"
+                print(f"Uniform write failed ({name}): {exc}")
+
+    def _write_uniform_array(self, program, name, values):
+        """Ein uint-array-uniform in EINEM aufruf schreiben.
+
+        Gegenstueck zu `_write_uniform` fuer arrays: `.value` nimmt bei einem
+        array keine liste, `.write()` will die rohbytes.
+        """
+        try:
+            program[name].write(struct.pack(f'{len(values)}I', *values))
+        except Exception as exc:
+            key = f"uniform:{name}"
+            if key not in self.debug_info:
+                self.debug_info[key] = f"{type(exc).__name__}: {exc}"
+                print(f"Uniform array write failed ({name}): {exc}")
+
     def _set_line_width(self, width):
         width = float(width)
         if self._gl_line_width == width:
@@ -1407,6 +1822,22 @@ class Renderer:
         self._ortho_color = None
         self._texquad_viewport = None
         self._texquad_color = None
+        self._background_viewport = None
+        self._star_viewport = None
+        # Die marke haengt mit `u_viewport` an der fenstergroesse -- genau der
+        # wert, ueber den ein cache sonst stale wuerde.
+        self._icon_viewport = None
+        self._icon_tier_alpha = None
+        self._icon_grid = None
+        self._icon_edge = None
+        self._icon_gap = None
+        self._icon_rim = None
+        self._icon_rim_dark = None
+        self._icon_shade = None
+        self._icon_halo = None
+        self._icon_extent = None
+        self._icon_radius = None
+        self._icon_unit = None
         self._gl_line_width = None
 
     def _clip_segment_to_rect(self, x0, y0, x1, y1, left, top, right, bottom):
@@ -1740,21 +2171,192 @@ class Renderer:
         except Exception:
             return False
 
-    def _draw_body_icon(self, x, y, radius, r, g, b):
-        """Positions-icon eines körpers: flache scheibe konstanter bildschirmgröße.
+    #: Wie weit das marken-quad ueber den radius hinausreicht (fuer den halo).
+    ICON_QUAD_EXTENT = 2.6
 
-        `radius` ist sowohl die swap-schwelle als auch der icon-radius
-        (`body_icon_radius_px`). Wird gezeichnet, sobald der echte bildschirm-
-        radius des körpers unter die schwelle fällt.
+    def _body_icon_entry(self, body):
+        """Gepacktes zellfeld und farbstufen dieser marke, gecacht.
 
-        WICHTIG: das icon läuft über denselben GLSL-körper-shader wie der
-        volle körper. Der vertex-shader (body.vert) erwartet top-down-screen-
-        koordinaten und spiegelt y intern (`ndc.y = 1 - 2*y/h`) — dieselbe
-        konvention wie die körper-position. Mit glow/atmosphäre = 0 ergibt der
-        shader (core_radius_norm == 1.0) eine flache scheibe in körperfarbe --
-        positionsgenau und am übergang nahtlos zum körper.
+        Der schluessel ist wie bei `_body_style_key` bewusst NICHT `id(body)`,
+        sondern das, was das muster bestimmt: ein neu geladener koerper mit
+        denselben angaben bekommt dieselbe marke. Hoechstens ein eintrag je
+        koerper und variante, gebaut im hauptthread -- der bau sind ein paar
+        dutzend zellen, kein grund fuer einen worker wie bei body_style.
         """
-        self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0)
+        seed = body_icon.seed_for(body, self.body_icon_seed_offset)
+        color = tuple(int(c) for c in tuple(getattr(body, 'color', (255, 255, 255)))[:3])
+        key = (seed, str(self.body_icon_variant), int(self.body_icon_grid), color)
+        entry = self._body_icon_cache.get(key)
+        if entry is None:
+            try:
+                cells = body_icon.build_icon(
+                    seed, self.body_icon_variant, self.body_icon_grid)
+                entry = (cells, body_icon.icon_palette(color))
+            except Exception as exc:
+                # Wie bei body_style: einmal scheitern heisst nie wieder
+                # versuchen. Sonst kostet ein kaputter bau jeden frame.
+                self.debug_info['body_icon_error'] = f"{type(exc).__name__}: {exc}"
+                entry = False
+            self._body_icon_cache[key] = entry
+        return entry
+
+    def _draw_body_icon(self, body, x, y, radius, r, g, b, fade=1.0):
+        """Positions-marke eines körpers, konstanter bildschirmgröße.
+
+        `radius` ist der GEZEICHNETE marken-radius -- siehe
+        `_body_icon_draw_radius_px` fuer die skalierung mit dem echten
+        koerper; `fade` blendet die marke über dem echten körper aus, siehe
+        `_body_icon_fade`.
+
+        Zwei wege. `body_icon_style = "disc"` zeichnet die alte flache scheibe
+        über denselben GLSL-körper-shader wie der volle körper: der
+        vertex-shader (body.vert) erwartet top-down-screen-koordinaten und
+        spiegelt y intern (`ndc.y = 1 - 2*y/h`) — dieselbe konvention wie die
+        körper-position. Mit glow/atmosphäre = 0 ergibt der shader
+        (core_radius_norm == 1.0) eine flache scheibe in körperfarbe.
+
+        `"pixel"` (voreinstellung) zeichnet statt dessen das gesäte zellmuster
+        aus `body_icon.py` — EIN quad, das muster löst der fragment-shader aus
+        der icon-lokalen koordinate auf. Es gibt deshalb keine aneinander-
+        stossenden primitive und damit keine naht, und weil die koordinate an
+        der gleitkomma-position der marke hängt, kann das muster nicht über
+        die marke wandern.
+        """
+        if (self.body_icon_style != "pixel"
+                or self._body_icon_program is None
+                or self._body_icon_vao is None):
+            self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0)
+            return
+
+        entry = self._body_icon_entry(body)
+        if not entry:
+            self._draw_body_glsl(x, y, float(radius), (r, g, b), (r, g, b), 0.0, 0.0)
+            return
+
+        cells, palette = entry
+        prog = self._body_icon_program
+
+        # Was ueber alle koerper gleich bleibt, geht ueber den vergleichenden
+        # cache; nur position, muster, farbe und ueberblendung je koerper.
+        self._set_uniform(prog, 'u_viewport', '_icon_viewport',
+                          (float(self.width), float(self.height)))
+        self._set_uniform(prog, 'u_tier_alpha', '_icon_tier_alpha',
+                          tuple(body_icon.TIER_ALPHA[1:]))
+        self._set_uniform(prog, 'u_grid', '_icon_grid', int(cells.grid))
+        self._set_uniform(prog, 'u_edge_px', '_icon_edge',
+                          float(self.body_icon_edge_px))
+        self._set_uniform(prog, 'u_cell_gap', '_icon_gap',
+                          float(self.body_icon_cell_gap))
+        self._set_uniform(prog, 'u_cell_rim', '_icon_rim',
+                          float(self.body_icon_cell_rim))
+        self._set_uniform(prog, 'u_cell_rim_dark', '_icon_rim_dark',
+                          float(self.body_icon_cell_rim_dark))
+        self._set_uniform(prog, 'u_halo_alpha', '_icon_halo',
+                          float(self.body_icon_halo_alpha))
+        self._set_uniform(prog, 'u_extent', '_icon_extent',
+                          float(self.ICON_QUAD_EXTENT))
+        self._set_uniform(prog, 'u_radius_px', '_icon_radius', float(radius))
+        self._set_uniform(prog, 'u_unit', '_icon_unit', float(cells.unit))
+
+        self._write_uniform(prog, 'u_center_px', (float(x), float(y)))
+        # Ein uniform-ARRAY: moderngl schreibt es mit glUniform1uiv, also
+        # dicht gepackt -- deshalb .write() statt .value.
+        self._write_uniform_array(prog, 'u_cells', cells.words)
+        self._write_uniform(prog, 'u_tier_dim', palette[0])
+        self._write_uniform(prog, 'u_tier_base', palette[1])
+        self._write_uniform(prog, 'u_tier_bright', palette[2])
+        self._write_uniform(prog, 'u_fade', float(fade))
+        self._write_uniform(prog, 'u_seed', int(cells.seed) & 0xFFFFFFFF)
+        self._set_uniform(prog, 'u_shade', '_icon_shade',
+                          float(self.body_icon_shade_jitter))
+
+        self._body_icon_vao.render(moderngl.TRIANGLE_STRIP)
+
+    def _update_icon_radius_range(self, bodies):
+        """Die spanne der PHYSISCHEN koerper-radien im geladenen system.
+
+        Einmal je frame aus der echten koerperliste bestimmt (28 koerper,
+        eine schleife -- kostet nichts), NICHT aus einer festen konstante:
+        so passt sich die skalierung automatisch an, welches system gerade
+        geladen ist, statt eine zahl aus DIESEM sonnensystem im code zu
+        verstecken. Das schiff zaehlt nicht mit -- sein `radius` ist ein
+        rein technischer platzhalter (1.0 m), keine physische groesse.
+        """
+        lo = hi = None
+        for body in bodies:
+            if getattr(body, 'is_ship', False):
+                continue
+            r = float(getattr(body, 'radius', 0.0))
+            if r <= 0.0:
+                continue
+            if lo is None or r < lo:
+                lo = r
+            if hi is None or r > hi:
+                hi = r
+        if lo is None:
+            lo = hi = 1.0
+        self._icon_radius_range_m = (lo, hi)
+
+    def _body_icon_size_factor(self, body_radius_m):
+        """0..1: wo dieser koerper-radius innerhalb der GELADENEN spanne liegt.
+
+        LOG-skaliert: planeten- und mond-radien liegen ueber mehrere
+        groessenordnungen (in `solar_system.json` von Mimas' 2.0e5 m bis
+        Sonnes 7.0e8 m -- 3.5 dekaden). Linear interpoliert wuerde alles
+        ausser der Sonne auf denselben punkt nahe 0 zusammendruecken.
+        """
+        lo_m, hi_m = self._icon_radius_range_m
+        if hi_m <= lo_m:
+            return 0.0
+        r = max(lo_m, min(hi_m, float(body_radius_m)))
+        return (math.log10(r) - math.log10(lo_m)) / (math.log10(hi_m) - math.log10(lo_m))
+
+    def _body_icon_draw_radius_px(self, body_radius_m):
+        """Der GEZEICHNETE radius der marke -- ein je koerper KONSTANTER wert
+        aus seinem PHYSISCHEN radius, unabhaengig vom zoom.
+
+        > **Bewusst nicht aus dem aktuellen bildschirmradius abgeleitet --
+        > das war die erste, falsche fassung.** `true_radius_px` schrumpft mit
+        > jedem herauszoomen gegen null, und genau dort, wo ein koerper zur
+        > marke wird, liegt er fast immer weit unter `body_icon_min_radius_px`
+        > -- eine mischung `min + (true - min) * einfluss` klemmte deshalb bei
+        > JEDEM einfluss-wert exakt auf `min` zurueck, weil `true - min`
+        > negativ blieb. Der regler hatte dadurch im spiel keine sichtbare
+        > wirkung, obwohl er in einem test mit handgesetzten grossen radien
+        > (bewusst weit ueber `min`) korrekt aussah. Die groesse haengt jetzt
+        > an `body.radius` selbst -- der bleibt bei jedem zoom derselbe, ein
+        > Jupiter-aehnlicher koerper ist also IMMER sichtbar groesser als ein
+        > kleiner mond, nicht nur kurz waehrend der ueberblendung.
+
+        `body_icon_size_influence` (0..1) mischt zwischen "immer
+        `body_icon_min_radius_px`" (0 -- jede marke gleich gross) und "voll
+        nach dem log-skalierten koerper-radius, bis `body_icon_max_radius_px`"
+        (1).
+        """
+        lo = float(self.body_icon_min_radius_px)
+        hi = max(lo, float(self.body_icon_max_radius_px))
+        influence = max(0.0, min(1.0, float(self.body_icon_size_influence)))
+        if influence <= 0.0:
+            return lo
+        factor = self._body_icon_size_factor(body_radius_m)
+        return lo + (hi - lo) * factor * influence
+
+    def _body_icon_fade(self, true_radius_px):
+        """Deckkraft der marke bei diesem echten bildschirmradius.
+
+        1.0 unterhalb der schwelle, dann linear auf 0 bis
+        `body_icon_min_radius_px * body_icon_fade_factor`. Der echte koerper
+        wird in diesem band ganz normal gezeichnet und die marke darueber
+        ausgeblendet -- das ist die ueberblendung, und sie kostet den
+        koerper-zeichenweg keine zeile.
+        """
+        lo = float(self.body_icon_min_radius_px)
+        hi = lo * float(self.body_icon_fade_factor)
+        if true_radius_px < lo:
+            return 1.0
+        if hi <= lo or true_radius_px >= hi:
+            return 0.0
+        return 1.0 - (float(true_radius_px) - lo) / (hi - lo)
 
     # ------------------------------------------------------------------
     # Prozedurale vektor-optik der koerper (D2)
@@ -2162,17 +2764,19 @@ class Renderer:
         """
         return float(self.height) - float(y_topdown)
 
-    def _blit_text_topdown(self, text, x_left, y_top, font):
+    def _blit_text_topdown(self, text, x_left, y_top, font, color=(1.0, 1.0, 1.0, 1.0)):
         """Text an TOP-DOWN koordinaten zeichnen (x = links, y = oberkante).
 
         Nimmt dem aufrufer die ortho-umrechnung ab: _draw_texture_ortho
-        erwartet die UNTERE linke ecke in ortho-Y.
+        erwartet die UNTERE linke ecke in ortho-Y. `color` toent multiplikativ
+        (texquad.frag) -- der alphakanal blendet den text aus.
         """
         entry = self._get_label_texture(text, font)
         text_h = float(entry[2]) if entry else float(font.get_height())
-        self._blit_cached_text(text, x_left, self._ortho_y(y_top) - text_h, font)
+        self._blit_cached_text(text, x_left, self._ortho_y(y_top) - text_h, font,
+                               color=color)
 
-    def _blit_cached_text(self, text, x, y, font):
+    def _blit_cached_text(self, text, x, y, font, color=(1.0, 1.0, 1.0, 1.0)):
         entry = self._get_label_texture(text, font)
         if not entry:
             # fallback: one-shot-textur ohne cache erzeugen, zeichnen, freigeben
@@ -2182,13 +2786,13 @@ class Renderer:
                 w, h = surface.get_size()
                 texture = self.ctx.texture((w, h), 4, texture_data)
                 texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-                self._draw_texture_ortho(texture, x, y, w, h)
+                self._draw_texture_ortho(texture, x, y, w, h, color=color)
                 texture.release()
             except Exception:
                 pass
             return
         texture, w, h = entry
-        self._draw_texture_ortho(texture, x, y, w, h)
+        self._draw_texture_ortho(texture, x, y, w, h, color=color)
 
     def _record_reference_trajectories(self, bodies):
         if not self.reference_trajectories_enabled:
@@ -2335,6 +2939,9 @@ class Renderer:
         oset.alpha_floor = float(self.orbit_line_alpha_floor)
         oset.alpha_floor_focus = float(self.orbit_line_alpha_floor_focus)
         oset.fade_rate = float(self.orbit_line_fade_rate)
+        oset.full_orbit_enabled = bool(self.orbit_line_full_orbit_enabled)
+        oset.full_samples = max(16, int(self.orbit_line_full_samples))
+        oset.full_max_span_s = float(self.orbit_line_full_max_span_s)
         return oset
 
     def _draw_frame_polyline(self, screen_x, screen_y, color, width,
@@ -2391,6 +2998,29 @@ class Renderer:
         diamond = [(sx, sy - r), (sx + r, sy), (sx, sy + r), (sx - r, sy),
                    (sx, sy - r)]
         self._draw_polyline(diamond, color=color, width=1.0)
+
+    def _draw_body_disc_outline(self, sx, sy, r_px, color):
+        """Kreis-umriss mit dem ECHTEN radius des koerpers auf dem linienende.
+
+        Das ist der messwert der bahnlinie: liegt dieser kreis ueber der
+        weissen schiffs-endkappe, steckt das schiff zur endzeit der vorhersage
+        im koerper. Anders als die alte raute ist er KEIN fester pixelwert --
+        er ist `body.radius * camera.scale` und schrumpft mit heraus-zoomen
+        auf nichts, genau wie die koerperscheibe selbst.
+        """
+        if not (math.isfinite(sx) and math.isfinite(sy) and math.isfinite(r_px)):
+            return
+        if r_px < 0.75:
+            return
+        if (sx < -r_px or sx > self.width + r_px
+                or sy < -r_px or sy > self.height + r_px):
+            return
+        seg = max(12, min(64, int(r_px)))
+        ang = np.linspace(0.0, 2.0 * math.pi, seg + 1)
+        ring = np.empty((seg + 1, 2), dtype=np.float64)
+        ring[:, 0] = float(sx) + float(r_px) * np.cos(ang)
+        ring[:, 1] = float(sy) + float(r_px) * np.sin(ang)
+        self._draw_polyline(ring, color=color, width=1.0)
 
     def _draw_orbit_lines(self, bodies, camera, predictor=None, real_dt=0.0):
         """Wo jeder koerper waehrend des VORHERSAGE-FENSTERS entlanglaeuft.
@@ -2454,6 +3084,43 @@ class Renderer:
         if not table.valid:
             return
 
+        # Knotentabellen fuer die faint volllinien: EINE JE KOERPER, ueber
+        # SEINE periode. Kein gemeinsames gitter wie bei der spur-tabelle --
+        # die perioden liegen um groessenordnungen auseinander (Mond 27 d,
+        # ein planet jahre), ein ueber die laengste gespanntes gitter liesse
+        # der kurzen periode zu wenige knoten und die ursprungs-interpolation
+        # explodiert. Gecacht ueber die frames auf (rahmen, fenster), gebaut
+        # nur wenn `_recompute` eine neue `full_track_t` geliefert hat.
+        full_enabled = bool(self.orbit_line_full_orbit_enabled)
+        full_alpha_mult = float(self.orbit_line_full_alpha_mult)
+        full_knot_angle = float(self.orbit_line_full_knot_angle)
+        table_cache = self._full_orbit_tables
+        # Bei jedem frame-wechsel (R, 1, 2) den ganzen cache verwerfen -- so
+        # kann eine wiederverwendete id() des frame-objekts keiner alten
+        # tabelle einen falschen treffer geben.
+        if frame is not getattr(self, '_full_orbit_tables_frame', None):
+            table_cache.clear()
+            self._full_orbit_tables_frame = frame
+        frame_key = id(frame)
+        live_keys = set()
+
+        def _full_table_for(entry):
+            ft_t = entry.full_track_t
+            # Schluessel ueber die FENSTERGRENZEN, nicht id(ft_t): eine
+            # freigegebene array-id kann wiederverwendet werden und gaebe der
+            # alten tabelle einen falschen treffer. (rahmen, fenster) bestimmt
+            # die affine tabelle vollstaendig -- eine kollision ist harmlos.
+            key = (frame_key, round(float(ft_t[0]), 3), round(float(ft_t[-1]), 3))
+            live_keys.add(key)
+            hit = table_cache.get(key)
+            if hit is not None:
+                return hit if hit.valid else None
+            tab = orbit_lines.FrameAffineTable(
+                frame, float(ft_t[0]), float(ft_t[-1]),
+                knot_angle=full_knot_angle)
+            table_cache[key] = tab
+            return tab if tab.valid else None
+
         camera_frame_xy = self._frame_camera_xy(camera)
         scale = abs(float(camera.scale))
         margin = float(self.prediction_visibility_margin_px)
@@ -2476,6 +3143,33 @@ class Renderer:
                 cb = min(1.0, max(0.0, float(base[2]) / 255.0 * 0.85))
             except Exception:
                 cr = cg = cb = 0.75
+
+            # Faint volllinie zuerst -- ein ganzer umlauf, HINTER der hellen
+            # spur, damit die enthuellte linie oben liegt. Gleiche
+            # transformations-pipeline `koerper(t) - ursprung(t)`, also im
+            # plot-frame automatisch richtig.
+            if (full_enabled and getattr(entry, 'full_track', None) is not None
+                    and entry.full_track_t is not None
+                    and entry.full_track.shape[0] >= 2):
+                fa = float(entry.alpha) * full_alpha_mult
+                full_table = _full_table_for(entry) if fa > 0.003 else None
+                if full_table is not None:
+                    ftrack = entry.full_track
+                    # ALLE stichproben projizieren -- kein stride. Der stride
+                    # oben schaetzt die zeichen-aufloesung aus `track_len`, und
+                    # das ist die WELT-bogenlaenge; ueber eine ganze periode
+                    # traegt die eltern-heliozentrik da das zehn- bis
+                    # hundertfache der plot-frame-laenge hinein. Es sind ohnehin
+                    # nur 0-3 volllinien, `table.project` ist numpy-vektorisiert.
+                    ffx, ffy = full_table.project(
+                        entry.full_track_t,
+                        np.ascontiguousarray(ftrack[:, 0]),
+                        np.ascontiguousarray(ftrack[:, 1]))
+                    fsx = half_w + (ffx - camera_frame_xy[0]) * scale
+                    fsy = half_h - (ffy - camera_frame_xy[1]) * scale
+                    self._draw_frame_polyline(
+                        fsx, fsy, (cr, cg, cb, fa),
+                        float(self.orbit_line_width), min_screen_px=min_px)
 
             # Enthuellung: die linie rollt sich VOM KOERPER AUS ab.
             total = int(entry.track.shape[0])
@@ -2510,8 +3204,10 @@ class Renderer:
             # duerfte nicht als messpunkt gelesen werden.
             if show_caps and reveal > 0.995:
                 any_full = True
-                self._draw_end_cap(float(sx[-1]), float(sy[-1]),
-                                   (cr, cg, cb, float(entry.alpha)), cap_px)
+                body_r_px = float(getattr(body, 'radius', 0.0) or 0.0) * scale
+                self._draw_body_disc_outline(
+                    float(sx[-1]), float(sy[-1]), body_r_px,
+                    (cr, cg, cb, float(entry.alpha)))
 
         # Die kappe des schiffs nur, wenn es etwas zu vergleichen gibt --
         # und ueber den weg der GEZEICHNETEN linie, damit sie auf deren ende
@@ -2527,6 +3223,12 @@ class Renderer:
                 pass
 
         self.debug_info['orbit_lines_drawn'] = drawn
+
+        # Volllinien-tabellen aufraeumen: alles, was dieses bild nicht mehr
+        # gebraucht hat (frame gewechselt, neue full_track_t nach recompute).
+        if len(table_cache) > len(live_keys):
+            for stale in [k for k in table_cache if k not in live_keys]:
+                del table_cache[stale]
 
     def _emit_render_benchmark(self, timings):
         if not self.render_benchmark_debug:
@@ -2550,6 +3252,7 @@ class Renderer:
                 f"skipped_by_stride={pred.get('skipped_by_stride', 0)} "
                 f"clipped_or_rejected={pred.get('clipped_or_rejected', 0)} "
                 f"cache_hit={pred.get('cache_hit', False)} "
+                f"background_ms={timings.get('background_ms', 0.0):.3f} "
                 f"reference_trails_ms={timings.get('reference_trails_ms', 0.0):.3f} "
                 f"orbit_lines_ms={timings.get('orbit_lines_ms', 0.0):.3f} "
                 f"orbit_lines_drawn={self.debug_info.get('orbit_lines_drawn', 0)} "
@@ -2566,6 +3269,7 @@ class Renderer:
         frame_t0 = time.perf_counter()
         timings = {
             'bodies_ms': 0.0,
+            'background_ms': 0.0,
             'reference_trails_ms': 0.0,
             'orbit_lines_ms': 0.0,
             'hud_ms': 0.0,
@@ -2623,6 +3327,7 @@ class Renderer:
             # Abgeschaltet: laufende bauten interessieren nicht mehr, und
             # liegengelassen wuerden sie das budget dauerhaft belegen.
             self._body_style_jobs.clear()
+        self._update_icon_radius_range(bodies)
         self._light_source_body = self._find_light_source(bodies)
         self._light_screen_xy = None
         if self._light_source_body is not None:
@@ -2663,6 +3368,13 @@ class Renderer:
             target_fbo = self.ctx.screen
         target_fbo.use()
         target_fbo.clear(*self._clear_color)
+
+        # Unterste schicht: sternenfeld + gitter (background.py). Ersetzt
+        # faktisch den clear darueber, der aber stehen bleibt, falls die
+        # ebene abgeschaltet ist oder ein shader ausgefallen ist.
+        background_t0 = time.perf_counter()
+        self._draw_background(camera, real_dt)
+        timings['background_ms'] = (time.perf_counter() - background_t0) * 1000.0
 
         reference_t0 = time.perf_counter()
         self._draw_reference_trajectories(bodies, camera)
@@ -3077,65 +3789,10 @@ class Renderer:
             except Exception:
                 pass
             self._draw_ship_sprite(body, x, y, r, g, b, theta_override=theta_frame)
-            # Schiffs-Label mit camera.world_to_screen zeichnen, um
-            # konsistente Welt->Bildschirm-Abbildung zu gewährleisten und
-            # FBO/Projektions-Inkonsistenzen zu vermeiden, die Label-Flackern
-            # beim Umschalten der Verfolgung verursachen können.
-            try:
-                # Die FRAME-AWARE position (x, y) verwenden, nicht
-                # camera.world_to_screen: in rotierenden plot-frames weichen
-                # beide voneinander ab und das label loest sich vom schiff.
-                lx, ly = x, y
-                # Die labels stehen ueber/unter der SILHOUETTE, nicht in einem
-                # festen pixel-abstand: der schiffs-massstab ist regelbar
-                # (renderer.ship_render_scale), ein fester abstand wuerde die
-                # beschriftung sonst mitten in den rumpf legen.
-                half_h = self._ship_half_height_px()
-                name_y = float(ly) - half_h - 19.0
-                speed_y = float(ly) + half_h + 9.0
-                entry = self._get_label_texture(body.name, self.font_small)
-                if entry:
-                    _, w, h = entry
-                    self._blit_text_topdown(
-                        body.name, float(lx) - (float(w) / 2.0), name_y,
-                        self.font_small,
-                    )
-                else:
-                    self._blit_text_topdown(body.name, float(lx) + 12.0, name_y,
-                                            self.font_small)
-                speed = self._ship_frame_speed_m_s(body)
-                if getattr(self, "debug_frame", False):
-                    try:
-                        period = max(1, int(getattr(self, "_frame_debug_period", 30)))
-                        if int(getattr(self, "_frame_debug_counter", 0)) % period == 0:
-                            backend_rel = self._ship_relative_speed_m_s(body, getattr(self, "current_reference_body", None))
-                            frame_speed = speed
-                            if backend_rel is not None and frame_speed is not None:
-                                print(
-                                    f"SHIP_SPEED_DBG: "
-                                    f"backend_rel={backend_rel:.3f} m/s "
-                                    f"frame={frame_speed:.3f} m/s "
-                                    f"frame_label={getattr(self._active_frame(), 'label', '?')}"
-                                )
-                    except Exception:
-                        pass
-                speed_text = self._format_speed_label(speed)
-                if speed_text:
-                    speed_entry = self._get_label_texture(speed_text, self.font_small)
-                    if speed_entry:
-                        _, sw, _ = speed_entry
-                        self._blit_text_topdown(
-                            speed_text, float(lx) - (float(sw) / 2.0), speed_y,
-                            self.font_small,
-                        )
-                    else:
-                        self._blit_text_topdown(speed_text, float(lx) + 12.0, speed_y,
-                                                self.font_small)
-            except Exception:
-                try:
-                    self._draw_body_label(body.name, screen_pos, 12)
-                except Exception:
-                    pass
+            # Das Schiff traegt KEINEN schwebenden text mehr -- name und
+            # geschwindigkeit standen frueher fest ueber/unter der silhouette.
+            # Beide leben im spieler-HUD (navball-cluster); der name erscheint
+            # ueber das auswahl-label, wenn das schiff angeklickt wird.
             return
 
         # --- Nicht-Schiff-Körper: off-screen-cull + größen-schwelle (icon-swap) ---
@@ -3143,15 +3800,15 @@ class Renderer:
         # min. 3px zu klemmen und dauerhaft als winzige scheibe zu zeichnen,
         # lassen wir ihn unter die schwelle schrumpfen und tauschen ihn dann
         # nahtlos gegen ein positions-icon konstanter größe.
-        icon_radius_px = float(self.body_icon_radius_px)
+        icon_min_radius_px = float(self.body_icon_min_radius_px)
         true_radius_px = float(body.radius) * float(camera.scale)
-        as_icon = true_radius_px < icon_radius_px
+        as_icon = true_radius_px < icon_min_radius_px
 
         # Off-screen-cull (NUR rendering, physik unberührt): die marge deckt für
         # sichtbare körper den glow (~2.5x radius) ab, damit randständige große
         # körper nicht fälschlich verschwinden. Vollständig off-screen-körper
         # werden gar nicht erst gezeichnet (kein shader-/icon-aufruf).
-        cull_margin_px = (icon_radius_px if as_icon else true_radius_px * 2.5) + 8.0
+        cull_margin_px = (icon_min_radius_px if as_icon else true_radius_px * 2.5) + 8.0
         if not self._is_on_screen(x, y, cull_margin_px):
             self.debug_info['bodies_culled'] = self.debug_info.get('bodies_culled', 0) + 1
             return
@@ -3159,14 +3816,17 @@ class Renderer:
         self.debug_info['bodies_rendered'] += 1
 
         if as_icon:
-            # Körper komplett de-rendern; nur das positions-icon zeichnen.
-            # icon-größe == swap-schwelle => exakt nahtloser tausch (keine lücke,
-            # keine doppelzeichnung), konstante bildschirmgröße beim herauszoomen.
+            # Körper komplett de-rendern; nur die positions-marke zeichnen.
+            # Die groesse haengt am PHYSISCHEN radius, nicht am (hier winzigen
+            # bis nahe-null) bildschirmradius -- siehe `_body_icon_draw_radius_px`.
             self.debug_info['bodies_as_icon'] = self.debug_info.get('bodies_as_icon', 0) + 1
-            self._draw_body_icon(x, y, icon_radius_px, r, g, b)
+            icon_draw_radius_px = self._body_icon_draw_radius_px(float(body.radius))
+            self._draw_body_icon(body, x, y, icon_draw_radius_px, r, g, b, 1.0)
             # Der name haengt NICHT an der zeichengroesse: ein angewaehlter
-            # mond soll auch als 4-px-icon lesbar beschriftet sein.
-            self._queue_body_label(body, x, y, icon_radius_px, screen_pos)
+            # mond soll auch als marke lesbar beschriftet sein. Der zoom-modus
+            # dagegen misst den ECHTEN radius, nicht die marke.
+            self._queue_body_label(body, x, y, icon_draw_radius_px, screen_pos,
+                                   size_radius_px=true_radius_px)
             return
 
         # --- Voller körper (disc + glow + atmosphäre) bei echter größe ---
@@ -3234,6 +3894,19 @@ class Renderer:
             self.debug_info['bodies_vector'] = (
                 self.debug_info.get('bodies_vector', 0) + 1)
 
+        # --- Ueberblendung marke -> koerper -------------------------------
+        # Knapp ueber der schwelle ist der koerper zwar schon "echt", sieht
+        # aber noch nicht danach aus: eine 8-px-scheibe mit limbus ist etwas
+        # anderes als ein zellmuster, und ein harter tausch bei exakt gleichem
+        # radius poppt trotzdem. Der koerper ist oben also ganz normal
+        # gezeichnet, und die marke wird DARUEBER ausgeblendet -- eine echte
+        # ueberblendung, ohne dass der koerper-zeichenweg davon etwas wissen
+        # muss.
+        icon_fade = self._body_icon_fade(true_radius_px)
+        if icon_fade > 0.0:
+            icon_draw_radius_px = self._body_icon_draw_radius_px(float(body.radius))
+            self._draw_body_icon(body, x, y, icon_draw_radius_px, r, g, b, icon_fade)
+
         self._queue_body_label(body, x, y, radius_px, screen_pos)
 
     def _wants_body_label(self, body, radius_px):
@@ -3257,7 +3930,8 @@ class Renderer:
             return selected or big
         return selected
 
-    def _queue_body_label(self, body, lx, ly, radius_px, screen_pos=None):
+    def _queue_body_label(self, body, lx, ly, radius_px, screen_pos=None,
+                          size_radius_px=None):
         """Den namen eines koerpers fuer die zeichnung NACH dem FXAA vormerken.
 
         NICHT sofort zeichnen: koerper laufen in den FXAA-FBO, und FXAA ist
@@ -3271,10 +3945,20 @@ class Renderer:
         `_world_to_screen_xy`, nicht `camera.world_to_screen`: in rotierenden
         plot-frames weichen beide voneinander ab und das label loest sich vom
         koerper. `radius_px` ist der bezugsradius, an dem der text haengt --
-        der echte bildschirmradius beim vollen koerper, die icon-groesse beim
-        icon.
+        der echte bildschirmradius beim vollen koerper, die marken-groesse bei
+        der marke.
+
+        `size_radius_px` ist davon getrennt: es ist die GROESSE, nach der
+        `body_label_mode = "zoom"` entscheidet, und das ist immer der echte
+        bildschirmradius des koerpers. Beides zu vermengen war lange folgenlos,
+        weil die marke mit 4 px unter `body_label_min_radius_px` (5) lag --
+        mit 8 px lag sie darueber, und ploetzlich trug im zoom-modus jeder
+        winzige mond seinen namen. Der anker haengt an der ZEICHNUNG, die
+        entscheidung am KOERPER.
         """
-        if not self._wants_body_label(body, radius_px):
+        if size_radius_px is None:
+            size_radius_px = radius_px
+        if not self._wants_body_label(body, size_radius_px):
             return
         try:
             # Bei ausgewaehltem koerper steht ueber ihm der obere
@@ -3599,7 +4283,12 @@ class Renderer:
         if getattr(body, 'is_ship', False):
             return 12.0
         true_radius_px = float(getattr(body, 'radius', 0.0)) * float(camera.scale)
-        return max(true_radius_px, float(self.body_icon_radius_px))
+        # Dieselbe funktion wie beim zeichnen: das klickziel deckt sich mit
+        # dem, was tatsaechlich zu sehen ist, auch wenn body_icon_size_influence
+        # die marke groesser als body_icon_min_radius_px zeichnet.
+        icon_radius_px = self._body_icon_draw_radius_px(
+            float(getattr(body, 'radius', 0.0)))
+        return max(true_radius_px, icon_radius_px)
 
     def pick_body(self, screen_pos, bodies, camera):
         """Index des koerpers unter `screen_pos` (top-down pixel), sonst None.
@@ -4363,15 +5052,19 @@ class Renderer:
 
         r_px = float(self.apsis_marker_radius_px)
 
-        # EIN DRAW JE FARBE STATT EINEM JE MARKER. Die rauten sind vier
-        # unverbundene strecken; als LINES gezeichnet ergeben sie exakt
-        # dieselben vier segmente wie der bisherige LINE_STRIP ueber fuenf
-        # punkte, nur eben alle rauten einer farbe in einem aufruf.
-        # Gemessen: 16 marker = 16 draws + 32 uniform-schreibvorgaenge je
-        # frame, jetzt hoechstens zwei.
-        apo_segments = []
-        peri_segments = []
-        pending_labels = []
+        # AUSBLENDEN NACH SCHIRMGROESSE DER BAHN, NICHT NACH ZOOM-SCHWELLE.
+        # `m[4]` ist der apsis-abstand zum bezugskoerper in metern, `* scale`
+        # also der apsis-radius in PIXELN -- ein direktes mass dafuer, wie
+        # gross die bahn am schirm ist. Wird sie klein, ruecken Pe/Ap an die
+        # schiffs- und die Erde-marke heran; das smoothstep zwischen
+        # `fade_min_px` und `fade_full_px` blendet sie dann sauber weg, statt
+        # sie uebereinanderzustapeln. Damit ist die alte "ein draw je farbe"-
+        # buendelung hin (jeder marker hat jetzt seine eigene deckkraft) --
+        # bei real 1 Pe + 1 Ap, selten je zwei, ist das ein draw je marker
+        # und faellt nicht ins gewicht.
+        scale = abs(float(getattr(camera, 'scale', 0.0)))
+        fade_min = float(self.apsis_marker_fade_min_px)
+        fade_full = float(self.apsis_marker_fade_full_px)
 
         for i in range(count):
             try:
@@ -4383,6 +5076,17 @@ class Renderer:
                 dist = float(m[4])
             except Exception:
                 continue
+
+            size_px = dist * scale
+            if fade_full > fade_min:
+                u = (size_px - fade_min) / (fade_full - fade_min)
+                u = max(0.0, min(1.0, u))
+                alpha_mult = u * u * (3.0 - 2.0 * u)
+            else:
+                alpha_mult = 1.0 if size_px >= fade_min else 0.0
+            if alpha_mult <= 0.003:
+                continue
+
             sx, sy = self._world_to_screen_xy_at_time(wx, wy, camera, t_abs, camera_frame_xy)
             if not (math.isfinite(sx) and math.isfinite(sy)):
                 continue
@@ -4390,25 +5094,18 @@ class Renderer:
                 continue
 
             label = "Ap" if is_apo else "Pe"
+            base = (0.45, 0.75, 1.0) if is_apo else (1.0, 0.62, 0.25)
+            col = (base[0], base[1], base[2], 0.95 * alpha_mult)
 
             # Nord -> Ost -> Sued -> West -> Nord, als vier strecken.
             north = (sx, sy - r_px)
             east = (sx + r_px, sy)
             south = (sx, sy + r_px)
             west = (sx - r_px, sy)
-            target = apo_segments if is_apo else peri_segments
-            target.extend((north, east, east, south, south, west, west, north))
+            self._draw_line_segments(
+                (north, east, east, south, south, west, west, north),
+                color=col, width=2.0)
 
-            pending_labels.append((label, dist, sx, sy))
-
-        if apo_segments:
-            self._draw_line_segments(apo_segments,
-                                     color=(0.45, 0.75, 1.0, 0.95), width=2.0)
-        if peri_segments:
-            self._draw_line_segments(peri_segments,
-                                     color=(1.0, 0.62, 0.25, 0.95), width=2.0)
-
-        for label, dist, sx, sy in pending_labels:
             text = f"{label} {self._format_apsis_distance(dist)}"
             try:
                 # Diamant + linie laufen über den line-shader (top-down, sy
@@ -4416,11 +5113,10 @@ class Renderer:
                 # (y nach oben). _blit_text_topdown rechnet das um.
                 entry = self._get_label_texture(text, self.font_small)
                 tw = float(entry[1]) if entry else 0.0
-                # oberkante des labels knapp unter die untere diamant-spitze.
-                # Die ortho-umrechnung macht jetzt _blit_text_topdown (frueher
-                # stand sie hier als einziger korrekt umgerechneter aufrufer).
                 label_x = sx - tw / 2.0
-                self._blit_text_topdown(text, label_x, sy + r_px + 4.0, self.font_small)
+                self._blit_text_topdown(text, label_x, sy + r_px + 4.0,
+                                        self.font_small,
+                                        color=(1.0, 1.0, 1.0, alpha_mult))
             except Exception:
                 pass
 

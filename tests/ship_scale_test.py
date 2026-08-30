@@ -172,6 +172,12 @@ world.update_planets(0.0)
 
 renderer = Renderer(W, H, enable_fxaa=False, ctx=gl)
 config.apply_to_renderer(renderer)
+# Die hintergrund-ebene MUSS hier aus sein. `ink_extent` unten sucht helle,
+# wenig gesaettigte pixel -- und genau so sehen die gitterlinien aus
+# (0.10 * RGB(206,218,226) additiv). Mit hintergrund misst der test die
+# volle bildbreite statt der schiffs-silhouette und meldet auf jeder
+# zoomstufe dieselben 705 px.
+renderer.background.enabled = False
 camera = Camera(None, W, H)
 config.apply_to_camera(camera)
 camera.pan_inertia_enabled = False
@@ -261,15 +267,15 @@ check(off_wide == off_narrow,
       "gegenprobe: abgeschaltet ist das schiff auf beiden stufen gleich breit",
       f"{off_wide} px / {off_narrow} px")
 
-# Und die beschriftung zieht mit: sie haengt an `_ship_half_height_px`, das
-# denselben faktor benutzt. Sonst stuende der name weit ueber einem kleinen
-# schiff in der luft.
+# `_ship_half_height_px` zieht mit demselben faktor mit -- alles, was sich am
+# rand der silhouette ausrichtet (auswahl-marke, HUD-anschluesse), folgt so
+# der schrumpfenden groesse statt in der luft zu haengen.
 renderer._ship_zoom_factor = 1.0
 full_h = renderer._ship_half_height_px()
 renderer._ship_zoom_factor = FLOOR
 small_h = renderer._ship_half_height_px()
 check(abs(small_h / full_h - FLOOR) < 1e-9,
-      "der label-abstand folgt demselben faktor",
+      "der silhouetten-halbabstand folgt demselben faktor",
       f"{full_h:.2f} px -> {small_h:.2f} px")
 renderer._ship_zoom_factor = 1.0
 

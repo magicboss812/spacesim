@@ -22,6 +22,9 @@ import math
 import moderngl
 import numpy as np
 
+import background
+import body_icon
+
 try:
     from imgui_bundle import imgui
     IMGUI_AVAILABLE = True
@@ -614,6 +617,124 @@ def draw_dev_panels(c: "DevContext"):
             if imgui.button("snap (no easing)"):
                 cam.snap_to_targets()
 
+    # ---------------------------------------------------------- Background
+    if imgui.collapsing_header("Background"):
+        bg = getattr(c.renderer, 'background', None)
+        if bg is None:
+            imgui.text_disabled("keine hintergrund-ebene am renderer")
+        else:
+            # Diese liste ist absichtlich genau der `background`-abschnitt aus
+            # config.json -- kein regler mehr, kein regler weniger. Siehe
+            # .claude/rules/background.md.
+            _checkbox("enabled", bg, 'enabled',
+                      tooltip="Ganze ebene aus: dann bleibt nur die clear-farbe.")
+            _checkbox("grid enabled", bg, 'grid_enabled')
+            imgui.same_line()
+            _checkbox("stars enabled", bg, 'stars_enabled')
+
+            rgb = background.parse_hex_color(bg.accent_color)
+            changed, col = imgui.color_edit3("accent color", list(rgb))
+            if changed:
+                bg.accent_color = '#%02x%02x%02x' % tuple(
+                    int(round(min(1.0, max(0.0, float(v))) * 255.0)) for v in col
+                )
+            if imgui.is_item_hovered():
+                imgui.set_tooltip(
+                    "Faerbt die tiefenglut UND die gitterknoten.\n"
+                    f"aktuell: {bg.accent_color}"
+                )
+
+            _slider("grid opacity", bg, 'grid_opacity', 0.0, 2.0, "%.2f",
+                    tooltip="Vielfaches der grund-deckkraft des gitters.")
+            anchors = background.GRID_ANCHORS
+            current = anchors.index(bg.grid_anchor) \
+                if bg.grid_anchor in anchors else 0
+            changed, idx = imgui.combo("grid anchor", current, list(anchors))
+            if changed:
+                bg.grid_anchor = anchors[idx]
+                c.notes.append(f"background.grid_anchor = {anchors[idx]}")
+            if imgui.is_item_hovered():
+                imgui.set_tooltip(
+                    "frame: festes lattice im aktiven plot-frame. Der\n"
+                    "bezugskoerper steht darauf still, mond und schiff\n"
+                    "wandern darueber, ein schwenk schiebt es genau so\n"
+                    "weit wie die welt.\n"
+                    "focus: klebt am verfolgten koerper und steht immer\n"
+                    "still -- reine massstabsanzeige ohne tempo."
+                )
+
+            _slider("idle fade delay", bg, 'idle_fade_delay', 0.0, 10.0, "%.1f s",
+                    tooltip="Sekunden ohne ZOOM, bis das gitter ausblendet.\n"
+                            "Schwenken zaehlt bewusst nicht.")
+            _slider("grid max speed", bg, 'grid_max_speed_px', 0.0, 4000.0,
+                    "%.0f px/s",
+                    tooltip="Obergrenze, mit der der gitteranker dem wahren\n"
+                            "wert nachlaeuft. DARUNTER ist das gitter exakt\n"
+                            "weltfest; darueber gleitet es nur noch mit\n"
+                            "dieser rate -- das haelt es bei extremem zoom\n"
+                            "lesbar. Muss ueber der schwenkrate liegen\n"
+                            "(camera.move_speed x schirmhoehe, ~800 px/s),\n"
+                            "sonst haengt es beim schwenken hinterher.\n"
+                            "0 friert es ein.")
+            _slider("pixel size", bg, 'pixel_size', 1.0, 8.0, "%.1f du",
+                    tooltip="Kantenlaenge des virtuellen pixels, in DESIGN-\n"
+                            "einheiten (x ui_scale). 1 = glatt, 3 = die\n"
+                            "koernung der HUD-anzeigeschrift.")
+            _slider("pixel round", bg, 'pixel_round', 0.0, 1.0, "%.2f",
+                    tooltip="Form EINER rasterzelle.\n"
+                            "0 = volles quadrat (nahtloser pixelraster).\n"
+                            "1 = runder leuchtpunkt mit spalt -- die\n"
+                            "leuchtpunkt-matrix. Trifft nur die tinte\n"
+                            "(gitter, knoten, sterne), nie den grundverlauf.")
+
+            dens_changed, dens = imgui.slider_int(
+                "star density", int(bg.star_density), 0, 900)
+            if dens_changed:
+                bg.star_density = int(dens)
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("Zahl der sterne. Aenderung schreibt den VBO\n"
+                                  "einmal neu, nicht je bild.")
+
+            _slider("star opacity", bg, 'star_opacity', 0.0, 1.0, "%.2f")
+            _slider("star motion scale", bg, 'star_motion_scale', 0.0, 5.0, "%.2f",
+                    tooltip="Pixel je sekunde bei 1 km/s eigengeschwindigkeit\n"
+                            "des verfolgten koerpers. Die parallaxe je stern\n"
+                            "(0.05..0.55) kommt obendrauf. Unabhaengig vom\n"
+                            "zoom -- 0 = feststehendes feld.")
+            _slider("star zoom influence", bg, 'star_zoom_influence', 0.0, 1.0,
+                    "%.2f",
+                    tooltip="Wie stark das feld beim zoomen mitatmet.\n"
+                            "0 = starr. 1 = die kachel dehnt sich voll, sterne\n"
+                            "blenden dabei aus und andere ein, sodass die\n"
+                            "dichte konstant bleibt.")
+
+            imgui.separator()
+            imgui.text(f"grid fade: {bg.grid_fade:.3f}   "
+                       f"star zoom: {bg.star_zoom:+.3f} oct")
+            cam = c.camera
+            if cam is not None:
+                # Denselben anker wie der renderer benutzen, sonst zeigt das
+                # panel andere phasen als das bild.
+                focus = getattr(cam, 'target', None)
+                imgui.text(f"focus: {getattr(focus, 'name', 'frei')}")
+                levels = bg.levels(cam.scale)
+                if levels:
+                    for lv in levels:
+                        imgui.text(f"  10^{lv.k:<3d} = {_fmt_si(lv.spacing_m)}  "
+                                   f"{lv.spacing_px:7.1f}px  a={lv.alpha:.3f}  "
+                                   f"node={lv.node_alpha:.3f}")
+                else:
+                    imgui.text_disabled("  keine sichtbare dekade")
+            imgui.text(f"star pan: ({bg.star_pan_px[0]:+7.1f}, "
+                       f"{bg.star_pan_px[1]:+7.1f}) px")
+            imgui.text(f"grid anchor: ({_fmt_si(bg.grid_anchor_m[0])}, "
+                       f"{_fmt_si(bg.grid_anchor_m[1])})")
+            imgui.text(f"  rueckstand: {bg.grid_lag_px:8.1f} px "
+                       f"(grenze {bg.grid_max_speed_px:.0f} px/s)")
+            if cam is not None:
+                imgui.text(f"zoom ceiling: {cam._scale_ceiling():.3e} px/m "
+                           f"(schirm >= {getattr(cam, 'min_visible_span_m', 0.0):.0f} m)")
+
     # ----------------------------------------------------------- Predictor
     if imgui.collapsing_header("Predictor"):
         p = c.predictor
@@ -674,7 +795,120 @@ def draw_dev_panels(c: "DevContext"):
             _checkbox("reference trails", r, 'reference_trajectories_enabled')
             _checkbox("prediction bypasses FXAA", r, 'prediction_bypass_fxaa')
             _slider("apsis marker px", r, 'apsis_marker_radius_px', 1.0, 20.0, "%.1f")
-            _slider("body icon px", r, 'body_icon_radius_px', 1.0, 20.0, "%.1f")
+            _slider("apsis fade min px", r, 'apsis_marker_fade_min_px', 0.0, 60.0, "%.1f",
+                    tooltip="Apsis-radius am schirm (nicht zoom), unter dem der\n"
+                            "marker unsichtbar ist. So stapelt er sich bei\n"
+                            "weit-sicht nicht auf die schiffs-/Erde-marke.")
+            _slider("apsis fade full px", r, 'apsis_marker_fade_full_px', 4.0, 160.0, "%.1f",
+                    tooltip="Ab diesem apsis-radius am schirm ist der marker\n"
+                            "voll deckend; dazwischen ein smoothstep.")
+            _slider("orbit full-loop alpha", r, 'orbit_line_full_alpha_mult', 0.0, 1.0, "%.2f",
+                    tooltip="Deckkraft der faint volllinie (ein ganzer umlauf,\n"
+                            "hinter der enthuellten spur) als anteil der spur-\n"
+                            "deckkraft. 0 = aus.")
+            _slider("body icon min px", r, 'body_icon_min_radius_px', 1.0, 20.0, "%.1f",
+                    tooltip="MINDESTgroesse der positions-marke -- und zugleich\n"
+                            "die schwelle, unter der ein koerper geometrisch\n"
+                            "komplett gegen sie getauscht wird. Bei 4 px waere\n"
+                            "eine zelle des musters 1.1 px breit; bei 8 px\n"
+                            "sind es 3.2 px.")
+            _slider("body icon max px", r, 'body_icon_max_radius_px', 8.0, 128.0, "%.1f",
+                    tooltip="HOECHSTgroesse, bis zu der die marke nach dem\n"
+                            "PHYSISCHEN koerper-radius wachsen darf (siehe\n"
+                            "'icon groessen-einfluss').")
+            _slider("icon groessen-einfluss", r, 'body_icon_size_influence',
+                    0.0, 1.0, "%.2f",
+                    tooltip="Wie stark der PHYSISCHE koerper-radius (meter,\n"
+                            "nicht der aktuelle bildschirmradius) die marken-\n"
+                            "groesse skaliert -- log-skaliert ueber die spanne\n"
+                            "aller geladenen koerper. 0 = jede marke bleibt bei\n"
+                            "'body icon min px', egal wie gross der koerper\n"
+                            "ist. 1 = ein jupiter-grosser koerper ist BEI JEDEM\n"
+                            "ZOOM sichtbar groesser als ein kleiner mond,\n"
+                            "geklemmt auf [min, max].")
+            imgui.separator()
+            imgui.text("positions-marke (body_icon.py)")
+            styles = ("pixel", "disc")
+            cur = styles.index(r.body_icon_style) \
+                if getattr(r, 'body_icon_style', None) in styles else 0
+            changed, idx = imgui.combo("icon style", cur, list(styles))
+            if changed:
+                r.body_icon_style = styles[idx]
+                c.notes.append(f"renderer.body_icon_style = {styles[idx]}")
+            variants = body_icon.VARIANTS
+            cur = variants.index(r.body_icon_variant) \
+                if getattr(r, 'body_icon_variant', None) in variants else 0
+            changed, idx = imgui.combo("icon variante", cur, list(variants))
+            if changed:
+                r.body_icon_variant = variants[idx]
+                c.notes.append(f"renderer.body_icon_variant = {variants[idx]}")
+            changed, value = imgui.input_int(
+                "icon seed-versatz", int(getattr(r, 'body_icon_seed_offset', 0)))
+            if changed:
+                r.body_icon_seed_offset = int(value) & 0xFFFFFFFF
+                r._body_icon_cache.clear()
+                c.notes.append(
+                    f"renderer.body_icon_seed_offset = {r.body_icon_seed_offset}")
+            if imgui.is_item_hovered():
+                imgui.set_tooltip(
+                    "Globaler versatz auf JEDEN koerper-seed. Wuerfelt eine\n"
+                    "ganz neue serie von marken, ohne style_seed in\n"
+                    "solar_system.json anzufassen. 0 = die namensbasierten\n"
+                    "vorgabe-marken.")
+            if imgui.button("wuerfeln##icon_seed"):
+                r.body_icon_seed_offset = (
+                    int(getattr(r, 'body_icon_seed_offset', 0)) + 1) & 0xFFFFFFFF
+                r._body_icon_cache.clear()
+                c.notes.append(
+                    f"renderer.body_icon_seed_offset = {r.body_icon_seed_offset}")
+            _slider("icon ueberblend-faktor", r, 'body_icon_fade_factor',
+                    1.05, 4.0, "%.2f",
+                    tooltip="Das ueberblend-band endet bei 'body icon min px'\n"
+                            "MAL diesem faktor -- z.b. min=16, faktor=1.6 ->\n"
+                            "band bis 25.6 px echter radius. Ein FAKTOR statt\n"
+                            "eines festen pixelwerts, weil der sonst beim\n"
+                            "verstellen von 'min' von hand nachgezogen werden\n"
+                            "musste (und das zweimal verkehrt herum stand).\n"
+                            "1.0 oder darunter heisst: harter tausch, kein band.")
+            _slider("icon halo", r, 'body_icon_halo_alpha', 0.0, 1.0, "%.2f",
+                    tooltip="Weicher schein hinter der marke. Traegt sie gegen\n"
+                            "das sternenfeld, ohne selbst als form zu lesen.")
+            _slider("icon kante px", r, 'body_icon_edge_px', 0.0, 3.0, "%.2f",
+                    tooltip="Breite der umriss-glaettung. 0 = harte kante und\n"
+                            "damit pixelweise bewegung, 1 = ein pixel rampe.")
+            changed, value = imgui.slider_int(
+                "icon raster", int(getattr(r, 'body_icon_grid', 9)),
+                5, body_icon.MAX_GRID)
+            if changed:
+                r.body_icon_grid = int(value)
+                c.notes.append(f"renderer.body_icon_grid = {int(value)}")
+            if imgui.is_item_hovered():
+                imgui.set_tooltip(
+                    "Zellen je kante -- der DETAILGRAD, unabhaengig von der\n"
+                    "bildschirmgroesse. Feiner heisst mehr muster, nicht\n"
+                    "groessere marke. Achtung: unter rund 1.5 px je zelle\n"
+                    "kann der schirm das raster nicht mehr aufloesen; bei\n"
+                    "radius 8 ist das etwa bei 9 erreicht.")
+            _slider("icon schattierung", r, 'body_icon_shade_jitter',
+                    0.0, 0.6, "%.2f",
+                    tooltip="Eigene helligkeit je zelle. Drei stufen allein\n"
+                            "geben zu wenig tiefe -- gleich eingestufte\n"
+                            "nachbarn verschmelzen sonst zu einer flaeche.\n"
+                            "0 = alle zellen einer stufe gleich hell.")
+            _slider("icon umriss px", r, 'body_icon_cell_rim', 0.0, 3.0, "%.2f",
+                    tooltip="Breite des umrisses JEDER zelle, in pixeln.\n"
+                            "Als anteil der zelle war er unter einem pixel\n"
+                            "breit und dann phasenabhaengig -- eine achse\n"
+                            "zeigte ihn, die andere nicht. 0 = kein umriss.")
+            _slider("icon umriss dunkel", r, 'body_icon_cell_rim_dark',
+                    0.0, 1.0, "%.2f",
+                    tooltip="Wie dunkel der umriss wird. 1 = unsichtbar,\n"
+                            "0 = schwarz.")
+            _slider("icon zellspalt", r, 'body_icon_cell_gap', 0.0, 0.5, "%.2f",
+                    tooltip="Anteil einer zelle, der als spalt frei bleibt.\n"
+                            "0 = gleichfarbige nachbarn verschmelzen zu einer\n"
+                            "flaeche und die marke wird ein klecks; 0.22 macht\n"
+                            "sie wieder als raster lesbar.")
 
             imgui.separator_text("prediction sampling")
             _slider("tolerance px", r, 'prediction_sampling_tolerance_px',

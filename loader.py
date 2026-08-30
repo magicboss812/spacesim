@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 from vec import Vec2
 from bodies import body, schiff
+import background
 
 DEFAULT_CONFIG_FILE = "config.json"
 
@@ -253,6 +254,7 @@ class ConfigLoader:
             ('initial_scale', 'scale', float),
             ('min_scale', 'min_scale', float),
             ('max_scale', 'max_scale', float),
+            ('min_visible_span_m', 'min_visible_span_m', float),
             ('move_speed', 'move_speed', float),
             ('zoom_factor', 'zoom_factor', float),
             ('zoom_smoothing', 'zoom_smoothing', float),
@@ -403,7 +405,24 @@ class ConfigLoader:
             ('show_debug_hud', 'show_debug_hud', bool),
             ('show_apsis_markers', 'show_apsis_markers', bool),
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
-            ('body_icon_radius_px', 'body_icon_radius_px', float),
+            ('apsis_marker_fade_min_px', 'apsis_marker_fade_min_px', float),
+            ('apsis_marker_fade_full_px', 'apsis_marker_fade_full_px', float),
+            ('body_icon_min_radius_px', 'body_icon_min_radius_px', float),
+            # Die positions-marke (body_icon.py)
+            ('body_icon_style', 'body_icon_style', str),
+            ('body_icon_variant', 'body_icon_variant', str),
+            ('body_icon_seed_offset', 'body_icon_seed_offset', int),
+            ('body_icon_grid', 'body_icon_grid', int),
+            # Skalierung der marken-groesse mit dem echten koerper-radius
+            ('body_icon_max_radius_px', 'body_icon_max_radius_px', float),
+            ('body_icon_size_influence', 'body_icon_size_influence', float),
+            ('body_icon_fade_factor', 'body_icon_fade_factor', float),
+            ('body_icon_halo_alpha', 'body_icon_halo_alpha', float),
+            ('body_icon_edge_px', 'body_icon_edge_px', float),
+            ('body_icon_cell_gap', 'body_icon_cell_gap', float),
+            ('body_icon_shade_jitter', 'body_icon_shade_jitter', float),
+            ('body_icon_cell_rim', 'body_icon_cell_rim', float),
+            ('body_icon_cell_rim_dark', 'body_icon_cell_rim_dark', float),
             # Wann ein koerper seinen namen zeigt: "selected" | "zoom" | "both"
             ('body_label_mode', 'body_label_mode', str),
             ('body_label_min_radius_px', 'body_label_min_radius_px', float),
@@ -460,6 +479,12 @@ class ConfigLoader:
             ('orbit_line_knot_angle', 'orbit_line_knot_angle', float),
             ('orbit_line_end_caps', 'orbit_line_end_caps', bool),
             ('orbit_line_end_cap_px', 'orbit_line_end_cap_px', float),
+            # Faint volllinie: ein ganzer umlauf, hinter der enthuellten spur
+            ('orbit_line_full_orbit_enabled', 'orbit_line_full_orbit_enabled', bool),
+            ('orbit_line_full_alpha_mult', 'orbit_line_full_alpha_mult', float),
+            ('orbit_line_full_knot_angle', 'orbit_line_full_knot_angle', float),
+            ('orbit_line_full_samples', 'orbit_line_full_samples', int),
+            ('orbit_line_full_max_span_s', 'orbit_line_full_max_span_s', float),
             ('reference_trajectories_enabled', 'reference_trajectories_enabled', bool),
             ('reference_trajectories_max_points', 'reference_trajectories_max_points', int),
             ('reference_trajectories_sample_step_s', 'reference_trajectories_sample_step_s', float),
@@ -510,7 +535,47 @@ class ConfigLoader:
         every_n = self.get_int('debug.render_benchmark_every_n_frames')
         if every_n is not None:
             renderer.render_benchmark_every_n_frames = every_n
+
+        # Die hintergrund-ebene haengt am renderer, hat aber einen eigenen
+        # config-abschnitt -- hier mitgereicht, damit apply_all() nichts
+        # zusaetzliches uebergeben muss.
+        self.apply_to_background(getattr(renderer, 'background', None))
         return renderer
+
+    def apply_to_background(self, bg):
+        """background-abschnitt -> background.BackgroundLayer.
+
+        Die schluesselmenge hier, die im `background`-abschnitt von
+        config.json und die reglerliste im ImGui-panel sind ABSICHTLICH
+        identisch -- so kann keiner der drei orte einen schalter bekommen,
+        den die anderen nicht kennen (siehe .claude/rules/background.md).
+        """
+        if bg is None:
+            return None
+        self._assign(bg, 'background', [
+            ('enabled', 'enabled', bool),
+            ('grid_enabled', 'grid_enabled', bool),
+            ('stars_enabled', 'stars_enabled', bool),
+            ('accent_color', 'accent_color', str),
+            ('grid_opacity', 'grid_opacity', float),
+            ('grid_anchor', 'grid_anchor', str),
+            ('idle_fade_delay', 'idle_fade_delay', float),
+            ('pixel_size', 'pixel_size', float),
+            ('pixel_round', 'pixel_round', float),
+            ('grid_max_speed_px', 'grid_max_speed_px', float),
+            ('star_density', 'star_density', int),
+            ('star_opacity', 'star_opacity', float),
+            ('star_motion_scale', 'star_motion_scale', float),
+            ('star_zoom_influence', 'star_zoom_influence', float),
+        ])
+        # Ein tippfehler im anker darf nicht still ein anderes verhalten
+        # ergeben -- er faellt hoerbar auf die Vorgabe zurueck.
+        if bg.grid_anchor not in background.GRID_ANCHORS:
+            print(f"CONFIG WARNING: background.grid_anchor={bg.grid_anchor!r} "
+                  f"unbekannt, verwende {background.GRID_ANCHORS[0]!r} "
+                  f"(erlaubt: {', '.join(background.GRID_ANCHORS)})")
+            bg.grid_anchor = background.GRID_ANCHORS[0]
+        return bg
 
     def apply_all(self, world_obj=None, camera=None, ship_control=None,
                   predictor=None, renderer=None):

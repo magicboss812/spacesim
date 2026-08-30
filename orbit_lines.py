@@ -216,6 +216,28 @@ def _constant_track(body, times):
     return out
 
 
+def orbital_period(body):
+    """Umlaufzeit des koerpers um seinen elter, `2*pi*sqrt(a^3/mu)`, oder None.
+
+    Fuer die faint volllinie: sie wird ueber GENAU einen umlauf gezeichnet.
+    Elternlose koerper (die Sonne) haben keine -- sie bekommen ohnehin keine
+    linie.
+    """
+    parent = getattr(body, 'is_moon_of', None)
+    if parent is None:
+        return None
+    a = getattr(body, 'semi_major_axis', None)
+    if a is None:
+        return None
+    a = float(a)
+    if a <= 0.0:
+        return None
+    mu = G * float(getattr(parent, 'mass', 0.0) or 0.0)
+    if mu <= 0.0:
+        return None
+    return 2.0 * math.pi * math.sqrt(a * a * a / mu)
+
+
 def soi_radius(body):
     """Radius der einflusssphaere, `a * (m / m_elter)^0.4`, oder None.
 
@@ -329,7 +351,8 @@ class OrbitLineEntry:
 
     __slots__ = ('body', 'alpha', 'target', 'floor', 'reveal',
                  'reveal_target', 'miss', 't_min',
-                 'track', 'track_t', 'track_len')
+                 'track', 'track_t', 'track_len',
+                 'full_track', 'full_track_t', 'full_track_len')
 
     def __init__(self, body):
         self.body = body
@@ -345,6 +368,11 @@ class OrbitLineEntry:
         self.track = None
         self.track_t = None
         self.track_len = 0.0
+        # Die faint volllinie: EIN ganzer umlauf, im plot-frame, hinter der
+        # hellen enthuellten spur gezeichnet.
+        self.full_track = None
+        self.full_track_t = None
+        self.full_track_len = 0.0
 
 
 class OrbitLineSet:
@@ -366,8 +394,16 @@ class OrbitLineSet:
     def __init__(self, *, track_samples=192, soi_full=1.0, soi_fade=3.0,
                  reveal_full=10.0, reveal_fade=30.0,
                  alpha_max=0.85, alpha_floor=0.10, alpha_floor_focus=0.35,
-                 fade_rate=6.0):
+                 fade_rate=6.0, full_orbit_enabled=True, full_samples=256,
+                 full_max_span_s=7.5e7):
         self.track_samples = max(8, int(track_samples))
+        # Faint volllinie ueber einen ganzen umlauf. `full_max_span_s` kappt
+        # sie bei ~810 tagen: ab Jupiter waere die periode so lang, dass die
+        # 3-punkt-schaetzung der knotenzahl im rotierenden frame aliast und
+        # die tabelle sinnlos grob wird.
+        self.full_orbit_enabled = bool(full_orbit_enabled)
+        self.full_samples = max(16, int(full_samples))
+        self.full_max_span_s = float(full_max_span_s)
         self.soi_full = float(soi_full)
         self.soi_fade = float(soi_fade)
         self.reveal_full = float(reveal_full)
@@ -478,6 +514,9 @@ class OrbitLineSet:
                 entry.track_len = 0.0
                 entry.miss = float('inf')
                 entry.t_min = float('nan')
+                entry.full_track = None
+                entry.full_track_t = None
+                entry.full_track_len = 0.0
                 continue
 
             track = future_track(b, sample_t, memo)
@@ -488,6 +527,24 @@ class OrbitLineSet:
             d = np.diff(track, axis=0)
             entry.track_len = float(np.sum(np.hypot(d[:, 0], d[:, 1]))) if d.size else 0.0
             entry.miss, entry.t_min = closest_approach(sample_t, ship_xy, track)
+
+            # Die faint volllinie: EIN umlauf ab dem fensteranfang. Eigenes
+            # zeitgitter je koerper (jeder hat eine andere periode), also ein
+            # eigener durchlauf -- bei 0-3 sichtbaren linien vernachlaessigbar.
+            entry.full_track = None
+            entry.full_track_t = None
+            entry.full_track_len = 0.0
+            if self.full_orbit_enabled:
+                period = orbital_period(b)
+                if period is not None and 0.0 < period <= self.full_max_span_s:
+                    win_start = float(sample_t[0])
+                    full_t = win_start + np.linspace(0.0, period, self.full_samples)
+                    ftrack = future_track(b, full_t)
+                    entry.full_track = ftrack
+                    entry.full_track_t = full_t
+                    fd = np.diff(ftrack, axis=0)
+                    entry.full_track_len = (
+                        float(np.sum(np.hypot(fd[:, 0], fd[:, 1]))) if fd.size else 0.0)
 
         for stale in [key for key in self._entries if key not in active]:
             del self._entries[stale]

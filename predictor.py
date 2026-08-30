@@ -211,9 +211,12 @@ if NUMBA_AVAILABLE:
         p2y = py + half_dt * vy + 0.125 * dt2 * k1_ay
         k2_ax, k2_ay = _rkn_acc_numba(p2x, p2y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
 
-        p3x = px + half_dt * vx + 0.125 * dt2 * k1_ax
-        p3y = py + half_dt * vy + 0.125 * dt2 * k1_ay
-        k3_ax, k3_ay = _rkn_acc_numba(p3x, p3y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
+        # k3 teilt sein argument mit k2 -- siehe _rkn4_step_time_numba. Der
+        # ausdruck war derselbe, die funktion ist rein, also war die dritte
+        # kraftauswertung bit fuer bit k2 und damit ein viertel der arbeit
+        # umsonst.
+        k3_ax = k2_ax
+        k3_ay = k2_ay
 
         p4x = px + dt * vx + 0.5 * dt2 * k3_ax
         p4y = py + dt * vy + 0.5 * dt2 * k3_ay
@@ -755,6 +758,87 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True, nogil=True, fastmath=True)
+    def _local_timescale_numba(
+        x,
+        y,
+        local_t,
+        body_x,
+        body_y,
+        body_m,
+        body_fixed,
+        body_scripted,
+        body_a,
+        body_e,
+        body_theta,
+        body_arg,
+        body_parent,
+        G,
+        use_time_dependent_bodies,
+        body_memo,
+    ):
+        """`min_i sqrt(r_i^3 / (G m_i))` am ORT (x, y) zur zeit local_t.
+
+        Wort fuer wort dieselbe groesse wie `world.characteristic_timescale`
+        -- fuer eine kreisbahn um einen koerper exakt T/2pi. Es gibt bewusst
+        nur EINE definition davon im projekt; diese hier ist ihre numba-form,
+        weil der kernel die welt nicht fragen kann.
+
+        MINIMUM ueber alle koerper, NIE argmax(g): jenseits von r ~ 2.6e8 m
+        von der Erde ist die sonnenbeschleunigung groesser als die der Erde,
+        waehrend die Erd-SOI bis 9.2e8 m reicht -- die auswahl kippte dort auf
+        die Sonne und meldete deren zeitskala. Ueber einen 2-%-radiusschritt
+        gemessen ein sprung um das 97-fache. Das minimum stetiger funktionen
+        hat den sprung nicht (hoechstens 1.03x). Siehe die ausfuehrliche
+        herleitung in `.claude/rules/physics-world.md`.
+
+        Rueckgabe 0.0, wenn kein koerper eine zeitskala liefert -- der aufrufer
+        laesst seine decke dann unveraendert.
+        """
+        best = 0.0
+        have = 0
+        for i in range(body_x.shape[0]):
+            if body_fixed[i] == 0:
+                continue
+            mass = body_m[i]
+            if mass <= 0.0:
+                continue
+
+            if use_time_dependent_bodies != 0:
+                source_x, source_y = _body_position_at_time_numba(
+                    i,
+                    local_t,
+                    body_x,
+                    body_y,
+                    body_m,
+                    body_scripted,
+                    body_a,
+                    body_e,
+                    body_theta,
+                    body_arg,
+                    body_parent,
+                    G,
+                    body_memo,
+                )
+            else:
+                source_x = body_x[i]
+                source_y = body_y[i]
+
+            dx = source_x - x
+            dy = source_y - y
+            r2 = dx * dx + dy * dy
+            if r2 < 1e-6:
+                continue
+            # sqrt(r^3/mu), als sqrt(r)*r/sqrt(mu) waere es eine wurzel mehr.
+            t = math.sqrt(math.sqrt(r2) * r2 / (G * mass))
+            if have == 0 or t < best:
+                best = t
+                have = 1
+        if have == 0:
+            return 0.0
+        return best
+
+
+    @njit(cache=True, nogil=True, fastmath=True)
     def _rkn_acc_time_numba(
         x,
         y,
@@ -907,14 +991,33 @@ if NUMBA_AVAILABLE:
         # umlauf, und beide fuer sich in der schrittweite auskonvergiert.
         # Im zeitraffer, wo die kurve stehenbleibt und das schiff an ihr
         # entlangrutscht, ist genau das das "schiff loest sich von der linie".
-        p3x = px + half_dt * vx + 0.125 * dt2 * k1_ax
-        p3y = py + half_dt * vy + 0.125 * dt2 * k1_ay
-        k3_ax, k3_ay = _rkn_acc_time_numba(
-            p3x, p3y, mid_t, ref_enabled, ref_index, ref_px, ref_py,
-            body_x, body_y, body_m, body_fixed, body_scripted, body_a, body_e,
-            body_theta, body_arg, body_parent, G, use_time_dependent_bodies,
-            body_memo
-        )
+        #
+        # UND WEIL k3 SEIN ARGUMENT MIT k2 TEILT, IST ES DASSELBE k.
+        # `p3 == p2` stand hier als eigener ausdruck, wurde aber aus denselben
+        # summanden in derselben reihenfolge gebildet -- und
+        # `_rkn_acc_time_numba` ist eine reine funktion von (ort, zeit). Die
+        # dritte auswertung lieferte also denselben wert wie die zweite. Das
+        # ist die klassische 3-stufen-form (ordnung 4 aus 3 auswertungen), es
+        # geht keine genauigkeit verloren -- eine verdopplung faellt weg.
+        #
+        # ES SIND ABER NICHT DIE ERHOFFTEN 25 %, UND DER GRUND IST DER
+        # NOTIZBLOCK. `.claude/rules/physics-world.md` beziffert diese stufe
+        # mit "~25 % der integratorkosten"; das gilt fuer den WELT-kernel, der
+        # keinen `body_memo` hat. Hier lief k3 zur exakt selben zeit wie k2,
+        # traf also fuer jeden koerper den notizblock und bezahlte nur noch die
+        # 28 nachschlage plus die kraftsumme -- die teuren kepler-loesungen
+        # waren laengst gespart. Gemessen ueber die neun messlagen von
+        # `tests/warp_predictor_test.py` §24, gegen denselben lauf mit wieder
+        # eingesetzter dritter auswertung: **1.02x bis 1.15x, median 1.12x**.
+        #
+        # Und es ist BIT-IDENTISCH -- in allen neun lagen groesste abweichung
+        # 0.000e+00 bei gleicher schrittzahl. (Auf einer bahn, die numerisch
+        # davonlaeuft, verstaerkt sich unter `fastmath` eine unterschiedliche
+        # rundung von `k1 + k2 + k3` gegen `k1 + 2*k2` durchaus bis auf
+        # millimeter; auf den bahnen, die das spiel zeichnet, tut sie es
+        # nicht.)
+        k3_ax = k2_ax
+        k3_ay = k2_ay
 
         p4x = px + dt * vx + 0.5 * dt2 * k3_ax
         p4y = py + dt * vy + 0.5 * dt2 * k3_ay
@@ -967,7 +1070,66 @@ if NUMBA_AVAILABLE:
         G,
         use_time_dependent_bodies,
         body_memo,
+        max_dt_floor,
+        timescale_divisor,
     ):
+        # DIE DECKE IST ORTLICH, NICHT GLOBAL.
+        #
+        # `max_dt` kommt als die vom HORIZONT abgeleitete decke herein (viele
+        # tausend sekunden bei langer vorausschau). Sie darf aber nicht ueber
+        # die bahn springen, und wie eng sie sein muss, haengt davon ab, wo das
+        # schiff GERADE ist -- nicht davon, wo es beim anlegen des
+        # schnappschusses stand. Genau das war der fehler: `_make_snapshot`
+        # rechnete `t_char/divisor` EINMAL am schiff und legte das ergebnis
+        # ueber den ganzen lauf. Auf einer abflugbahn (Erdorbit -> Jupiter)
+        # ist das die zeitskala der ERDE, und die galt dann auch fuer die
+        # 2.85 jahre heliozentrischen reiseflugs, wo die fehlerkontrolle
+        # muehelos 30 000 s schritte nimmt. Gemessen bei 128x horizont:
+        # **24 633 schritte / 899 ms gegen 1 276 / 56 ms**, dieselbe bahn --
+        # das 16-fache, und praktisch die gesamte rechenzeit lag im fernfeld,
+        # wo sie nichts kauft.
+        #
+        # Ortlich gerechnet ist die decke nahe der Erde genauso eng wie zuvor
+        # (der boden `max_dt_floor` bindet dort ohnehin) und oeffnet sich erst,
+        # wenn das schiff die Erde wirklich verlassen hat. Fuer einen lauf, der
+        # in EINEM regime bleibt -- jede geschlossene umlaufbahn, also auch die
+        # lage aus §20 -- ist das bit fuer bit die alte rechnung.
+        #
+        # Die kosten sind fast null, und zwar wegen der REIHENFOLGE: die
+        # zeitskala wird zur zeit `local_t` ausgewertet, also genau der zeit,
+        # zu der gleich darauf k1 alle koerper braucht. Sie WAERMT damit den
+        # notizblock, statt zusaetzliche kepler-loesungen zu bezahlen; was
+        # bleibt, sind 28 wurzeln je schritt gegen 12 x 28 kepler-loesungen.
+        if timescale_divisor > 0.0:
+            t_char = _local_timescale_numba(
+                px,
+                py,
+                local_t,
+                body_x,
+                body_y,
+                body_m,
+                body_fixed,
+                body_scripted,
+                body_a,
+                body_e,
+                body_theta,
+                body_arg,
+                body_parent,
+                G,
+                use_time_dependent_bodies,
+                body_memo,
+            )
+            if t_char > 0.0:
+                orbit_cap = t_char / timescale_divisor
+                # Der boden ist die voreingestellte schrittdecke der
+                # qualitaetsstufe. Er darf nicht unterschritten werden -- sonst
+                # wuerde die ortliche decke im nahfeld STRENGER als die alte
+                # globale und der nahfeld-lauf teurer statt gleich teuer.
+                if orbit_cap < max_dt_floor:
+                    orbit_cap = max_dt_floor
+                if orbit_cap < max_dt:
+                    max_dt = orbit_cap
+
         if use_time_dependent_bodies == 0:
             return _rkn_adaptive_step_numba(
                 px,
@@ -1200,6 +1362,8 @@ if NUMBA_AVAILABLE:
         init_accumulated,
         init_proposed_dt,
         use_body_memo,
+        max_dt_floor,
+        timescale_divisor,
     ):
         # init_t / init_accumulated / init_proposed_dt machen den kernel
         # FORTSETZBAR: mit dem zustand, den ein frueherer lauf in stats[7:]
@@ -1376,6 +1540,8 @@ if NUMBA_AVAILABLE:
                     G,
                     use_time_dependent_bodies,
                     body_memo,
+                    max_dt_floor,
+                    timescale_divisor,
                 )
 
             rejected_steps += float(rejected_count)
@@ -2404,7 +2570,29 @@ class Predictor:
         # den ein integrator-schritt hoechstens ueberdecken darf, wenn der
         # horizont die decke anhebt. Siehe _make_snapshot.
         self.rkn_max_dt_timescale_divisor = 30.0
-        self.rkn_max_dt_ceiling = 30000.0
+        # Absolute obergrenze der schrittdecke. Sie war 30000 s, solange die
+        # bahn-klammer GLOBAL war und deshalb auf einer abflugbahn ausfiel --
+        # dann war dies der einzige schutz. Ortlich gerechnet binden bereits
+        # zwei PHYSIKALISCHE schranken (`desired` aus dem horizont und
+        # `t_char_local/30` aus der bahn), und diese dritte, unphysikalische
+        # war nur noch teuer: gemessen auf der Jupiter-abflugbahn bei 128x
+        # 2848 schritte / 103 ms gegen 1280 / 51 ms bei 120000 s, wobei 1280
+        # genau das schrittbudget `rkn_far_field_target_steps` ist -- darueber
+        # bindet `desired` und der wert saettigt (300000 s misst dasselbe).
+        # Der preis gegen eine referenz mit 300-s-decke: 2.501e6 -> 2.665e6 m
+        # auf 1.28e12 m horizont, also **0.0025 -> 0.0027 px**, wenn der ganze
+        # bogen im bild steht. Das NAHFELD ist bit-identisch (leo/ecc/mond bei
+        # 30k gegen 300k: gleiche schrittzahl, groesste abweichung 0.0), weil
+        # die bahn-klammer dort um zwei groessenordnungen tiefer liegt.
+        self.rkn_max_dt_ceiling = 120000.0
+        # ORTLICHE statt globale schrittdecke. False stellt den alten weg her:
+        # `t_char/divisor` EINMAL am schiff gemessen und ueber den ganzen lauf
+        # gelegt. Das ist der A/B-schalter fuer den vergleich (dieselbe rolle
+        # wie `use_body_memo` und `world.use_fast_integrator`) -- mit ihm
+        # zeigt `tests/warp_predictor_test.py` §24, dass beide wege auf jeder
+        # bahn, die IHR REGIME NICHT VERLAESST, bit-identisch rechnen, und dass
+        # der unterschied genau dort auftritt, wo er auftreten soll.
+        self.use_local_step_ceiling = True
         # Gemessene MITTLERE inverse geschwindigkeit ueber den horizont (s/m):
         # zeitspanne des letzten laufs geteilt durch seine bogenlaenge. 0.0 =
         # noch unbekannt, dann faellt _make_snapshot auf die momentangeschwin-
@@ -4121,6 +4309,8 @@ class Predictor:
                 context['use_time_dependent_bodies'], context['ref_index'],
                 context['kernel_t'], context['accumulated'], context['proposed_dt'],
                 1 if getattr(self, 'use_body_memo', True) else 0,
+                float(context.get('max_dt_floor', context['max_dt'])),
+                float(context.get('timescale_divisor', 0.0)),
             )
         except Exception:
             return 0
@@ -4408,11 +4598,23 @@ class Predictor:
                 # Im FERNFELD (heliozentrisch, t_char ~ 5e6 s) ist sie um
                 # groessenordnungen groesser als die decke und aendert nichts
                 # -- der fernfeld-gewinn bleibt also unangetastet.
-                t_char = self._characteristic_timescale(world, ship)
-                if t_char is not None and t_char > 0.0:
-                    orbit_cap = t_char / max(1e-9, float(self.rkn_max_dt_timescale_divisor))
-                    if orbit_cap < ceiling:
-                        ceiling = orbit_cap
+                #
+                # SIE WIRD HIER NICHT MEHR EINGERECHNET, SONDERN IM KERNEL JE
+                # SCHRITT. Hier war sie EINE zahl fuer den ganzen lauf, gemessen
+                # am schiff, wie es beim anlegen des schnappschusses stand --
+                # und damit falsch fuer jede bahn, die ihr regime verlaesst. Auf
+                # einer abflugbahn (Erdorbit -> Jupiter) galt die zeitskala der
+                # ERDE fuer die ganzen 2.85 jahre reiseflug: 24 633 schritte /
+                # 899 ms statt 1 276 / 56 ms. Der kernel wertet dieselbe formel
+                # jetzt am jeweiligen ORT aus (`_local_timescale_numba`), womit
+                # die klammer im nahfeld unveraendert greift und sich erst
+                # oeffnet, wenn das schiff den koerper wirklich verlassen hat.
+                if not self.use_local_step_ceiling:
+                    t_char = self._characteristic_timescale(world, ship)
+                    if t_char is not None and t_char > 0.0:
+                        orbit_cap = t_char / max(1e-9, float(self.rkn_max_dt_timescale_divisor))
+                        if orbit_cap < ceiling:
+                            ceiling = orbit_cap
                 eff_max_dt = max(eff_max_dt, min(desired, ceiling))
 
         snapshot = {
@@ -4440,6 +4642,18 @@ class Predictor:
             "aspi_use_rk4_fallback": bool(self.aspi_use_rk4_fallback),
             "rkn_min_dt": float(self.rkn_min_dt),
             "rkn_max_dt": float(eff_max_dt),
+            # Boden und teiler der ORTLICHEN decke. Der boden ist die
+            # schrittdecke der qualitaetsstufe -- die ortliche klammer darf nie
+            # darunter, sonst wuerde sie das nahfeld strenger rechnen als der
+            # alte globale weg. Teiler 0 = klammer aus.
+            "rkn_max_dt_floor": float(self.rkn_max_dt),
+            "rkn_max_dt_timescale_divisor": (
+                float(self.rkn_max_dt_timescale_divisor)
+                if (self.use_local_step_ceiling
+                    and self.rkn_adaptive_far_maxdt
+                    and float(self.rkn_max_dt_timescale_divisor) > 0.0)
+                else 0.0
+            ),
             "rkn_rtol": float(self.rkn_rtol),
             "rkn_atol_pos": float(self.rkn_atol_pos),
             "rkn_atol_vel": float(self.rkn_atol_vel),
@@ -4638,6 +4852,19 @@ class Predictor:
             use_time_dependent_bodies = 1 if bool(snapshot.get("use_time_dependent_bodies", True)) else 0
             ref_index = int(snapshot.get("reference_body_index", -1))
 
+            # Die ORTLICHE schrittdecke (siehe _rkn_adaptive_step_time_numba).
+            # `max_dt_floor` ist die schrittdecke der qualitaetsstufe -- unter
+            # sie darf die ortliche rechnung nie gehen, damit das nahfeld exakt
+            # so teuer bleibt wie zuvor. `timescale_divisor` = 0 schaltet die
+            # ganze ortliche klammer ab (der A/B-schalter fuer den bit-vergleich
+            # und der zustand, in dem `rkn_adaptive_far_maxdt` aus ist).
+            max_dt_floor = float(snapshot.get("rkn_max_dt_floor", max_dt))
+            timescale_divisor = float(snapshot.get("rkn_max_dt_timescale_divisor", 0.0))
+            if not math.isfinite(max_dt_floor) or max_dt_floor <= 0.0:
+                max_dt_floor = max_dt
+            if not math.isfinite(timescale_divisor) or timescale_divisor <= 0.0:
+                timescale_divisor = 0.0
+
             out, used, rkn_stats = _compute_distance_points_rkn_numba(
                 snapshot["ship_px"],
                 snapshot["ship_py"],
@@ -4676,6 +4903,8 @@ class Predictor:
                 float(snapshot.get("resume_accumulated", 0.0)),
                 float(snapshot.get("resume_proposed_dt", 0.0)),
                 1 if snapshot.get("use_body_memo", True) else 0,
+                max_dt_floor,
+                timescale_divisor,
             )
             # Alles aufheben, was noetig ist, um GENAU HIER weiterzurechnen.
             # Entscheidend ist, dass der SCHNAPPSCHUSS mitgehalten wird: die
@@ -4687,6 +4916,12 @@ class Predictor:
                 'base_dt': base_dt,
                 'min_dt': min_dt,
                 'max_dt': max_dt,
+                # Die ortliche decke muss mit fortgesetzt werden, sonst rechnet
+                # `_hold_extend_tail` den angehaengten schwanz nach einer
+                # anderen regel als den rest der kurve -- genau die naht, die
+                # der fortsetzbare kernel vermeiden soll.
+                'max_dt_floor': max_dt_floor,
+                'timescale_divisor': timescale_divisor,
                 'rtol': rtol,
                 'atol_pos': atol_pos,
                 'atol_vel': atol_vel,

@@ -823,6 +823,99 @@ check(gap2 > 1.0e6, "gegenprobe: 30 min versatz trennt die endkappen deutlich",
 check(e2.miss > 1.0e6, "und der fehlabstand steigt entsprechend",
       f"{e2.miss:.3e} m")
 
+# ----------------------------------------------------------------------
+print("\n§16 faint volllinie -- EIN ganzer umlauf, zeitrichtig im plot-frame")
+# ----------------------------------------------------------------------
+# `orbital_period` = 2*pi*sqrt(a^3/mu). Gegen den analytischen wert einer
+# bekannten bahn.
+_per_mond = orbit_lines.orbital_period(mond)
+_mu_em = G * erde.mass
+_per_analytic = 2.0 * math.pi * math.sqrt((3.844e8) ** 3 / _mu_em)
+close(_per_mond, _per_analytic, 1.0, "orbital_period(Mond) = 2*pi*sqrt(a^3/mu)")
+check(orbit_lines.orbital_period(sonne) is None,
+      "elternloser koerper hat keine periode", repr(orbit_lines.orbital_period(sonne)))
+
+# Der elternrelative offset des Mondes ist eine exakte Kepler-ellipse und
+# schliesst sich ueber eine periode auf sich selbst -- das ist der beleg,
+# dass die periode stimmt. (Die WELTbahn tut das nicht: die Erde traegt den
+# Mond ueber 27 tage ~4.5e10 m um die Sonne. Genau darum ist die volllinie
+# eine zeitkurve im plot-frame, keine starr transformierte weltbahn.)
+_t0 = 5000.0
+_full_t = _t0 + np.linspace(0.0, _per_mond, 256)
+_ft = orbit_lines.future_track(mond, _full_t)
+_par = orbit_lines.future_track(erde, _full_t)
+_rel = _ft - _par
+_gap = float(np.hypot(_rel[-1, 0] - _rel[0, 0], _rel[-1, 1] - _rel[0, 1]))
+check(_gap < 1e-6 * 3.844e8,
+      "Mond: elternrelative bahn schliesst sich ueber eine periode",
+      f"luecke {_gap:.3e} m von a=3.844e8 m")
+_gap_world = float(np.hypot(_ft[-1, 0] - _ft[0, 0], _ft[-1, 1] - _ft[0, 1]))
+check(_gap_world > 1e10, "gegenprobe: die WELTbahn schliesst sich nicht",
+      f"luecke {_gap_world:.3e} m (Erde traegt den Mond fort)")
+# GEGENPROBE: eine um 10 % falsche periode reisst die schleife auf.
+_wrong_t = _t0 + np.linspace(0.0, 1.1 * _per_mond, 256)
+_relw = orbit_lines.future_track(mond, _wrong_t) - orbit_lines.future_track(erde, _wrong_t)
+_gap_w = float(np.hypot(_relw[-1, 0] - _relw[0, 0], _relw[-1, 1] - _relw[0, 1]))
+check(_gap_w > 0.05 * 3.844e8, "gegenprobe: 10 % falsche periode -> klare luecke",
+      f"luecke {_gap_w:.3e} m")
+
+# Zeitrichtig im plot-frame: im nicht-rotierenden Sonnen-rahmen ist die
+# Erdbahn ueber ein jahr eine geschlossene schleife -- durch DIESELBE
+# transformationspipeline wie die enthuellte spur.
+_erde2 = make_body("Erde", 5.972e24, 6.371e6, a=1.496e11, e=0.0167, parent=sonne)
+_erde2.theta = 0.0
+_erde2._kepler_ref_theta = 0.0
+_erde2._kepler_ref_time = 0.0
+_per_erde = orbit_lines.orbital_period(_erde2)
+_sf = BodyCentredNonRotatingReferenceFrame(sonne)
+_sf.set_epoch_time(0.0)
+_et = np.linspace(0.0, _per_erde, 256)
+_etrack = orbit_lines.future_track(_erde2, _et)
+_tab = orbit_lines.FrameAffineTable(_sf, 0.0, _per_erde, knot_angle=0.12)
+check(_tab.valid, "volllinien-tabelle gebaut (jahr, groeber)",
+      f"{_tab.knots} knoten, {_tab.probes} sondierungen")
+_fx, _fy = _tab.project(_et, np.ascontiguousarray(_etrack[:, 0]),
+                        np.ascontiguousarray(_etrack[:, 1]))
+_loop_gap = float(np.hypot(_fx[-1] - _fx[0], _fy[-1] - _fy[0]))
+_loop_r = float(np.hypot(_fx, _fy).mean())
+check(_loop_gap < 1e-4 * _loop_r,
+      "Erdbahn schliesst sich im Sonnen-rahmen zur schleife",
+      f"luecke {_loop_gap:.3e} m von r~{_loop_r:.3e} m")
+check(1.4e11 < _loop_r < 1.6e11, "und sie liegt bei ~1 AE",
+      f"r~{_loop_r:.3e} m")
+
+# OrbitLineSet fuellt full_track: fenster startet am praediktor-anfang und
+# spannt genau eine periode.
+oset16 = orbit_lines.OrbitLineSet(**CFG, full_orbit_enabled=True,
+                                  full_samples=256, full_max_span_s=4.0e8)
+pts16 = line_missing_moon_by(0.5 * soi)
+for _ in range(5):
+    oset16.update(bodies_list, pts16, sim_time=T0, real_dt=1.0 / 60.0)
+e16 = oset16.get(mond)
+check(e16.full_track is not None and e16.full_track.shape == (256, 2),
+      "Mond: full_track gefuellt", str(None if e16.full_track is None else e16.full_track.shape))
+close(float(e16.full_track_t[0]), float(pts16[0, 2]), 1.0,
+      "full_track startet am fensteranfang des praediktors")
+close(float(e16.full_track_t[-1] - e16.full_track_t[0]), _per_mond, 1.0,
+      "und spannt genau eine umlaufperiode")
+check(e16.full_track_len > 0.0, "full_track_len wird mitgefuehrt",
+      f"{e16.full_track_len:.3e} m")
+
+# Der deckel: ein koerper mit periode ueber full_max_span_s bekommt keine.
+oset_cap16 = orbit_lines.OrbitLineSet(**CFG, full_orbit_enabled=True,
+                                      full_max_span_s=1.0e6)
+for _ in range(5):
+    oset_cap16.update(bodies_list, pts16, sim_time=T0, real_dt=1.0 / 60.0)
+check(oset_cap16.get(mond).full_track is None,
+      "periode ueber dem deckel -> keine volllinie",
+      f"periode {_per_mond:.3e} s > 1e6 s")
+
+# Abgeschaltet -> nichts.
+oset_off16 = orbit_lines.OrbitLineSet(**CFG, full_orbit_enabled=False)
+for _ in range(5):
+    oset_off16.update(bodies_list, pts16, sim_time=T0, real_dt=1.0 / 60.0)
+check(oset_off16.get(mond).full_track is None, "full_orbit_enabled=False -> keine volllinie")
+
 print()
 if FAILURES:
     print(f"FEHLGESCHLAGEN: {len(FAILURES)}")

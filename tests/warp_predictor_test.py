@@ -38,7 +38,7 @@ except Exception:
 
 import numpy as np
 
-from vec import G
+from vec import G, Vec2
 from loader import ConfigLoader, SystemLoader
 from predictor import Predictor
 from world import world as World
@@ -2220,6 +2220,158 @@ _old23 = float(np.max(np.hypot(_ax23 - _bx23, _ay23 - _by23)))
 check(_old23 > 1.0e6,
       "gegenprobe: ohne deckel wandert dieselbe linie um megameter",
       f"groesste abweichung {_old23:.4e} m, nur noch {_unc23.shape[0]} punkte")
+
+
+
+# ---------------------------------------------------------------------------
+print()
+print("24. die schrittdecke ist ORTLICH, nicht global")
+# Der fehler: `_make_snapshot` mass `t_char/divisor` EINMAL am schiff und legte
+# das ergebnis ueber den ganzen lauf. Auf einer bahn, die ihr regime verlaesst
+# -- ein Hohmann-abflug aus dem Erdorbit zum Jupiter -- galt damit die
+# zeitskala der ERDE auch fuer die 2.85 jahre heliozentrischen reiseflugs, wo
+# die fehlerkontrolle muehelos zehntausende sekunden nimmt. Gemessen bei 128x
+# horizont: 56 423 schritte / 1936 ms gegen 1 280 / 50 ms.
+#
+# Beide seiten der messung sind wichtig und werden beide geprueft:
+#   a) auf einer bahn, die IN IHREM REGIME BLEIBT, muss der ortliche weg
+#      BIT-IDENTISCH zum alten rechnen -- die klammer liegt dort ohnehin unter
+#      dem boden `rkn_max_dt` und bindet nicht;
+#   b) auf der abflugbahn muss er ein vielfaches billiger sein.
+
+_BASE24, _SPACING24, _MAXP24 = 1e10, 1e6, 40000
+
+
+def _scene24():
+    w, ship, p = build()
+    p.async_compute = False
+    # OHNE EINEN WELTSCHRITT STEHEN ALLE KOERPER IM URSPRUNG. `SystemLoader`
+    # legt sie mit position (0,0) an; erst `update_planets` setzt sie auf ihre
+    # bahn. Wer vorher misst, setzt das schiff neben die Sonne statt neben die
+    # Erde und misst eine sofortige divergenz (gemessen: 8 statt 1966 schritte).
+    advance(w, 1.0)
+    return w, ship, p
+
+
+def _bvel24(w, b, h=0.5):
+    """Bahngeschwindigkeit eines geskripteten koerpers.
+
+    `body.velocity` ist bei allen 27 geskripteten koerpern (0, 0) -- sie werden
+    kepler-fortgeschrieben, nie integriert, das feld wird also nie geschrieben
+    (dasselbe befund wie background_test §4c). Wer eine kreisbahngeschwindigkeit
+    daraufaddiert, setzt das schiff 29.8 km/s rueckwaerts relativ zur Erde und
+    misst eine fluchtbahn statt eines nahfeld-orbits.
+    """
+    p1 = b.position_at_time(w.time - h)
+    p2 = b.position_at_time(w.time + h)
+    return ((p2.x - p1.x) / (2.0 * h), (p2.y - p1.y) / (2.0 * h))
+
+
+def _orbit24(w, ship, rp, ecc):
+    b = next(q for q in w.body if getattr(q, 'name', '') == 'Erde')
+    mu = G * b.mass
+    a = rp / (1.0 - ecc)
+    v = math.sqrt(mu * (2.0 / rp - 1.0 / a))
+    bx, by = _bvel24(w, b)
+    ship.position = Vec2(b.position.x + rp, b.position.y)
+    ship.velocity = Vec2(bx, by + v)
+
+
+def _departure24(w, ship, park_r):
+    sun = next(q for q in w.body if getattr(q, 'name', '') == 'Sonne')
+    erde = next(q for q in w.body if getattr(q, 'name', '') == 'Erde')
+    jup = next(q for q in w.body if getattr(q, 'name', '') == 'Jupiter')
+    mu_s, mu_e = G * sun.mass, G * erde.mass
+    ex, ey = erde.position.x - sun.position.x, erde.position.y - sun.position.y
+    r1 = math.hypot(ex, ey)
+    r2 = math.hypot(jup.position.x - sun.position.x, jup.position.y - sun.position.y)
+    a_t = 0.5 * (r1 + r2)
+    v_helio = math.sqrt(mu_s * (2.0 / r1 - 1.0 / a_t))
+    ux, uy = ex / r1, ey / r1
+    tx, ty = -uy, ux
+    v_inf = v_helio - math.sqrt(mu_s / r1)
+    evx, evy = _bvel24(w, erde)
+    v_dep = math.sqrt(2.0 * mu_e / park_r + v_inf * v_inf)
+    ship.position = Vec2(erde.position.x + ux * park_r, erde.position.y + uy * park_r)
+    ship.velocity = Vec2(evx + tx * v_dep, evy + ty * v_dep)
+
+
+def _run24(setup, mult, local, ceiling=None):
+    w, ship, p = _scene24()
+    p.use_local_step_ceiling = bool(local)
+    if ceiling is not None:
+        p.rkn_max_dt_ceiling = float(ceiling)
+    setup(w, ship)
+    wanted = _BASE24 * mult
+    p.set_num_points(int(min(_MAXP24, max(1, math.ceil(wanted / _SPACING24)))))
+    p.set_length(wanted)
+    p.reset()
+    best = float('inf')
+    for _ in range(3):
+        _t0 = time.perf_counter()
+        p._compute_full(ship, w)
+        best = min(best, (time.perf_counter() - _t0) * 1000.0)
+    pts = np.array(p.points, dtype=np.float64)
+    steps = int(p.rkn_last_accepted_steps)
+    p.close()
+    return pts, best, steps
+
+
+# (a) im eigenen regime: bit-identisch, bei gleicher schrittzahl.
+for _name24, _setup24, _mult24 in (
+    ("LEO kreisbahn 6.8 Mm, 1x", lambda w, s: _orbit24(w, s, 6.8e6, 0.0), 1),
+    ("LEO kreisbahn 6.8 Mm, 64x", lambda w, s: _orbit24(w, s, 6.8e6, 0.0), 64),
+    ("exzentrisch rp 20 Mm e=0.6, 64x", lambda w, s: _orbit24(w, s, 2.0e7, 0.6), 64),
+    ("mondtransfer rp 7 Mm e=0.966, 4x", lambda w, s: _orbit24(w, s, 7.0e6, 0.966), 4),
+):
+    _a24, _msa24, _sa24 = _run24(_setup24, _mult24, local=False, ceiling=30000.0)
+    _b24, _msb24, _sb24 = _run24(_setup24, _mult24, local=True, ceiling=30000.0)
+    _same24 = _a24.shape == _b24.shape and np.array_equal(_a24, _b24)
+    _dev24 = (float(np.max(np.hypot(_a24[:, 0] - _b24[:, 0], _a24[:, 1] - _b24[:, 1])))
+              if _a24.shape == _b24.shape else float('nan'))
+    check(_same24 and _sa24 == _sb24,
+          f"{_name24}: ortliche decke ist bit-identisch zur globalen",
+          f"{_sa24} gegen {_sb24} schritte, groesste abweichung {_dev24:.3e} m")
+
+# (b) auf der abflugbahn: ein vielfaches billiger, bei gleichem bogen.
+for _name24, _park24, _mult24 in (
+    ("abflug aus 7 Mm parkbahn, 128x", 7.0e6, 128),
+    ("abflug aus 100 Mm, 128x", 1.0e8, 128),
+):
+    _setup24 = (lambda pr: (lambda w, s: _departure24(w, s, pr)))(_park24)
+    _a24, _msa24, _sa24 = _run24(_setup24, _mult24, local=False, ceiling=30000.0)
+    _b24, _msb24, _sb24 = _run24(_setup24, _mult24, local=True)
+    _ratio24 = _sa24 / max(1, _sb24)
+    check(_ratio24 >= 10.0,
+          f"{_name24}: die ortliche decke spart ein vielfaches",
+          f"{_sa24} -> {_sb24} schritte (faktor {_ratio24:.1f}), "
+          f"{_msa24:.0f} -> {_msb24:.0f} ms")
+
+    # ... und sie zeichnet dieselbe bahn. Gemessen gegen den TEUREN lauf, auf
+    # dem gemeinsamen zeitfenster; die schranke ist das zeichen-budget des
+    # renderers (0.3 px), umgerechnet bei einem zoom, der den ganzen bogen
+    # ins bild legt (1280 px auf den horizont).
+    _lo24 = max(_a24[0, 2], _b24[0, 2])
+    _hi24 = min(_a24[-1, 2], _b24[-1, 2])
+    _m24 = (_b24[:, 2] >= _lo24) & (_b24[:, 2] <= _hi24)
+    _x24 = np.interp(_b24[_m24, 2], _a24[:, 2], _a24[:, 0])
+    _y24 = np.interp(_b24[_m24, 2], _a24[:, 2], _a24[:, 1])
+    _d24 = float(np.max(np.hypot(_x24 - _b24[_m24, 0], _y24 - _b24[_m24, 1])))
+    _px24 = _d24 * (1280.0 / (_BASE24 * _mult24))
+    check(_px24 <= 0.3,
+          f"{_name24}: und es ist dieselbe bahn",
+          f"{_d24:.3e} m = {_px24:.4f} px (budget 0.3 px, ganzer bogen im bild)")
+
+# Gegenprobe: der punkt der uebung ist, dass die alte regel auf DIESER bahn
+# eine zeitskala benutzt, die das schiff schon nach stunden verlassen hat.
+_w24, _s24, _p24 = _scene24()
+_departure24(_w24, _s24, 7.0e6)
+_tchar24 = _w24.characteristic_timescale(_s24)
+_p24.close()
+check(_tchar24 / 30.0 < 1500.0,
+      "gegenprobe: am abflugpunkt ist die bahn-klammer enger als der boden",
+      f"t_char/30 = {_tchar24 / 30.0:.1f} s gegen boden 1500 s -- "
+      f"global gerechnet gilt das fuer die ganzen 2.85 jahre")
 
 
 print()
