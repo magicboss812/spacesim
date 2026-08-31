@@ -1768,6 +1768,11 @@ try:
             float(_snap19["G"]),
             1 if bool(_snap19.get("use_time_dependent_bodies", True)) else 0,
             int(_p19.apsis_max_markers), int(skip_head),
+            # Ob die tangenten-spalten benutzbar sind, entscheidet der
+            # aufrufer -- im kernel laesst sich das unter `fastmath` nicht
+            # pruefen (dort ist sogar `nan == nan` wahr). Siehe
+            # Predictor._points_have_tangents.
+            1 if _p19._points_have_tangents(points) else 0,
         )
         return out[:int(count)].copy()
 

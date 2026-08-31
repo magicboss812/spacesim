@@ -535,6 +535,13 @@ class _BodyEphemerisMixin:
     # punkten als knots setzt — sonst exakt → nie langsamer als zuvor.
     frame_origin_interp_max_knots = 256
 
+    # Mindestzahl knoten je UMLAUF des ursprungskoerpers. Reicht
+    # `frame_origin_interp_max_knots` dafuer nicht, wird gar nicht mehr
+    # interpoliert, sondern im stapel exakt gerechnet -- siehe die messwerte
+    # in `set_origin_interp_window`. 16 knoten je umlauf halten die kubik
+    # weit unter einem pixel; darunter beginnt sie zu raten.
+    frame_origin_interp_min_knots_per_period = 16.0
+
     def _init_ephemeris(self) -> None:
         self._epoch_time_s = 0.0
         self._epoch_initialized = False
@@ -547,6 +554,10 @@ class _BodyEphemerisMixin:
         # origin-interpolation: q<=0 bedeutet "exakt" (deaktiviert).
         self._origin_interp_q = 0.0
         self._origin_interp_t0 = 0.0
+        # Gesetzt, wenn das gitter die bahn des ursprungs nicht aufloest: dann
+        # rechnet der STAPELweg exakt weiter, statt in die skalare schleife zu
+        # fallen (siehe set_origin_interp_window).
+        self._origin_exact_batch = False
 
     def set_epoch_time(self, time_s: float) -> None:
         try:
@@ -564,10 +575,43 @@ class _BodyEphemerisMixin:
         self._angle_cache = {}
         self._virtual_pos_cache = {}
 
+    @staticmethod
+    def _chain_fastest_period(body, max_depth: int = 8):
+        """Kuerzeste umlaufzeit in der elternkette von `body`, oder None.
+
+        Die WELT-position eines mondes traegt die frequenzen aller glieder
+        seiner kette; die schnellste davon bestimmt, wie fein ein zeitgitter
+        sein muss, um sie ueberhaupt darzustellen. Gleiche formel wie
+        `orbit_lines.orbital_period`, hier eigenstaendig, damit
+        reference_frames keine abhaengigkeit nach oben bekommt.
+        """
+        best = None
+        cur = body
+        depth = 0
+        while cur is not None and depth < max_depth:
+            parent = getattr(cur, "is_moon_of", None)
+            if parent is None:
+                break
+            try:
+                a = float(getattr(cur, "semi_major_axis", 0.0) or 0.0)
+                mu = NEWTONIAN_G * float(getattr(parent, "mass", 0.0) or 0.0)
+            except Exception:
+                a = 0.0
+                mu = 0.0
+            if a > 0.0 and mu > 0.0:
+                per = 2.0 * math.pi * math.sqrt(a * a * a / mu)
+                if math.isfinite(per) and per > 0.0 and (best is None or per < best):
+                    best = per
+            cur = parent
+            depth += 1
+        return best
+
     def set_origin_interp_window(self, t0: float, t1: float, sample_count: int = 0) -> None:
-        # Aktiviert lineare interpolation der origin-position zwischen gleichmäßig
-        # über [t0, t1] verteilten knots — aber nur, wenn mehr punkte als knots
-        # projiziert werden (sonst wäre exakt günstiger). q<=0 => exakt.
+        # Aktiviert kubische interpolation der origin-position zwischen
+        # gleichmäßig über [t0, t1] verteilten knots — aber nur, wenn mehr
+        # punkte als knots projiziert werden (sonst wäre exakt günstiger).
+        # q<=0 => exakt.
+        self._origin_exact_batch = False
         try:
             a = float(t0)
             b = float(t1)
@@ -579,6 +623,51 @@ class _BodyEphemerisMixin:
         if (not math.isfinite(span)) or span <= 0.0 or int(sample_count) <= knots:
             self._origin_interp_q = 0.0
             return
+
+        # EIN GITTER, DAS DIE BAHN DES URSPRUNGS NICHT AUFLOEST, IST KEIN
+        # GITTER. `q = span/256` haengt allein am horizont des praediktors und
+        # weiss nichts von dem koerper, der hier im ursprung steht. Fuer einen
+        # planeten ist das harmlos (Neptun laeuft in 42 tagen um 0.0044 rad
+        # weiter — gemessene abweichung 0.0 px). Fuer einen MOND ist es das
+        # nicht: bei 3650 tagen horizont ist q = 14 tage gegen eine
+        # umlaufzeit von 8.7 tagen, die kubik raet also. Gemessen als
+        # verschiebung der gezeichneten linie gegen den exakten wert — und
+        # damit gegen die Ap/Pe-marker, die nach dem loeschen des fensters
+        # gezeichnet werden und deshalb exakt sind:
+        #
+        #   ursprung   horizont   q/periode   linie<->marker   je frame
+        #   Neptun       3650 d       0.00         0.0 px        0.0 px
+        #   Mond         3650 d       0.52       452.2 px      451.7 px
+        #   Triton       3650 d       2.43       636.0 px      247.8 px
+        #   Titania      3650 d       1.64       767.2 px      194.0 px
+        #
+        # Die spalte "je frame" ist der punkt: das fenster beginnt bei der
+        # KOPFZEIT der punkteliste, und die rueckt im zeitraffer jeden frame
+        # vor. Also verschiebt sich das knotengitter, und mit ihm die ganze
+        # linie — an derselben absoluten zeit, auf einer bit-identischen
+        # kurve. Das ist das "wackeln wie ein schwingendes seil".
+        #
+        # Mehr knoten helfen hier nicht: Titania ueber 3650 tage bei 16
+        # knoten je umlauf braucht 6704 stuetzstellen, mehr als die ~4000
+        # punkte, die ueberhaupt projiziert werden. Dann ist EXAKT das
+        # billigere und zugleich richtige — und zwar im stapel, nicht in der
+        # skalaren schleife.
+        # Derselbe ursprungs-koerper, den `orbit_lines.frame_origin_body`
+        # bestimmt -- TargetBodyDirection nennt ihn `target_body`.
+        origin_body = None
+        for _attr in ("primary_body", "target_body", "child_body"):
+            origin_body = getattr(self, _attr, None)
+            if origin_body is not None:
+                break
+        period = self._chain_fastest_period(origin_body)
+        if period is not None and period > 0.0:
+            per_knot = max(1.0, float(self.frame_origin_interp_min_knots_per_period))
+            if span / knots > period / per_knot:
+                self._origin_interp_t0 = a
+                self._origin_interp_q = 0.0
+                self._origin_exact_batch = True
+                return
+
         self._origin_interp_t0 = a
         self._origin_interp_q = span / knots
 
@@ -692,12 +781,32 @@ class _BodyEphemerisMixin:
         if _np is None or body is None:
             return None
         q = float(self._origin_interp_q)
-        if q <= 0.0:
+        if q <= 0.0 and not getattr(self, "_origin_exact_batch", False):
             return None
 
         t = _np.asarray(times, dtype=_np.float64)
         if t.size == 0:
             return (_np.empty(0, dtype=_np.float64), _np.empty(0, dtype=_np.float64))
+
+        if q <= 0.0:
+            # EXAKT, ABER IM STAPEL. Das knotengitter kann die bahn dieses
+            # ursprungs nicht darstellen (mond-frames bei langem horizont),
+            # also wird gar nicht erst interpoliert. Die skalare schleife
+            # waere hier die falsche antwort: sie rechnet dasselbe, nur je
+            # punkt in Python. `_knot_positions_batch` ist derselbe
+            # rechenweg wie fuer die knoten, nur ueber die punktzeiten.
+            #
+            # OHNE cache-abgleich (`reconcile=False`), und das ist absicht:
+            # diese zeiten kommen genau einmal vor, ein eintrag dafuer wird
+            # nie wieder gelesen. Der abgleich kostete gemessen 2.4 der
+            # 3.3 ms und haette `_position_cache` je frame um 12 000
+            # eintraege wachsen lassen. Gerechnet wird davon unabhaengig
+            # dasselbe -- der abgleich entscheidet nur, WELCHER von zwei
+            # bit-gleichen wegen den wert zuerst geschrieben hat.
+            quantum = float(getattr(self, "frame_time_quantization_s", 0.0) or 0.0)
+            qt = _np.round(t / quantum) * quantum if quantum > 0.0 else t
+            return self._knot_positions_batch(
+                body, _np.ascontiguousarray(qt), reconcile=False)
 
         t0 = float(self._origin_interp_t0)
         n = _np.floor((t - t0) / q)
@@ -748,7 +857,7 @@ class _BodyEphemerisMixin:
                 self._cubic_4pt(knot_y[i], knot_y[i + 1],
                                   knot_y[i + 2], knot_y[i + 3], frac))
 
-    def _knot_positions_batch(self, body, qt, depth: int = 0):
+    def _knot_positions_batch(self, body, qt, depth: int = 0, reconcile: bool = True):
         """Stapelfassung von _body_world_position_exact ueber ein zeit-gitter.
 
         `qt` ist ein float64-array BEREITS QUANTISIERTER zeiten. Gibt
@@ -806,7 +915,7 @@ class _BodyEphemerisMixin:
                 wx = _np.full(dt.shape, px, dtype=_np.float64)
                 wy = _np.full(dt.shape, py, dtype=_np.float64)
         else:
-            par = self._knot_positions_batch(parent, qt, depth + 1)
+            par = self._knot_positions_batch(parent, qt, depth + 1, reconcile)
             if par is None:
                 return None
             rel = self._relative_position_batch(body, parent, dt)
@@ -817,6 +926,20 @@ class _BodyEphemerisMixin:
 
         wx = _np.ascontiguousarray(wx, dtype=_np.float64)
         wy = _np.ascontiguousarray(wy, dtype=_np.float64)
+
+        if not reconcile:
+            # EINMALIGE ZEITEN GEHOEREN NICHT IN DEN CACHE. Der abgleich
+            # unten existiert fuer das KNOTENGITTER: dieselben ~260 zeiten
+            # werden von beiden wegen und ueber viele frames wieder
+            # abgefragt, und dort ist bit-gleichheit zwischen skalar und
+            # stapel die zusicherung. Der exakt-stapel dagegen wertet die
+            # PUNKTzeiten der linie aus -- 4000 stueck, in jedem frame
+            # andere. Gemessen frisst der abgleich dort 90 % der zeit
+            # (2.4 ms von 3.3 ms bei 4000 punkten und einer zweigliedrigen
+            # kette, 240 000 dict-zugriffe), und er wuerde `_position_cache`
+            # um 12 000 eintraege JE FRAME aufblaehen, die nie wieder jemand
+            # liest. Gerechnet wird oben ohnehin dasselbe.
+            return wx, wy
 
         cache = self._position_cache
         bid = id(body)

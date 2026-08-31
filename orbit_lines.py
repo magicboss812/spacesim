@@ -238,6 +238,53 @@ def orbital_period(body):
     return 2.0 * math.pi * math.sqrt(a * a * a / mu)
 
 
+def chain_periods(body, max_depth=8):
+    """`{id(glied): umlaufzeit}` fuer jedes glied der elternkette von `body`.
+
+    Ein "glied" ist ein koerper samt seiner bahn um seinen elter. Die
+    WELT-bewegung eines mondes ist die summe aller glieder seiner kette.
+    """
+    out = {}
+    cur = body
+    depth = 0
+    while cur is not None and depth < max_depth:
+        per = orbital_period(cur)
+        if per is not None and per > 0.0:
+            out[id(cur)] = per
+        cur = getattr(cur, 'is_moon_of', None)
+        depth += 1
+    return out
+
+
+def relative_min_period(body, origin_body):
+    """Schnellste umlaufzeit, die in `koerper(t) - ursprung(t)` steckt.
+
+    DIE UMLAUFZEIT DES KOERPERS UM SEINEN ELTER IST HIER DIE FALSCHE GROESSE,
+    sobald der plot-frame nicht auf diesem elter sitzt. Gezeichnet wird die
+    DIFFERENZ zweier weltbahnen, und die traegt die frequenzen BEIDER
+    elternketten -- bis auf die glieder, die beide gemeinsam haben, denn die
+    heben sich in der differenz exakt weg.
+
+    Beispiel aus dem fehlerbericht: im Titania-rahmen laeuft *Uranus* einmal
+    je 8.7 tagen um den bildmittelpunkt (es ist Titanias bahn, mit
+    umgekehrtem vorzeichen) -- nicht einmal je 84 jahren. Nach seiner eigenen
+    periode bemessen sah das fenster harmlos aus, und die spur aliaste
+    trotzdem zum sternpolygon.
+
+    Rueckgabe: sekunden, oder None wenn keine der beiden ketten eine bahn
+    hergibt (dann gibt es auch nichts zu verfehlen).
+    """
+    pb = chain_periods(body)
+    if origin_body is None or origin_body is body:
+        vals = list(pb.values())
+    else:
+        po = chain_periods(origin_body)
+        shared = pb.keys() & po.keys()
+        vals = [v for k, v in pb.items() if k not in shared]
+        vals += [v for k, v in po.items() if k not in shared]
+    return min(vals) if vals else None
+
+
 def soi_radius(body):
     """Radius der einflusssphaere, `a * (m / m_elter)^0.4`, oder None.
 
@@ -352,6 +399,7 @@ class OrbitLineEntry:
     __slots__ = ('body', 'alpha', 'target', 'floor', 'reveal',
                  'reveal_target', 'miss', 't_min',
                  'track', 'track_t', 'track_len',
+                 'draw_track', 'draw_track_t', 'draw_track_len', 'draw_shared',
                  'full_track', 'full_track_t', 'full_track_len')
 
     def __init__(self, body):
@@ -368,6 +416,13 @@ class OrbitLineEntry:
         self.track = None
         self.track_t = None
         self.track_len = 0.0
+        # Was WIRKLICH gezeichnet wird. Meist dieselben arrays wie oben
+        # (`draw_shared`), sonst ein eigenes, feineres gitter -- siehe
+        # OrbitLineSet._draw_grid_for.
+        self.draw_track = None
+        self.draw_track_t = None
+        self.draw_track_len = 0.0
+        self.draw_shared = True
         # Die faint volllinie: EIN ganzer umlauf, im plot-frame, hinter der
         # hellen enthuellten spur gezeichnet.
         self.full_track = None
@@ -395,8 +450,54 @@ class OrbitLineSet:
                  reveal_full=10.0, reveal_fade=30.0,
                  alpha_max=0.85, alpha_floor=0.10, alpha_floor_focus=0.35,
                  fade_rate=6.0, full_orbit_enabled=True, full_samples=256,
-                 full_max_span_s=7.5e7):
+                 full_max_span_s=7.5e7,
+                 samples_per_period=64.0, max_track_samples=1024,
+                 max_periods_drawn=16.0):
         self.track_samples = max(8, int(track_samples))
+        # EIN BODEN FUER DIE WINKELAUFLOESUNG DER SPUR.
+        #
+        # `track_samples` stichproben werden GLEICHMAESSIG ueber das
+        # praediktor-fenster gelegt. Das fenster ist aber das des SCHIFFS,
+        # und ein mond kuemmert sich nicht darum: gemessen ueber ein fenster
+        # von 30 jahren (transfer Erde -> Neptun) bekommt Triton bei 192
+        # stichproben **3527 grad je stichprobe** -- fast zehn umlaeufe
+        # zwischen zwei benachbarten punkten. Gezeichnet wird daraus ein
+        # sternpolygon, dessen sehnen quer durch die bahn schneiden; die
+        # linie ist dann nicht mehr grob, sondern schlicht falsch.
+        #
+        # Zwei schrauben, und die reihenfolge ist wichtig:
+        #
+        # * `samples_per_period` ist der boden: so viele stuetzstellen je
+        #   umlauf, mindestens. 64 gibt 5.6 grad je stichprobe, pfeilhoehe
+        #   0.0012 R -- bei einer bahn von 230 px radius sind das 0.28 px und
+        #   damit gerade `orbit_line_tolerance_px` (0.3).
+        # * `max_periods_drawn` deckelt, wie viele umlaeufe ueberhaupt
+        #   GEZEICHNET werden -- vorbelegt mit genau dem, was
+        #   `max_track_samples / samples_per_period` traegt (16). Mehr
+        #   stichproben helfen ab da nicht mehr: 1871 uebereinanderliegende
+        #   umlaeufe sind auch sauber abgetastet nur eine gefuellte scheibe,
+        #   und sie kosten 1.5 mio Kepler-loesungen. Bei ueberschreitung wird
+        #   deshalb nur das ENDE des fensters gezeichnet -- die letzten
+        #   umlaeufe vor der ankunft. Das erhaelt genau das, worauf die
+        #   anzeige hinauslaeuft: die endkappe steht weiterhin beim koerper
+        #   zur ENDZEIT des praediktors, also da, wo man ihn trifft. (In
+        #   einem nicht rotierenden rahmen fallen die umlaeufe ohnehin
+        #   aufeinander, dort ist der unterschied zwischen 3 und 16 keiner.)
+        #
+        # GEKAPPT WIRD ERST, WENN VERFEINERN NICHT MEHR REICHT. Eine spur
+        # ueber zehn Mars-umlaeufe war vorher schon brauchbar (10 grad je
+        # stichprobe); sie bekommt jetzt 649 stichproben statt 192 und bleibt
+        # vollstaendig. Kuerzer wird nur, was ohne kappung gar nicht mehr
+        # darstellbar waere.
+        #
+        # Was sich damit aendert: die enthuellung rollt sich dann nicht mehr
+        # von der HEUTIGEN position des koerpers ab, sondern vom anfang des
+        # gezeichneten fensters. Fuer koerper, deren periode laenger ist als
+        # das fenster (alle planeten), aendert sich gar nichts -- die spur
+        # bleibt bit-identisch das gemeinsame gitter.
+        self.samples_per_period = max(8.0, float(samples_per_period))
+        self.max_track_samples = max(int(track_samples), int(max_track_samples))
+        self.max_periods_drawn = max(0.25, float(max_periods_drawn))
         # Faint volllinie ueber einen ganzen umlauf. `full_max_span_s` kappt
         # sie bei ~810 tagen: ab Jupiter waere die periode so lang, dass die
         # 3-punkt-schaetzung der knotenzahl im rotierenden frame aliast und
@@ -445,16 +546,40 @@ class OrbitLineSet:
 
     # -- takt ---------------------------------------------------------
     def update(self, bodies, points, sim_time, real_dt,
-               reference_body=None, selected_body=None, generation=None):
-        if self._needs_recompute(points, sim_time, generation):
-            self._recompute(bodies, points)
+               reference_body=None, selected_body=None, generation=None,
+               origin_body=None):
+        if self._needs_recompute(points, sim_time, generation,
+                                 reference_body, selected_body, origin_body):
+            # Die brennpunkt-koerper gehen mit hinein: nur fuer sie und die
+            # angenaeherten wird ueberhaupt ein eigenes zeichen-gitter gebaut
+            # (siehe _build_draw_track) -- fuer die uebrigen 20+ waere es
+            # arbeit fuer eine linie, die nie erscheint.
+            focus = set()
+            if reference_body is not None:
+                focus.add(id(reference_body))
+            if selected_body is not None:
+                focus.add(id(selected_body))
+            self._recompute(bodies, points, focus, origin_body)
             self._last_sim_time = float(sim_time)
         self._retarget(reference_body, selected_body)
         self._ease(real_dt)
 
-    def _needs_recompute(self, points, sim_time, generation):
+    def _needs_recompute(self, points, sim_time, generation,
+                         reference_body=None, selected_body=None,
+                         origin_body=None):
         count = 0 if points is None else int(np.asarray(points).shape[0])
-        key = (generation, None if points is None else id(points), count)
+        # BRENNPUNKT UND URSPRUNG GEHOEREN IN DEN SCHLUESSEL. Beide steuern,
+        # WELCHE koerper ein eigenes zeichen-gitter bekommen und wie fein es
+        # sein muss (_build_draw_track). Ohne sie zeigte eine frisch
+        # angeklickte linie erst das grobe gemeinsame gitter und sprang erst
+        # bei der naechsten neuberechnung glatt -- genau das "low poly beim
+        # anwaehlen, dann sofort glatt" aus dem bericht. Ein klick oder ein
+        # rahmenwechsel ist ein seltenes ereignis; die neuberechnung kostet
+        # 0.67 ms und laeuft dann einmal.
+        key = (generation, None if points is None else id(points), count,
+               None if reference_body is None else id(reference_body),
+               None if selected_body is None else id(selected_body),
+               None if origin_body is None else id(origin_body))
         if key != self._last_key:
             self._last_key = key
             return True
@@ -464,7 +589,8 @@ class OrbitLineSet:
             return abs(float(sim_time) - self._last_sim_time) >= self._sample_step
         return False
 
-    def _recompute(self, bodies, points):
+    def _recompute(self, bodies, points, focus_ids=None, origin_body=None):
+        focus_ids = focus_ids or ()
         t0 = time.perf_counter()
         self.recomputes += 1
 
@@ -512,6 +638,10 @@ class OrbitLineSet:
                 entry.track = None
                 entry.track_t = None
                 entry.track_len = 0.0
+                entry.draw_track = None
+                entry.draw_track_t = None
+                entry.draw_track_len = 0.0
+                entry.draw_shared = True
                 entry.miss = float('inf')
                 entry.t_min = float('nan')
                 entry.full_track = None
@@ -526,7 +656,15 @@ class OrbitLineSet:
             # je bild im renderer.
             d = np.diff(track, axis=0)
             entry.track_len = float(np.sum(np.hypot(d[:, 0], d[:, 1]))) if d.size else 0.0
+            # DIE MESSUNG BLEIBT AUF DEM GEMEINSAMEN GITTER. `closest_approach`
+            # braucht den koerper zu den ZEITEN DER SCHIFFSPUNKTE; ein eigenes
+            # gitter je koerper haette dort keine schiffsposition daneben.
+            # Verfeinert wird nur, was GEZEICHNET wird.
             entry.miss, entry.t_min = closest_approach(sample_t, ship_xy, track)
+
+            self._build_draw_track(entry, b, sample_t, track,
+                                   is_focus=body_id in focus_ids,
+                                   origin_body=origin_body)
 
             # Die faint volllinie: EIN umlauf ab dem fensteranfang. Eigenes
             # zeitgitter je koerper (jeder hat eine andere periode), also ein
@@ -550,6 +688,72 @@ class OrbitLineSet:
             del self._entries[stale]
 
         self.last_recompute_ms = (time.perf_counter() - t0) * 1000.0
+
+    def _build_draw_track(self, entry, b, sample_t, track, is_focus=False,
+                          origin_body=None):
+        """Das gitter, auf dem die spur GEZEICHNET wird.
+
+        Standardfall ist das gemeinsame: dieselben arrays, kein zusaetzlicher
+        Kepler-durchlauf, keine eigene knotentabelle im renderer. Das gilt
+        fuer jeden koerper, dessen umlaufzeit das praediktor-fenster
+        ueberdauert -- also fuer alle planeten in fast jeder lage.
+
+        Verfeinert (oder gekappt) wird nur, wenn das fenster mehr als
+        `track_samples / samples_per_period` umlaeufe ueberdeckt. Warum,
+        steht bei `__init__`.
+        """
+        entry.draw_track = track
+        entry.draw_track_t = sample_t
+        entry.draw_track_len = entry.track_len
+        entry.draw_shared = True
+
+        # Die periode IM PLOT-FRAME, nicht die um den eigenen elter -- siehe
+        # relative_min_period(). Der ursprungskoerper bekommt ohnehin keine
+        # linie, aber jeder ANDERE koerper erbt dessen frequenz.
+        period = relative_min_period(b, origin_body)
+        if period is None or not (period > 0.0):
+            return
+        t_end = float(sample_t[-1])
+        span = t_end - float(sample_t[0])
+        if not (span > 0.0):
+            return
+
+        laps = span / period
+        wanted = int(math.ceil(laps * self.samples_per_period)) + 1
+        if wanted <= int(sample_t.size):
+            # Das gemeinsame gitter ist schon fein genug.
+            return
+
+        # NUR FUER KOERPER, DIE UEBERHAUPT EINE LINIE BEKOMMEN. Ein eigenes
+        # gitter kostet einen weiteren Kepler-durchlauf samt elternkette; bei
+        # 26 kandidaten und 1024 stichproben waeren das ~27000 loesungen je
+        # neuberechnung fuer 20+ linien, die nie gezeichnet werden. Typisch
+        # stehen 0-3 auf dem schirm (siehe reveal_fraction).
+        # `entry.reveal` ist der stand des VORIGEN bildes und faengt damit
+        # das ausblenden ab -- sonst fiele die linie fuer die dauer der
+        # blende auf das grobe gitter zurueck.
+        if not is_focus:
+            soi = soi_radius(b)
+            visible = reveal_fraction(entry.miss, soi,
+                                      self.reveal_full, self.reveal_fade)
+            if visible <= 0.0 and float(entry.reveal) <= 0.002:
+                return
+
+        # Gezeichnet werden hoechstens `max_periods_drawn` umlaeufe, und zwar
+        # die LETZTEN -- die endkappe (koerper zur endzeit) ist der messwert,
+        # auf den die ganze anzeige hinauslaeuft.
+        draw_span = min(span, self.max_periods_drawn * period)
+        count = int(math.ceil((draw_span / period) * self.samples_per_period)) + 1
+        count = max(8, min(count, int(self.max_track_samples)))
+
+        draw_t = np.linspace(t_end - draw_span, t_end, count)
+        draw_track = future_track(b, draw_t)
+        dd = np.diff(draw_track, axis=0)
+        entry.draw_track = draw_track
+        entry.draw_track_t = draw_t
+        entry.draw_track_len = (
+            float(np.sum(np.hypot(dd[:, 0], dd[:, 1]))) if dd.size else 0.0)
+        entry.draw_shared = False
 
     def _retarget(self, reference_body, selected_body):
         focus = set()

@@ -916,6 +916,124 @@ for _ in range(5):
     oset_off16.update(bodies_list, pts16, sim_time=T0, real_dt=1.0 / 60.0)
 check(oset_off16.get(mond).full_track is None, "full_orbit_enabled=False -> keine volllinie")
 
+# ----------------------------------------------------------------------
+print("\n§17 winkel-boden der zukunfts-spur bei langem fenster")
+# ----------------------------------------------------------------------
+# Die stichproben liegen gleichmaessig auf dem fenster des PRAEDIKTORS, und
+# die umlaufzeit eines mondes weiss davon nichts. Ueber ein fenster von 30
+# jahren bekam der Mond bei 192 stichproben 755 grad je stichprobe -- mehr
+# als zwei umlaeufe zwischen benachbarten punkten, gezeichnet als
+# sternpolygon quer durch die bahn.
+_oset17 = orbit_lines.OrbitLineSet(**CFG)
+_per17 = orbit_lines.orbital_period(mond)
+
+
+def _worst_step_deg(times, period):
+    dt = np.diff(np.asarray(times, dtype=np.float64))
+    return float(np.max(np.abs(dt))) / float(period) * 360.0
+
+
+def _draw_grid_for(span_s, body, is_focus=True):
+    t = np.linspace(T0, T0 + span_s, _oset17.track_samples)
+    entry = orbit_lines.OrbitLineEntry(body)
+    entry.track = orbit_lines.future_track(body, t)
+    entry.track_t = t
+    entry.track_len = 0.0
+    entry.miss = 0.0
+    _oset17._build_draw_track(entry, body, t, entry.track, is_focus=is_focus)
+    return entry, t
+
+
+# a) langes fenster: der boden greift.
+LONG = 30.0 * 365.25 * 86400.0
+e17, t17 = _draw_grid_for(LONG, mond)
+before = _worst_step_deg(t17, _per17)
+after = _worst_step_deg(e17.draw_track_t, _per17)
+check(before > 300.0, "gegenprobe: das gemeinsame gitter aliast hier wirklich",
+      f"{before:.0f} grad je stichprobe")
+# 64 stichproben je umlauf = 5.625 grad; etwas luft fuer die deckelung.
+check(after <= 6.0, "die gezeichnete spur haelt den winkel-boden",
+      f"{before:.0f} -> {after:.2f} grad je stichprobe "
+      f"({e17.draw_track_t.size} punkte)")
+check(not e17.draw_shared, "und benutzt dafuer ein eigenes gitter")
+
+# b) die endkappe bleibt der koerper zur ENDZEIT -- darum wird vorn gekappt
+# und nicht hinten.
+_exact = orbit_lines.future_track(mond, np.array([t17[-1]]))[0]
+_gap = float(np.hypot(*(e17.draw_track[-1] - _exact)))
+close(_gap, 0.0, 1e-6, "die endkappe steht exakt beim koerper zur endzeit")
+
+# c) kurzes fenster: NICHTS aendert sich, und zwar auf dieselben arrays --
+# sonst baut der renderer eine zweite knotentabelle, wo eine reicht.
+e17b, t17b = _draw_grid_for(3.0 * 86400.0, mond)
+check(e17b.draw_shared and e17b.draw_track is e17b.track
+      and e17b.draw_track_t is t17b,
+      "fenster kuerzer als der boden verlangt -> dieselben arrays",
+      f"{_worst_step_deg(t17b, _per17):.2f} grad je stichprobe")
+
+# d) ein koerper ohne annaeherung bekommt gar kein eigenes gitter: das waere
+# arbeit fuer eine linie, die reveal_fraction nie zeichnet.
+e17c = orbit_lines.OrbitLineEntry(mond)
+_t17c = np.linspace(T0, T0 + LONG, _oset17.track_samples)
+e17c.track = orbit_lines.future_track(mond, _t17c)
+e17c.track_t = _t17c
+e17c.track_len = 0.0
+e17c.miss = 1e3 * orbit_lines.soi_radius(mond)      # weit weg
+e17c.reveal = 0.0
+_oset17._build_draw_track(e17c, mond, _t17c, e17c.track, is_focus=False)
+check(e17c.draw_shared,
+      "kein kandidat -> kein eigenes gitter, kein Kepler-durchlauf")
+
+# e) DIE PERIODE IM PLOT-FRAME, nicht die um den eigenen elter. Gezeichnet
+# wird `koerper(t) - ursprung(t)`, und diese differenz traegt die frequenzen
+# BEIDER elternketten -- bis auf die gemeinsamen glieder, die sich wegheben.
+# Im Mond-rahmen laeuft die ERDE einmal je 27.45 tagen um den
+# bildmittelpunkt, nicht einmal je 365. Nach ihrer eigenen periode bemessen
+# sah ein langes fenster harmlos aus, und die spur aliaste trotzdem.
+_per_erde = orbit_lines.orbital_period(erde)
+check(abs(orbit_lines.relative_min_period(erde, mond) - _per17) < 1.0,
+      "Erde im Mond-rahmen laeuft mit der MOND-periode",
+      f"{orbit_lines.relative_min_period(erde, mond)/86400:.2f} d "
+      f"statt eigener {_per_erde/86400:.2f} d")
+check(abs(orbit_lines.relative_min_period(mond, erde) - _per17) < 1.0,
+      "und der Mond im Erd-rahmen ebenfalls (die Sonnen-glieder heben sich weg)",
+      f"{orbit_lines.relative_min_period(mond, erde)/86400:.2f} d")
+
+
+def _drawn_step_deg(times, body, origin):
+    """Winkelschritt der kurve koerper(t)-ursprung(t) um den bildmittelpunkt."""
+    t = np.ascontiguousarray(times, dtype=np.float64)
+    d = orbit_lines.future_track(body, t) - orbit_lines.future_track(origin, t)
+    ang = np.unwrap(np.arctan2(d[:, 1], d[:, 0]))
+    return float(np.max(np.abs(np.diff(ang)))) * 180.0 / math.pi
+
+
+_t17e = np.linspace(T0, T0 + LONG, _oset17.track_samples)
+_e17e = orbit_lines.OrbitLineEntry(erde)
+_e17e.track = orbit_lines.future_track(erde, _t17e)
+_e17e.track_t = _t17e
+_e17e.track_len = 0.0
+_e17e.miss = 0.0
+_oset17._build_draw_track(_e17e, erde, _t17e, _e17e.track,
+                          is_focus=True, origin_body=mond)
+_after_e = _drawn_step_deg(_e17e.draw_track_t, erde, mond)
+
+# Die gegenprobe ist NICHT der gezeichnete winkel: ueber 180 grad je
+# stichprobe kann `unwrap` den schritt gar nicht mehr rekonstruieren, 2.08
+# umlaeufe lesen sich dann als harmlose 36 grad. Die ehrliche groesse ist
+# das abtast-verhaeltnis selbst -- ueber 0.5 periode je stichprobe ist
+# Nyquist verletzt, und ab da ist die kurve geraten.
+_laps_shared = (float(_t17e[1] - _t17e[0])
+                / orbit_lines.relative_min_period(erde, mond))
+_laps_drawn = (float(_e17e.draw_track_t[1] - _e17e.draw_track_t[0])
+               / orbit_lines.relative_min_period(erde, mond))
+check(_laps_shared > 0.5,
+      "gegenprobe: auf dem gemeinsamen gitter ist Nyquist verletzt",
+      f"{_laps_shared:.2f} umlaeufe je stichprobe (> 0.5)")
+check(_laps_drawn <= 1.0 / 32.0,
+      "das zeichen-gitter haelt den boden im PLOT-FRAME",
+      f"{_laps_drawn:.4f} umlaeufe = {_after_e:.2f} grad je stichprobe")
+
 print()
 if FAILURES:
     print(f"FEHLGESCHLAGEN: {len(FAILURES)}")

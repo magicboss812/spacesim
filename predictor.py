@@ -1697,7 +1697,7 @@ if NUMBA_AVAILABLE:
 
 
     @njit(cache=True, nogil=True, fastmath=True)
-    def _refine_apsis_numba(pts, d2_arr, idx):
+    def _refine_apsis_numba(pts, d2_arr, idx, use_tangents):
         # parabolische verfeinerung des diskreten extremums bei `idx`: die
         # rohe "nächster punkt"-wahl hat einen quantisierungsfehler von der
         # größenordnung (punktabstand)^2 / (2*krümmungsradius) — der bei
@@ -1739,18 +1739,74 @@ if NUMBA_AVAILABLE:
             return x, y, t, r
         r = math.sqrt(refined_d2)
 
-        # position/zeit entlang des passenden nachbar-segments interpolieren,
-        # damit der marker weiterhin exakt auf der gezeichneten linie liegt.
+        # POSITION AUF DERSELBEN KUBIK, DIE DER RENDERER ZEICHNET -- nicht auf
+        # ihrer SEHNE.
+        #
+        # Hier stand eine lineare interpolation entlang des nachbar-segments,
+        # mit der begruendung, der marker liege damit "exakt auf der
+        # gezeichneten linie". Gezeichnet wird die linie aber als kubisches
+        # Hermite-polynom durch dieselben punkte (`_hermite_refine_world`),
+        # und das weicht von der sehne um die pfeilhoehe ab. Solange der
+        # punktabstand klein gegen den kruemmungsradius ist, sind das
+        # bruchteile eines pixels; auf einem langen horizont ist es das nicht
+        # mehr: bei punktabstand 1.125e8 m und einer periapsis bei 1.69e8 m
+        # (Erde -> Neptun, siehe .claude/rules/predictor.md) betraegt die
+        # pfeilhoehe R*(1-cos(c/2R)) = 9.4e6 m -- rund 10 px im bild. Der
+        # marker sass damit sichtbar NEBEN der linie, mal darueber, mal
+        # darunter, je nachdem wie das abtastraster gerade zur wahren apsis
+        # stand. Auf der kubik ausgewertet liegt er dort per konstruktion.
+        #
+        # Bezier-form des Hermite-polynoms, wortgleich zu
+        # rendering._hermite_refine_world:
+        #   b0 = p0, b1 = p0 + v0*dt/3, b2 = p1 - v1*dt/3, b3 = p1
         if k >= 0.0:
-            frac = k
-            x = pts[idx, 0] + (pts[idx + 1, 0] - pts[idx, 0]) * frac
-            y = pts[idx, 1] + (pts[idx + 1, 1] - pts[idx, 1]) * frac
-            t = pts[idx, 2] + (pts[idx + 1, 2] - pts[idx, 2]) * frac
+            i0 = idx
+            i1 = idx + 1
+            s = k
         else:
-            frac = -k
-            x = pts[idx, 0] + (pts[idx - 1, 0] - pts[idx, 0]) * frac
-            y = pts[idx, 1] + (pts[idx - 1, 1] - pts[idx, 1]) * frac
-            t = pts[idx, 2] + (pts[idx - 1, 2] - pts[idx, 2]) * frac
+            i0 = idx - 1
+            i1 = idx
+            s = 1.0 + k
+
+        t0 = pts[i0, 2]
+        dt = pts[i1, 2] - t0
+        t = t0 + dt * s
+
+        x = pts[i0, 0] + (pts[i1, 0] - pts[i0, 0]) * s
+        y = pts[i0, 1] + (pts[i1, 1] - pts[i0, 1]) * s
+
+        # Ohne endliche tangenten an BEIDEN enden gibt es kein polynom -- die
+        # sehnen-kernel (ASPI, blankes RK4) schreiben dort absichtlich NaN,
+        # und ihre punkte werden auch gezeichnet wie eine gerade. Dann bleibt
+        # es bei der linearen form oben, und das ist wieder genau richtig.
+        #
+        # OB DAS SO IST, WIRD DRAUSSEN ENTSCHIEDEN UND HEREINGEREICHT -- hier
+        # laesst es sich nicht pruefen. Dieser kernel ist `fastmath=True`,
+        # also verspricht er LLVM, dass keine NaN auftreten (`nnan`), und
+        # dann darf jede NaN-abfrage wegoptimiert werden. Gemessen mit
+        # numba auf dieser maschine: unter fastmath liefert BEIDES
+        #     math.isfinite(nan) -> True        nan == nan -> True
+        # Ein guard an dieser stelle haette also nichts abgefangen und die
+        # kubik mit NaN gerechnet -- der marker waere verschwunden. Es ist
+        # dieselbe falle, die weiter oben schon die `valid`-spalte des
+        # body_memo erzwungen hat.
+        if use_tangents != 0 and pts.shape[1] >= 5 and dt > 0.0:
+            third = dt / 3.0
+            b0x = pts[i0, 0]
+            b0y = pts[i0, 1]
+            b3x = pts[i1, 0]
+            b3y = pts[i1, 1]
+            b1x = b0x + pts[i0, 3] * third
+            b1y = b0y + pts[i0, 4] * third
+            b2x = b3x - pts[i1, 3] * third
+            b2y = b3y - pts[i1, 4] * third
+            u = 1.0 - s
+            w0 = u * u * u
+            w1 = 3.0 * u * u * s
+            w2 = 3.0 * u * s * s
+            w3 = s * s * s
+            x = w0 * b0x + w1 * b1x + w2 * b2x + w3 * b3x
+            y = w0 * b0y + w1 * b1y + w2 * b2y + w3 * b3y
 
         return x, y, t, r
 
@@ -1773,6 +1829,7 @@ if NUMBA_AVAILABLE:
         use_time_dependent_bodies,
         max_markers,
         skip_head,
+        use_tangents,
     ):
         # sucht lokale extrema des abstands schiff<->referenzkörper entlang der
         # predictor-punkte (pts: (n,3) mit x, y, absoluter sim-zeit). der
@@ -1900,7 +1957,7 @@ if NUMBA_AVAILABLE:
                     # trend kippt nach unten: verfolgtes maximum = apoapsis.
                     # best_idx == start (schiffsposition) wird unterdrückt.
                     if best_idx > start:
-                        rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx)
+                        rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx, use_tangents)
                         out[count, 0] = rx
                         out[count, 1] = ry
                         out[count, 2] = rt
@@ -1916,7 +1973,7 @@ if NUMBA_AVAILABLE:
                     best_idx = i
                 elif d2 > best_d2 + hyst:
                     if best_idx > start:
-                        rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx)
+                        rx, ry, rt, rr = _refine_apsis_numba(pts, d2_arr, best_idx, use_tangents)
                         out[count, 0] = rx
                         out[count, 1] = ry
                         out[count, 2] = rt
@@ -6273,6 +6330,23 @@ class Predictor:
             self._display_view_limit = count
         return self._display_view
 
+    @staticmethod
+    def _points_have_tangents(pts):
+        """Traegt diese punkteliste brauchbare geschwindigkeits-spalten?
+
+        Alles oder nichts, und das ist keine vereinfachung: ob die tangenten
+        geschrieben werden, haengt am KERNEL, nicht am einzelnen punkt --
+        die RKN-pfade schreiben sie durchgehend, die sehnen-pfade (ASPI,
+        blankes RK4) durchgehend nicht. Geprueft wird mit numpy, weil der
+        scan-kernel unter `fastmath` keine NaN erkennen kann (siehe
+        _refine_apsis_numba).
+        """
+        if np is None or not isinstance(pts, np.ndarray):
+            return False
+        if pts.ndim != 2 or pts.shape[1] < 5 or pts.shape[0] < 2:
+            return False
+        return bool(np.all(np.isfinite(pts[:, 3:5])))
+
     def get_apsis_markers(self):
         """Apoapsis/Periapsis-Marker der aktuellen Prädiktionslinie.
 
@@ -6367,6 +6441,15 @@ class Predictor:
                 # ohne kopf steht das flag auf False und der aufruf ist
                 # bit-identisch zu vorher.
                 1 if bool(getattr(self, '_synthetic_head', False)) else 0,
+                # OB DIE TANGENTEN-SPALTEN BRAUCHBAR SIND, WIRD HIER
+                # ENTSCHIEDEN, NICHT IM KERNEL. Der marker wird auf derselben
+                # kubik plaziert, die der renderer zeichnet -- die braucht die
+                # geschwindigkeits-spalten. Die sehnen-kernel (ASPI, blankes
+                # RK4) schreiben dort absichtlich NaN, und im kernel laesst
+                # sich das nicht abfragen: er ist `fastmath=True`, und
+                # gemessen liefern dort SOWOHL `math.isfinite(nan)` ALS AUCH
+                # `nan == nan` den wert True. Also numpy, ausserhalb.
+                1 if self._points_have_tangents(pts) else 0,
             )
             self._apsis_markers = markers[:int(count)].copy()
         except Exception as exc:

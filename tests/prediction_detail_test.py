@@ -31,6 +31,11 @@ Geprueft wird:
    abfangen musste).
 5. **Ein knappes punktbudget macht die linie GROEBER, nicht KUERZER.**
 6. **Was ausserhalb des bildes liegt, wird nicht verfeinert.**
+7. **Das ROH-budget folgt dem bild.** Eine gleichmaessige stichprobe ueber
+   eine sehr lange punkteliste ist keine stichprobe mehr, sondern eine
+   andere kurve: bei 40000 punkten und deckel 3000 wird von den punkten,
+   die einen vorbeiflug ueberspannen, KEINER gewaehlt -- und die auswahl
+   wandert obendrein jeden frame mit der schrumpfenden punktzahl.
 
 Aufruf: python tests/prediction_detail_test.py
 """
@@ -383,6 +388,158 @@ camera.snap_to_targets()
 check(added_off * 20 < max(added_centre, 1),
       "ausserhalb des bildes faellt die verfeinerung praktisch weg",
       f"im bild {added_centre} zwischenpunkte, daneben {added_off}")
+
+# ----------------------------------------------------------------------
+print("\n7. Das ROH-budget folgt dem bild, nicht der laenge der liste")
+# ----------------------------------------------------------------------
+# `_prediction_scan_indices` verteilt seine 3000 stichproben gleichmaessig
+# ueber die ganze punkteliste -- und alles danach, die kubik eingeschlossen,
+# kann nur zwischen dem interpolieren, was dort gewaehlt wurde. Bei langem
+# horizont ist das der ganze fehler: von den punkten, die einen vorbeiflug
+# ueberspannen, wird KEINER gewaehlt, und die auswahl wandert ausserdem jeden
+# frame, weil ihr schritt an der (im zeitraffer schrumpfenden) punktzahl
+# haengt.
+#
+# Die szene ist wieder analytisch: langer, gerader marschbogen mit einem
+# kreisbogen im letzten drittel -- der vorbeiflug.
+_N7 = 40000
+_HOR7 = 4.5e12                     # Erde -> Neptun
+_SP7 = _HOR7 / _N7
+_R7 = 2.2e8                        # radius des vorbeiflugs
+_SWEEP7 = 3.0                      # ueberstrichener bahnwinkel
+_V7 = 2.2e4
+_START7 = 0.70 * _HOR7             # NICHT am ende: der letzte index ist
+                                   # angepinnt, dort wandert nichts.
+_PX7 = 1.06e-6
+
+_s7 = np.arange(_N7, dtype=np.float64) * _SP7
+_pts7 = np.empty((_N7, 5), dtype=np.float64)
+_pts7[:, 2] = _s7 / _V7
+_arc7 = _R7 * _SWEEP7
+_pre7 = _s7 < _START7
+_post7 = _s7 >= _START7 + _arc7
+_mid7 = ~_pre7 & ~_post7
+_phi7 = (_s7[_mid7] - _START7) / _R7
+_pts7[_mid7, 0] = _R7 * np.sin(_phi7)
+_pts7[_mid7, 1] = _R7 * np.cos(_phi7)
+_pts7[_mid7, 3] = _V7 * np.cos(_phi7)
+_pts7[_mid7, 4] = -_V7 * np.sin(_phi7)
+for _sel, _p0, _d0, _off in (
+        (_pre7, (0.0, _R7), (1.0, 0.0), _START7),
+        (_post7, (_R7 * math.sin(_SWEEP7), _R7 * math.cos(_SWEEP7)),
+         (math.cos(_SWEEP7), -math.sin(_SWEEP7)), _START7 + _arc7)):
+    _pts7[_sel, 0] = _p0[0] + _d0[0] * (_s7[_sel] - _off)
+    _pts7[_sel, 1] = _p0[1] + _d0[1] * (_s7[_sel] - _off)
+    _pts7[_sel, 3] = _V7 * _d0[0]
+    _pts7[_sel, 4] = _V7 * _d0[1]
+
+_MARGIN7 = 128.0
+
+
+def _screen7(arr, consumed=0):
+    return (renderer.width * 0.5 + arr[:, 0] * _PX7,
+            renderer.height * 0.5 - arr[:, 1] * _PX7)
+
+
+def _hermite7(p0, p1, u):
+    dt = p1[2] - p0[2]
+    b0, b3 = p0[0:2], p1[0:2]
+    b1 = b0 + p0[3:5] * (dt / 3.0)
+    b2 = b3 - p1[3:5] * (dt / 3.0)
+    u = np.asarray(u)[:, None]
+    w = 1.0 - u
+    return (w ** 3) * b0 + 3 * (w ** 2) * u * b1 + 3 * w * (u ** 2) * b2 + (u ** 3) * b3
+
+
+def _drawn7(points, idx, sub=32):
+    runs = [_hermite7(points[a], points[b], np.linspace(0., 1., sub, endpoint=False))
+            for a, b in zip(idx[:-1], idx[1:])]
+    runs.append(points[idx[-1], 0:2][None, :])
+    return np.vstack(runs)
+
+
+def _miss7(curve):
+    """Groesster abstand des WAHREN bogens von der gezeichneten kurve."""
+    th = np.linspace(0.1, _SWEEP7 - 0.1, 300)
+    truth = np.stack([_R7 * np.sin(th), _R7 * np.cos(th)], axis=1)
+    d = np.hypot(truth[:, None, 0] - curve[None, :, 0],
+                 truth[:, None, 1] - curve[None, :, 1])
+    return float(np.max(np.min(d, axis=1)))
+
+
+def _select7(consumed, focused):
+    sub = _pts7[consumed:]
+    idx = np.asarray(renderer._prediction_scan_indices(sub.shape[0], {}),
+                     dtype=np.int64)
+    if focused:
+        sxs, sys_ = _screen7(sub[idx])
+        ref = renderer._refocus_scan_indices(idx, (sxs, sys_), sub.shape[0],
+                                             _MARGIN7, {})
+        if ref is not None:
+            idx = np.asarray(ref, dtype=np.int64)
+    return sub, idx
+
+
+_stored7 = int(_mid7.sum())
+_lo7, _hi7 = int(np.argmax(_mid7)), int(np.argmax(_mid7)) + _stored7
+for _label, _focused in (("gleichverteilt", False), ("view-aware", True)):
+    _sub, _idx = _select7(0, _focused)
+    _on = int(((_idx >= _lo7) & (_idx < _hi7)).sum())
+    _err = _miss7(_drawn7(_sub, _idx))
+    if not _focused:
+        check(_on == 0 and _err * _PX7 > 100.0,
+              "gegenprobe: die gleichverteilung trifft den vorbeiflug gar nicht",
+              f"{_on} von {_stored7} stuetzstellen, linie {_err * _PX7:.0f} px daneben")
+    else:
+        check(_on == _stored7,
+              "view-aware nimmt JEDE gespeicherte stuetzstelle des vorbeiflugs mit",
+              f"{_on} von {_stored7}")
+        check(_err * _PX7 < 5.0,
+              "und die gezeichnete linie liegt auf dem bogen",
+              f"{_err:.3e} m = {_err * _PX7:.2f} px")
+
+# Phasenstabilitaet: im zeitraffer verbraucht der halt vorn punkte, `count`
+# faellt -- und damit wanderte der schritt der gleichverteilung.
+_angles7 = np.linspace(0.1, _SWEEP7 - 0.1, 20)
+
+
+def _probe7(curve):
+    r = np.hypot(curve[:, 0], curve[:, 1])
+    keep = r < 6.0 * _R7
+    ang = np.arctan2(curve[keep, 0], curve[keep, 1]) % (2 * math.pi)
+    cur = curve[keep]
+    return np.asarray([cur[int(np.argmin(np.abs(ang - a)))] for a in _angles7])
+
+
+for _label, _focused in (("gleichverteilt", False), ("view-aware", True)):
+    _prev, _moves = None, []
+    for _consumed in range(0, 12):
+        _sub, _idx = _select7(_consumed, _focused)
+        _cur = _probe7(_drawn7(_sub, _idx, sub=48))
+        if _prev is not None:
+            _moves.append(float(np.max(np.hypot(*(_cur - _prev).T))))
+        _prev = _cur
+    _worst = max(_moves) * _PX7
+    if not _focused:
+        check(_worst > 5.0,
+              "gegenprobe: die gleichverteilung laesst die linie je frame wandern",
+              f"{_worst:.1f} px")
+    else:
+        check(_worst < 1e-6,
+              "view-aware: die linie steht still, waehrend der halt verbraucht",
+              f"{_worst:.3e} px")
+
+# Und die faelle, in denen gar nichts zu verbessern ist, bleiben unangetastet.
+_short7 = np.arange(2500, dtype=np.int64)
+check(renderer._refocus_scan_indices(
+          _short7, _screen7(_pts7[:2500]), 2500, _MARGIN7, {}) is None,
+      "kurze linie (jeder punkt schon abgetastet) -> unveraendert")
+_wide7 = (renderer.width * 0.5 + _pts7[:, 0] * 1e-10,
+          renderer.height * 0.5 - _pts7[:, 1] * 1e-10)
+_idx_w = np.asarray(renderer._prediction_scan_indices(_N7, {}), dtype=np.int64)
+check(renderer._refocus_scan_indices(
+          _idx_w, (_wide7[0][_idx_w], _wide7[1][_idx_w]), _N7, _MARGIN7, {}) is None,
+      "ganz herausgezoomt (alles im bild) -> die gleichverteilung bleibt")
 
 print()
 if FAILURES:

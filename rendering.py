@@ -855,6 +855,12 @@ class Renderer:
         self.orbit_line_tolerance_px = 0.3
         self.orbit_line_min_screen_px = 3.0
         self.orbit_line_track_samples = 192
+        # Winkel-boden der zukunfts-spur (OrbitLineSet.__init__): mindestens
+        # so viele stuetzstellen je umlauf, hoechstens so viele insgesamt,
+        # und hoechstens so viele umlaeufe ueberhaupt gezeichnet.
+        self.orbit_line_samples_per_period = 64.0
+        self.orbit_line_max_track_samples = 1024
+        self.orbit_line_max_periods_drawn = 16.0
         self.orbit_line_soi_full = 1.0
         self.orbit_line_soi_fade = 3.0
         self.orbit_line_reveal_full = 10.0
@@ -2931,6 +2937,11 @@ class Renderer:
             oset = orbit_lines.OrbitLineSet()
             self._orbit_line_set = oset
         oset.track_samples = max(8, int(self.orbit_line_track_samples))
+        # Der winkel-boden der spur -- siehe OrbitLineSet.__init__.
+        oset.samples_per_period = max(8.0, float(self.orbit_line_samples_per_period))
+        oset.max_track_samples = max(int(self.orbit_line_track_samples),
+                                     int(self.orbit_line_max_track_samples))
+        oset.max_periods_drawn = max(0.25, float(self.orbit_line_max_periods_drawn))
         oset.soi_full = float(self.orbit_line_soi_full)
         oset.soi_fade = float(self.orbit_line_soi_fade)
         oset.reveal_full = float(self.orbit_line_reveal_full)
@@ -3053,16 +3064,21 @@ class Renderer:
                 points = None
             generation = getattr(predictor, '_points_generation', None)
 
+        # Rahmen ZUERST: der ursprungskoerper bestimmt mit, wie fein die
+        # spuren abgetastet werden muessen (relative_min_period) -- im
+        # Titania-rahmen laeuft Uranus einmal je 8.7 tagen um den
+        # bildmittelpunkt, nicht einmal je 84 jahren.
+        frame = self._active_frame()
+        origin_body = orbit_lines.frame_origin_body(frame)
+
         oset.update(
             bodies, points,
             sim_time=self._frame_time_s, real_dt=real_dt,
             reference_body=self.current_reference_body,
             selected_body=self.selected_body,
             generation=generation,
+            origin_body=origin_body,
         )
-
-        frame = self._active_frame()
-        origin_body = orbit_lines.frame_origin_body(frame)
 
         # Der ursprungskoerper bekommt keine linie: er steht in seinem
         # eigenen rahmen still.
@@ -3104,22 +3120,26 @@ class Renderer:
         frame_key = id(frame)
         live_keys = set()
 
-        def _full_table_for(entry):
-            ft_t = entry.full_track_t
-            # Schluessel ueber die FENSTERGRENZEN, nicht id(ft_t): eine
+        def _table_for(times, knot_angle):
+            # Schluessel ueber die FENSTERGRENZEN, nicht id(times): eine
             # freigegebene array-id kann wiederverwendet werden und gaebe der
-            # alten tabelle einen falschen treffer. (rahmen, fenster) bestimmt
-            # die affine tabelle vollstaendig -- eine kollision ist harmlos.
-            key = (frame_key, round(float(ft_t[0]), 3), round(float(ft_t[-1]), 3))
+            # alten tabelle einen falschen treffer. (rahmen, fenster,
+            # knotenwinkel) bestimmt die affine tabelle vollstaendig -- eine
+            # kollision ist harmlos.
+            key = (frame_key, round(float(times[0]), 3),
+                   round(float(times[-1]), 3), float(knot_angle))
             live_keys.add(key)
             hit = table_cache.get(key)
             if hit is not None:
                 return hit if hit.valid else None
             tab = orbit_lines.FrameAffineTable(
-                frame, float(ft_t[0]), float(ft_t[-1]),
-                knot_angle=full_knot_angle)
+                frame, float(times[0]), float(times[-1]),
+                knot_angle=knot_angle)
             table_cache[key] = tab
             return tab if tab.valid else None
+
+        def _full_table_for(entry):
+            return _table_for(entry.full_track_t, full_knot_angle)
 
         camera_frame_xy = self._frame_camera_xy(camera)
         scale = abs(float(camera.scale))
@@ -3171,8 +3191,27 @@ class Renderer:
                         fsx, fsy, (cr, cg, cb, fa),
                         float(self.orbit_line_width), min_screen_px=min_px)
 
+            # DAS GEZEICHNETE GITTER, nicht das gemessene. Fuer koerper,
+            # deren umlaufzeit das praediktor-fenster ueberdauert, sind das
+            # dieselben arrays und dieselbe tabelle wie bisher; ein mond mit
+            # hunderten umlaeufen im fenster bekommt ein eigenes, feineres
+            # gitter ueber die letzten umlaeufe (OrbitLineSet._build_draw_track).
+            d_track = getattr(entry, 'draw_track', None)
+            d_track_t = getattr(entry, 'draw_track_t', None)
+            if d_track is None or d_track_t is None or d_track.shape[0] < 2:
+                d_track, d_track_t = entry.track, entry.track_t
+                d_len, d_shared = entry.track_len, True
+            else:
+                d_len = float(getattr(entry, 'draw_track_len', entry.track_len))
+                d_shared = bool(getattr(entry, 'draw_shared', True))
+
+            d_table = table if d_shared else _table_for(
+                d_track_t, float(self.orbit_line_knot_angle))
+            if d_table is None:
+                continue
+
             # Enthuellung: die linie rollt sich VOM KOERPER AUS ab.
-            total = int(entry.track.shape[0])
+            total = int(d_track.shape[0])
             reveal = max(0.0, min(1.0, float(entry.reveal)))
             n_show = max(2, int(math.ceil(reveal * total)))
 
@@ -3180,17 +3219,17 @@ class Renderer:
             # Als kruemmungsradius dient die bogenlaenge selbst -- fuer eine
             # fast gerade kurve ist das eine unterschaetzung, also zu viele
             # punkte statt zu wenige.
-            arc_px = entry.track_len * scale * reveal
+            arc_px = d_len * scale * reveal
             r_eff = max(1.0, arc_px / (2.0 * math.pi))
             stride = orbit_lines.polyline_stride(
                 n_show, arc_px, r_eff, view_diag,
                 float(self.orbit_line_tolerance_px))
             idx = orbit_lines.stride_indices(n_show, stride)
 
-            fx, fy = table.project(
-                entry.track_t[idx],
-                np.ascontiguousarray(entry.track[idx, 0]),
-                np.ascontiguousarray(entry.track[idx, 1]))
+            fx, fy = d_table.project(
+                d_track_t[idx],
+                np.ascontiguousarray(d_track[idx, 0]),
+                np.ascontiguousarray(d_track[idx, 1]))
             sx = half_w + (fx - camera_frame_xy[0]) * scale
             sy = half_h - (fy - camera_frame_xy[1]) * scale
 
@@ -3428,11 +3467,6 @@ class Renderer:
                 ship_body, ship_control, reference_body, prediction_points, real_dt
             )
             self._draw_body(ship_body, camera)
-            self.draw_ship_thrust_vector(ship_body, camera)
-            self.draw_ship_orientation_debug_vectors(
-                ship_body, camera, reference_body=reference_body,
-                prediction_points=prediction_points,
-            )
             timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
         # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
@@ -4663,6 +4697,158 @@ class Renderer:
         stats['skipped_by_stride'] = max(0, int(raw_count) - len(indices))
         return indices
 
+    def _refocus_scan_indices(self, indices, coords, raw_count, margin_px, stats):
+        """Das ROH-scan-budget dorthin legen, wo die linie im BILD liegt.
+
+        `_prediction_scan_indices` verteilt seine 3000 stichproben
+        GLEICHMAESSIG ueber die ganze punkteliste. Solange der horizont kurz
+        ist, faellt das nicht auf; sobald er es nicht mehr ist, ist es der
+        ganze fehler. Gemessen auf einem transfer Erde -> Neptun (horizont
+        4.5e12 m, 40000 gespeicherte punkte, punktabstand 1.125e8 m):
+
+            stride 13.3  ->  GEZEICHNETER punktabstand 1.5e9 m
+
+        Bei dem massstab des screenshots (1.06e-6 px/m) sind das 1590 px je
+        stuetzstelle. Die ganze begegnung mit Neptun -- bogen ~6.8e8 m, also
+        6 GESPEICHERTE punkte -- bekommt damit **0.45 gezeichnete** und wird
+        zu einer einzigen sehne, die am planeten vorbeischiesst. Genau das
+        sind die langen geraden im bild.
+
+        Zwei folgen, und beide stehen im bericht:
+
+        1. Die kubische Hermite-verfeinerung (`_hermite_refine_world`)
+           ueberbrueckt dann eine sehne von 8.9 rad bahnwinkel. Innerhalb
+           eines bogens von ~0.7 rad liegt ihr fehler bei 0.09 px, darueber
+           ist sie schlicht eine andere kurve.
+        2. Die auswahl WANDERT. `count` faellt im zeitraffer jeden frame um
+           die vorn verbrauchten punkte (`Predictor._hold_advance`), und
+           `step = (count-1)/(max_scan-1)` haengt daran -- gemessen springen
+           die gewaehlten absoluten indizes bis zu einen ganzen punkt weit,
+           also 119 px, von frame zu frame. Die stuetzstellen der
+           gezeichneten linie huepfen damit seitlich hin und her, waehrend
+           die gespeicherten punkte bit-identisch stehen: das ist das
+           "schwingende seil" an jeder kurve und jedem vorbeiflug.
+
+        Der ausweg ist nicht mehr budget, sondern ein besser verteiltes:
+        was im bild liegt, wird MIT STRIDE 1 abgetastet -- dann gibt es gar
+        keine phase mehr, die wandern koennte --, und der rest behaelt die
+        grobe gleichverteilung. Ist das sichtbare stueck zu gross fuer das
+        budget (herausgezoomt, die ganze bahn im bild), faellt es stetig auf
+        einen groesseren stride zurueck; dann ist ein gespeicherter punkt
+        ohnehin unter einem pixel breit.
+
+        Rueckgabe: neues index-array, oder ``None`` -- dann bleibt alles wie
+        bisher (kurze linien, in denen ohnehin jeder punkt abgetastet wird,
+        kommen hier gar nicht erst an).
+        """
+        if np is None:
+            return None
+        idx = np.asarray(indices, dtype=np.int64)
+        n = int(idx.size)
+        raw_count = int(raw_count)
+        if n < 2 or n >= raw_count:
+            return None
+        try:
+            max_scan = int(self.prediction_render_max_raw_scan)
+        except Exception:
+            return None
+        if max_scan <= 0:
+            return None
+        if coords is None:
+            return None
+        sx, sy = coords
+        sx = np.asarray(sx, dtype=np.float64)
+        sy = np.asarray(sy, dtype=np.float64)
+        if sx.shape[0] != n or sy.shape[0] != n:
+            return None
+
+        margin = float(margin_px)
+        x_lo, x_hi = -margin, float(self.width) + margin
+        y_lo, y_hi = -margin, float(self.height) + margin
+
+        # SEGMENT gegen das sichtfeld, nicht punkt. Bei stride 13 ist eine
+        # sehne 1590 px lang und der schirm 1280 -- die sehne, die ueber die
+        # begegnung laeuft, hat oft KEINEN eigenen endpunkt im bild. Ein
+        # reiner punkttest fände dort nichts und liesse alles beim alten.
+        # Der huellkoerper-test ist bewusst konservativ: er nimmt zu viel
+        # mit, nie zu wenig.
+        ax, bx = sx[:-1], sx[1:]
+        ay, by = sy[:-1], sy[1:]
+        finite = (np.isfinite(ax) & np.isfinite(bx)
+                  & np.isfinite(ay) & np.isfinite(by))
+        seg_hit = (finite
+                   & (np.minimum(ax, bx) <= x_hi) & (np.maximum(ax, bx) >= x_lo)
+                   & (np.minimum(ay, by) <= y_hi) & (np.maximum(ay, by) >= y_lo))
+        if not seg_hit.any():
+            return None
+
+        keep = np.zeros(n, dtype=bool)
+        keep[:-1] |= seg_hit
+        keep[1:] |= seg_hit
+        # Eine grobe stuetzweite luft nach beiden seiten: der uebergang
+        # zwischen feinem und grobem stueck soll ausserhalb des bildes liegen.
+        dilated = keep.copy()
+        dilated[1:] |= keep[:-1]
+        dilated[:-1] |= keep[1:]
+        keep = dilated
+        if keep.all():
+            # Alles im bild -- die gleichverteilung IST hier die richtige
+            # antwort, und ein feinerer stride passt ohnehin nicht ins budget.
+            return None
+
+        # Rohbereiche, die fein abgetastet werden sollen.
+        flips = np.flatnonzero(np.diff(keep.astype(np.int8)) != 0) + 1
+        bounds = np.concatenate(([0], flips, [n]))
+        fine_ranges = []
+        fine_total = 0
+        for start, end in zip(bounds[:-1], bounds[1:]):
+            if not keep[start]:
+                continue
+            lo = int(idx[start])
+            hi = int(idx[end - 1])
+            fine_ranges.append((lo, hi))
+            fine_total += hi - lo + 1
+        if not fine_ranges or fine_total <= 0:
+            return None
+
+        # Ein viertel des budgets bleibt der groben abtastung ausserhalb des
+        # bildes. Sie traegt nichts zum bild bei -- der laufweg wird am
+        # bildrand ohnehin geschnitten (`_build_clipped_polyline_runs`) --,
+        # muss aber die luecken ueberbruecken, damit ein wiedereintritt ins
+        # bild an der richtigen stelle sitzt.
+        outside = idx[~keep]
+        out_budget = max(2, max_scan // 4)
+        if outside.size > out_budget:
+            pick = np.unique(np.rint(
+                np.linspace(0, outside.size - 1, out_budget)).astype(np.int64))
+            outside = outside[pick]
+        fine_budget = max(2, max_scan - int(outside.size))
+
+        stride = 1 if fine_total <= fine_budget else int(
+            math.ceil(fine_total / float(fine_budget)))
+        # Der grobe stride, den wir ersetzen wollen. Bringt der feine nichts,
+        # bleibt es beim alten -- eine zweite stapel-projektion umsonst.
+        coarse_stride = raw_count / float(n)
+        if stride >= coarse_stride:
+            return None
+
+        parts = [outside, np.array([0, raw_count - 1], dtype=np.int64)]
+        for lo, hi in fine_ranges:
+            run = np.arange(lo, hi + 1, stride, dtype=np.int64)
+            if run.size == 0:
+                run = np.array([lo], dtype=np.int64)
+            if run[-1] != hi:
+                run = np.append(run, hi)
+            parts.append(run)
+        merged = np.unique(np.concatenate(parts))
+
+        if stats is not None:
+            stats['raw_focus_stride'] = int(stride)
+            stats['raw_focus_points'] = int(merged.size)
+            stats['raw_focus_ranges'] = int(len(fine_ranges))
+            stats['skipped_by_stride'] = max(0, raw_count - int(merged.size))
+        return merged
+
     def _iter_prediction_indices_evenly(self, count, max_scan):
         """Gleichmaessige stichprobe der rohpunkte -- GEMERKT, nicht neu gebaut.
 
@@ -5220,6 +5406,20 @@ class Renderer:
             # zurueckverwandelt (gemessen 4000 tupel je frame, nur um sie
             # danach wegzuwerfen).
             screen_points, visible_count, coords = batch
+
+            # ERST DAS ROH-BUDGET UMVERTEILEN, DANN VERFEINERN. Die kubische
+            # nachverdichtung unten kann nur so gut sein wie die stuetzstellen,
+            # zwischen denen sie interpoliert; ueber eine sehne von mehreren
+            # radianten bahnwinkel ist sie eine andere kurve. Siehe
+            # _refocus_scan_indices -- dort stehen die messwerte.
+            focused = self._refocus_scan_indices(
+                indices, coords, raw_count, margin_px, stats)
+            if focused is not None:
+                focused_batch = self._project_prediction_batch(
+                    path_points, focused, camera, camera_frame_xy, margin_px)
+                if focused_batch is not None:
+                    indices = focused
+                    screen_points, visible_count, coords = focused_batch
 
             # ZWISCHEN den groben stuetzstellen kubisch nachlegen -- so fein,
             # wie der bildschirm es zeigt, und nur dort, wo etwas zu sehen

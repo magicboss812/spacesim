@@ -173,6 +173,83 @@ for t in (0.0, 1234.5, 9.9e6):
 check(same, "q <= 0 liefert exakt dieselben zahlen wie die exakte fassung")
 
 
+# ----------------------------------------------------------------------
+print("\n5. Ein gitter, das die bahn des ursprungs nicht aufloest, wird nicht benutzt")
+# ----------------------------------------------------------------------
+# `q = span/256` haengt allein am horizont und weiss nichts von dem koerper,
+# der im ursprung sitzt. Fuer einen planeten ist das harmlos; fuer einen MOND
+# ist q schnell groesser als seine halbe umlaufzeit, und dann interpoliert die
+# kubik eine kurve, die sie nie abgetastet hat. Sichtbar wird das doppelt: die
+# linie steht neben den Ap/Pe-marken (die NACH dem loeschen des fensters
+# gezeichnet werden und deshalb exakt sind), und sie wandert jeden frame, weil
+# das fenster an der kopfzeit der punkteliste haengt.
+DAY = 86400.0
+_mond = next(b for b in bodies if b.name == "Mond")
+_NP = 4000
+
+
+def _origin_run(frame, span_s, warp_s, frames=8):
+    """(groesster abstand zum exakten wert, groesste bewegung je frame) in m."""
+    t_pts = np.linspace(span_s * 0.50, span_s * 0.60, _NP)
+    wx = np.full(_NP, 1.0e12)
+    wy = np.full(_NP, 2.0e12)
+    prev = None
+    gap = 0.0
+    move = 0.0
+    for i in range(frames):
+        t0 = i * warp_s
+        frame.set_origin_interp_window(t0, t0 + span_s, _NP)
+        got = frame.to_this_frame_xy_arrays(t_pts, wx, wy)
+        frame.set_origin_interp_window(0.0, 0.0, 0)
+        assert got is not None
+        gx, gy = got
+        sel = np.arange(0, _NP, 400)
+        for j in sel:
+            ex, ey = frame.to_this_frame_xy(t_pts[j], wx[j], wy[j])
+            gap = max(gap, math.hypot(gx[j] - ex, gy[j] - ey))
+        cur = np.stack([gx, gy], axis=1)
+        if prev is not None:
+            move = max(move, float(np.max(np.hypot(*(cur - prev).T))))
+        prev = cur
+    return gap, move
+
+
+_f_mond = BodyCentredNonRotatingReferenceFrame(_mond)
+_f_mond.set_epoch_time(0.0)
+_span = 3650.0 * DAY
+
+# GEGENPROBE: mit abgeschaltetem boden interpoliert es wieder -- und faellt
+# um hunderte kilometer daneben, jeden frame woanders.
+_f_mond.frame_origin_interp_min_knots_per_period = 0.0
+_gap_old, _move_old = _origin_run(_f_mond, _span, 7.0 * DAY)
+check(_gap_old > 1.0e5,
+      "gegenprobe: ohne boden weicht die linie wirklich ab",
+      f"{_gap_old:.3e} m, bewegung {_move_old:.3e} m je frame")
+check(_move_old > 1.0e5,
+      "gegenprobe: und sie wandert jeden frame (das 'wackeln')",
+      f"{_move_old:.3e} m")
+
+# Mit boden: exakt, und zwar auf 0.
+_f_mond2 = BodyCentredNonRotatingReferenceFrame(_mond)
+_f_mond2.set_epoch_time(0.0)
+_gap_new, _move_new = _origin_run(_f_mond2, _span, 7.0 * DAY)
+check(_gap_new == 0.0,
+      "mit boden rechnet der stapel exakt -- kein abstand zu den marken",
+      f"{_gap_new:.3e} m")
+check(_move_new == 0.0,
+      "und die linie steht still, waehrend das fenster wandert",
+      f"{_move_new:.3e} m")
+
+# Ein PLANET als ursprung bleibt auf dem schnellen weg: das gitter loest
+# seine bahn auf, also darf sich nichts aendern.
+_f_erde = BodyCentredNonRotatingReferenceFrame(erde)
+_f_erde.set_epoch_time(0.0)
+_f_erde.set_origin_interp_window(0.0, 3650.0 * DAY, _NP)
+check(_f_erde._origin_interp_q > 0.0 and not _f_erde._origin_exact_batch,
+      "planet als ursprung: interpolation bleibt aktiv (der schnelle weg)",
+      f"q = {_f_erde._origin_interp_q:.3e} s")
+_f_erde.set_origin_interp_window(0.0, 0.0, 0)
+
 print()
 if FAILURES:
     print(f"FEHLGESCHLAGEN: {len(FAILURES)}")
