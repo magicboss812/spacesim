@@ -407,6 +407,12 @@ class ConfigLoader:
             ('apsis_marker_radius_px', 'apsis_marker_radius_px', float),
             ('apsis_marker_fade_min_px', 'apsis_marker_fade_min_px', float),
             ('apsis_marker_fade_full_px', 'apsis_marker_fade_full_px', float),
+            # Der schwebezettel an der raute (ui/hud/apsis_tooltip.py). Er
+            # liegt im HUD, seine schalter aber hier: der renderer meldet die
+            # marker-positionen, also gehoeren sie in denselben abschnitt wie
+            # die marker selbst.
+            ('apsis_tooltip_enabled', 'apsis_tooltip_enabled', bool),
+            ('apsis_tooltip_hover_px', 'apsis_tooltip_hover_px', float),
             ('body_icon_min_radius_px', 'body_icon_min_radius_px', float),
             # Die positions-marke (body_icon.py)
             ('body_icon_style', 'body_icon_style', str),
@@ -426,6 +432,11 @@ class ConfigLoader:
             # Wann ein koerper seinen namen zeigt: "selected" | "zoom" | "both"
             ('body_label_mode', 'body_label_mode', str),
             ('body_label_min_radius_px', 'body_label_min_radius_px', float),
+            # Wie er gesetzt wird: versal, gesperrt, in der hausschrift.
+            # hud_font_size_body_label laeuft ueber set_hud_font_sizes()
+            # weiter unten, weil es die fonts neu rastern muss.
+            ('body_label_uppercase', 'body_label_uppercase', bool),
+            ('body_label_tracking_em', 'body_label_tracking_em', float),
             # Schiffs-grafik (ship_art.py)
             ('ship_sprite_enabled', 'ship_sprite_enabled', bool),
             ('ship_length_px', 'ship_length_px', float),
@@ -500,12 +511,15 @@ class ConfigLoader:
             # schriftgroessen werden unten ueber set_hud_font_sizes gesetzt
             ('hud_font_size_small', None, None),
             ('hud_font_size_medium', None, None),
+            ('hud_font_size_body_label', None, None),
             ('ui_scale', None, None),
         ])
 
         section = self.section('renderer')
         font_small = self.get_int('renderer.hud_font_size_small') if 'hud_font_size_small' in section else None
         font_medium = self.get_int('renderer.hud_font_size_medium') if 'hud_font_size_medium' in section else None
+        font_body_label = (self.get_int('renderer.hud_font_size_body_label')
+                           if 'hud_font_size_body_label' in section else None)
 
         # Benutzer-skalenfaktor zuerst: er geht in die font-pixelgroesse ein,
         # die set_hud_font_sizes() gleich darunter berechnet.
@@ -520,12 +534,14 @@ class ConfigLoader:
         except Exception as exc:
             print(f"CONFIG WARNING: UI-skalierung konnte nicht gesetzt werden ({exc})")
 
-        if font_small is not None or font_medium is not None:
+        if (font_small is not None or font_medium is not None
+                or font_body_label is not None):
             try:
                 # set_hud_font_sizes speichert DESIGN-groessen und erzeugt die
                 # fonts in groesse * ui_scale neu; der label-textur-cache wird
                 # dabei geleert (er ist nach schrifthoehe verschluesselt).
-                renderer.set_hud_font_sizes(small=font_small, medium=font_medium)
+                renderer.set_hud_font_sizes(small=font_small, medium=font_medium,
+                                            body_label=font_body_label)
             except Exception as exc:
                 print(f"CONFIG WARNING: HUD-schriftgroesse konnte nicht gesetzt werden ({exc})")
 

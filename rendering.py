@@ -521,6 +521,18 @@ class Renderer:
         self.hud_font_size_medium = 20
         self.font_small = None
         self.font_medium = None
+        # DER KOERPERNAME LAEUFT UEBER DIE HAUSSCHRIFT, NICHT UEBER DIE
+        # SYSTEMSCHRIFT. Er ist die einzige beschriftung, die MITTEN im bild
+        # steht -- neben einem HUD, das durchgehend SB Liquid setzt, fiel
+        # ausgerechnet der name des ausgewaehlten koerpers als fremde
+        # groteske heraus. Gesetzt wird er wie jede display-beschriftung der
+        # oberflaeche: VERSAL, gesperrt, hart gerastert und auf ein
+        # vielfaches von fuenf pixel gerundet (siehe ui/theme.py, modulkopf
+        # und .claude/rules/ui-hud.md).
+        self.hud_font_size_body_label = 15
+        self.body_label_uppercase = True
+        self.body_label_tracking_em = 0.12
+        self.font_body_label = None
         self._recompute_ui_scale()
         self._rebuild_fonts()
 
@@ -610,6 +622,17 @@ class Renderer:
         # die schiffs- und planeten-marken.
         self.apsis_marker_fade_min_px = 12.0
         self.apsis_marker_fade_full_px = 46.0
+        # DIE MARKER MELDEN IHRE SCHIRMPOSITION, ZEICHNEN IHREN SCHWEBEZETTEL
+        # ABER NICHT SELBST. Der zettel ist ein HUD-element (ui/hud/
+        # apsis_tooltip.py): er braucht die hausschrift, den SDF-shader fuer
+        # seine flaeche und die maus -- alles drei liegt in ui/, nicht hier.
+        # Der renderer ist die einzige stelle, die die frame-abhaengige
+        # transformation der marker kennt, also legt er das ergebnis hier ab
+        # und das HUD liest es. Eine zeile je marker, real ein bis vier.
+        self.apsis_tooltip_enabled = True
+        self.apsis_tooltip_hover_px = 14.0
+        #: (sx, sy, radius_px, is_apoapsis, distance_m, t_abs, alpha)
+        self.apsis_marker_hits = []
         self._prediction_line_cache_key_value = None
         self._prediction_line_cache_points = None
         self._prediction_line_cache_stats = {}
@@ -2618,7 +2641,41 @@ class Renderer:
         except Exception as exc:
             print(f"RENDERER WARNING: HUD-fonts konnten nicht erzeugt werden ({exc})")
             return
+        self.font_body_label = self._build_body_label_font()
         self._clear_text_caches()
+
+    #: Rasterstufe der pixelschrift und ihre kleinste brauchbare groesse --
+    #: dieselben zahlen wie in ui/text.py::_role_pixel_size, und aus demselben
+    #: grund: SB Liquid ist auf einem pixelraster gezeichnet, und nur auf
+    #: vielfachen von fuenf bleiben ihre stege ueberall gleich breit.
+    _DISPLAY_PIXEL_STEP = 5
+    _DISPLAY_PIXEL_MIN = 10
+
+    def _build_body_label_font(self):
+        """SB Liquid in der gerasteten groesse -- die schrift der koerpernamen.
+
+        Dieselbe datei, die auch das HUD benutzt (ui/assets/ui-display.ttf).
+        Gefunden wird sie ueber den pfad, nicht ueber den familiennamen: eine
+        mitgelieferte schrift ist nicht installiert, und pygame.font.match_font
+        sieht nur installierte.
+
+        Faellt die datei aus, bleibt es bei font_small. Ein koerpername ohne
+        schrift waere schlimmer als einer in der falschen.
+        """
+        raw = self.ui_px(self.hud_font_size_body_label)
+        step = self._DISPLAY_PIXEL_STEP
+        size_px = max(self._DISPLAY_PIXEL_MIN, int(round(raw / step)) * step)
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'ui', 'assets',
+            'ui-display.ttf',
+        )
+        if not os.path.isfile(path):
+            return self.font_small
+        try:
+            return pygame.font.Font(path, size_px)
+        except Exception as exc:
+            print(f"RENDERER WARNING: koerpernamen-schrift nicht ladbar ({exc})")
+            return self.font_small
 
     def _clear_text_caches(self):
         """Gibt alle text-abhängigen GL-texturen frei (font- oder größenwechsel)."""
@@ -2643,12 +2700,14 @@ class Renderer:
         self._hud_line_surface_cache = {}
         self._hud_cache_key = None
 
-    def set_hud_font_sizes(self, small=None, medium=None):
+    def set_hud_font_sizes(self, small=None, medium=None, body_label=None):
         """Setzt die DESIGN-schriftgrößen und baut die fonts neu auf."""
         if small is not None:
             self.hud_font_size_small = int(small)
         if medium is not None:
             self.hud_font_size_medium = int(medium)
+        if body_label is not None:
+            self.hud_font_size_body_label = int(body_label)
         self._rebuild_fonts()
 
     def set_ui_scale_user(self, factor):
@@ -2698,13 +2757,64 @@ class Renderer:
         except Exception:
             pass
 
-    def _get_label_texture(self, text, font):
-        key = (text, font.get_height())
+    @staticmethod
+    def _render_label_surface(text, font, antialias=True, tracking=0.0):
+        """Rastert eine beschriftung -- bei bedarf HART und GESPERRT.
+
+        Zwei zugestaendnisse an die hausschrift, beide aus ui/text.py
+        uebernommen und dort gemessen:
+
+        - `antialias=False` rastert ohne kantenglaettung. SB Liquid traegt
+          mit glaettung bei jeder groesse einen halbdeckenden saum; ohne sie
+          genau zwei alphawerte. pygame liefert dann eine palettierte
+          flaeche, die ueber einen SRCALPHA-zwischenschritt mit farbschluessel
+          erst zu einem echten alphakanal wird -- `image.tostring('RGBA')`
+          gaebe sonst deckende schwarze pixel um jede glyphe.
+        - `tracking` sperrt die zeichen. pygames font.render kann keine
+          laufweite, also werden die glyphen einzeln gesetzt. Nach dem
+          LETZTEN zeichen wird nicht gesperrt, sonst haengt rechts ein
+          leerraum, der zentrierten text sichtbar nach links zieht.
+        """
+        def render_one(chunk):
+            if antialias:
+                return font.render(chunk, True, (255, 255, 255))
+            raw = font.render(chunk, False, (255, 255, 255), (0, 0, 0))
+            surface = pygame.Surface(raw.get_size(), pygame.SRCALPHA)
+            raw.set_colorkey((0, 0, 0))
+            surface.blit(raw, (0, 0))
+            return surface
+
+        if abs(float(tracking)) < 0.05 or not text:
+            return render_one(text)
+
+        glyphs = []
+        cursor = 0.0
+        for index, char in enumerate(text):
+            glyphs.append((render_one(char), cursor))
+            cursor += font.size(char)[0]
+            if index < len(text) - 1:
+                cursor += float(tracking)
+        surface = pygame.Surface(
+            (max(1, int(math.ceil(cursor))), font.get_height()), pygame.SRCALPHA
+        )
+        for glyph, offset in glyphs:
+            surface.blit(glyph, (int(round(offset)), 0))
+        return surface
+
+    def _get_label_texture(self, text, font, antialias=True, tracking=0.0):
+        # DIE SCHRIFT GEHOERT IN DEN SCHLUESSEL, NICHT NUR IHRE HOEHE. Seit
+        # die koerpernamen ueber eine zweite schriftdatei laufen, koennen
+        # zwei fonts dieselbe hoehe melden -- der cache haette dann die
+        # gerasterten glyphen der einen unter dem namen der anderen
+        # ausgeliefert.
+        key = (text, id(font), font.get_height(), bool(antialias),
+               round(float(tracking), 2))
         entry = self._label_texture_cache.get(key)
         if entry:
             return entry  # (texture, w, h)
         try:
-            surface = font.render(text, True, (255, 255, 255))
+            surface = self._render_label_surface(
+                text, font, antialias=antialias, tracking=tracking)
             texture_data = pygame.image.tostring(surface, 'RGBA', True)
             w, h = surface.get_size()
             # cache deckeln (FIFO): ständig wechselnde texte (speed-label)
@@ -2770,24 +2880,30 @@ class Renderer:
         """
         return float(self.height) - float(y_topdown)
 
-    def _blit_text_topdown(self, text, x_left, y_top, font, color=(1.0, 1.0, 1.0, 1.0)):
+    def _blit_text_topdown(self, text, x_left, y_top, font, color=(1.0, 1.0, 1.0, 1.0),
+                           antialias=True, tracking=0.0):
         """Text an TOP-DOWN koordinaten zeichnen (x = links, y = oberkante).
 
         Nimmt dem aufrufer die ortho-umrechnung ab: _draw_texture_ortho
         erwartet die UNTERE linke ecke in ortho-Y. `color` toent multiplikativ
         (texquad.frag) -- der alphakanal blendet den text aus.
         """
-        entry = self._get_label_texture(text, font)
+        entry = self._get_label_texture(text, font, antialias=antialias,
+                                        tracking=tracking)
         text_h = float(entry[2]) if entry else float(font.get_height())
         self._blit_cached_text(text, x_left, self._ortho_y(y_top) - text_h, font,
-                               color=color)
+                               color=color, antialias=antialias,
+                               tracking=tracking)
 
-    def _blit_cached_text(self, text, x, y, font, color=(1.0, 1.0, 1.0, 1.0)):
-        entry = self._get_label_texture(text, font)
+    def _blit_cached_text(self, text, x, y, font, color=(1.0, 1.0, 1.0, 1.0),
+                          antialias=True, tracking=0.0):
+        entry = self._get_label_texture(text, font, antialias=antialias,
+                                        tracking=tracking)
         if not entry:
             # fallback: one-shot-textur ohne cache erzeugen, zeichnen, freigeben
             try:
-                surface = font.render(text, True, (255, 255, 255))
+                surface = self._render_label_surface(
+                    text, font, antialias=antialias, tracking=tracking)
                 texture_data = pygame.image.tostring(surface, 'RGBA', True)
                 w, h = surface.get_size()
                 texture = self.ctx.texture((w, h), 4, texture_data)
@@ -3476,8 +3592,9 @@ class Renderer:
 
         # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,
         # damit der kantenfilter den text nicht verschmiert (siehe _draw_body).
-        for name, label_x, label_y in self._deferred_labels:
-            self._blit_text_topdown(name, label_x, label_y, self.font_small)
+        for name, label_x, label_y, font, antialias, tracking in self._deferred_labels:
+            self._blit_text_topdown(name, label_x, label_y, font,
+                                    antialias=antialias, tracking=tracking)
 
         hud_t0 = time.perf_counter()
         self._render_hud(camera, predictor)
@@ -3964,6 +4081,27 @@ class Renderer:
             return selected or big
         return selected
 
+    def _body_label_style(self, name):
+        """(text, font, kantenglaettung, laufweite) fuer einen koerpernamen.
+
+        VERSAL UND IN DER HAUSSCHRIFT. Der name des ausgewaehlten koerpers
+        ist die einzige beschriftung mitten im bild; in der system-groteske
+        gesetzt las er sich als etwas, das nicht zu dieser oberflaeche
+        gehoert. Jetzt traegt er dieselbe form wie jede display-beschriftung
+        des HUDs -- versal, gesperrt, hart gerastert (siehe
+        _build_body_label_font und .claude/rules/ui-hud.md).
+
+        Faellt die schriftdatei aus, bleibt es bei der systemschrift -- und
+        dann auch bei ihrer kantenglaettung und ohne sperrung, denn beides
+        gehoert zur pixelschrift, nicht zum namen.
+        """
+        font = self.font_body_label or self.font_small
+        if font is None or font is self.font_small:
+            return (str(name), self.font_small, True, 0.0)
+        text = str(name).upper() if self.body_label_uppercase else str(name)
+        tracking = float(self.body_label_tracking_em) * float(font.get_height())
+        return (text, font, False, tracking)
+
     def _queue_body_label(self, body, lx, ly, radius_px, screen_pos=None,
                           size_radius_px=None):
         """Den namen eines koerpers fuer die zeichnung NACH dem FXAA vormerken.
@@ -3994,22 +4132,25 @@ class Renderer:
             size_radius_px = radius_px
         if not self._wants_body_label(body, size_radius_px):
             return
+        text, font, antialias, tracking = self._body_label_style(body.name)
         try:
             # Bei ausgewaehltem koerper steht ueber ihm der obere
             # auswahl-pfeil -- `lift` hebt den text darueber hinweg.
             lift = self.selection_label_lift_px(body)
-            entry = self._get_label_texture(body.name, self.font_small)
+            entry = self._get_label_texture(text, font, antialias=antialias,
+                                            tracking=tracking)
             if entry:
                 _, w, h = entry
                 label_x = float(lx) - (float(w) / 2.0)
                 # ueber den koerper setzen: top-down ist "oben" kleineres y
                 label_y = float(ly) - float(radius_px) - lift - 6.0 - float(h)
-                self._deferred_labels.append((body.name, label_x, label_y))
+                self._deferred_labels.append(
+                    (text, label_x, label_y, font, antialias, tracking))
             else:
-                self._deferred_labels.append((body.name,
-                                              float(lx) + float(radius_px)
-                                              + lift + 2.0,
-                                              float(ly) - 8.0))
+                self._deferred_labels.append(
+                    (text,
+                     float(lx) + float(radius_px) + lift + 2.0,
+                     float(ly) - 8.0, font, antialias, tracking))
         except Exception:
             try:
                 self._draw_body_label(
@@ -5223,6 +5364,10 @@ class Renderer:
         zeitabhängige frame-transformation, damit die marker in bewegten
         plot-frames auf der gezeichneten linie bleiben.
         """
+        # Die trefferliste wird bei JEDEM aufruf geleert, auch wenn nichts
+        # gezeichnet wird: sonst stuende der schwebezettel des HUDs noch ueber
+        # einem marker, den es gar nicht mehr gibt.
+        self.apsis_marker_hits.clear()
         if predictor is None or not self.show_apsis_markers:
             return
         get_markers = getattr(predictor, 'get_apsis_markers', None)
@@ -5278,6 +5423,13 @@ class Renderer:
                 continue
             if not self._is_on_screen(sx, sy, 32.0):
                 continue
+
+            # Die schirmposition an das HUD melden -- der schwebezettel
+            # (ui/hud/apsis_tooltip.py) trifft damit genau die raute, die
+            # hier gezeichnet wird, und nicht eine selbst nachgerechnete.
+            if self.apsis_tooltip_enabled:
+                self.apsis_marker_hits.append(
+                    (sx, sy, r_px, bool(is_apo), dist, t_abs, alpha_mult))
 
             label = "Ap" if is_apo else "Pe"
             base = (0.45, 0.75, 1.0) if is_apo else (1.0, 0.62, 0.25)
@@ -5938,14 +6090,17 @@ class Renderer:
         # Label mit gecachten GL-Texturen zeichnen, um pro-Frame GL-Allocationen zu vermeiden.
         # Label horizontal zentrieren und über dem Körper platzieren, um
         # Fehlausrichtungen beim Zoomen oder bei Radiusänderungen zu vermeiden.
+        text, font, antialias, tracking = self._body_label_style(name)
         try:
-            entry = self._get_label_texture(name, self.font_small)
+            entry = self._get_label_texture(text, font, antialias=antialias,
+                                            tracking=tracking)
             if entry:
                 _, w, h = entry
                 label_x = float(screen_pos[0]) - (float(w) / 2.0)
                 # screen_pos ist TOP-DOWN; ueber dem koerper heisst kleineres y.
                 label_y = float(screen_pos[1]) - float(radius) - 6.0 - float(h)
-                self._blit_text_topdown(name, label_x, label_y, self.font_small)
+                self._blit_text_topdown(text, label_x, label_y, font,
+                                        antialias=antialias, tracking=tracking)
                 return
         except Exception:
             pass
@@ -5953,7 +6108,8 @@ class Renderer:
         # Fallback: previous heuristic
         label_x = screen_pos[0] + radius + 2
         label_y = screen_pos[1] - 8
-        self._blit_text_topdown(name, label_x, label_y, self.font_small)
+        self._blit_text_topdown(text, label_x, label_y, font,
+                                antialias=antialias, tracking=tracking)
     
     def _draw_hud_quad(self, x, y, width, height):
         """Zeichnet die persistente HUD-textur als quad (ohne re-upload)."""

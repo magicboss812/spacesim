@@ -339,6 +339,14 @@ class TypeScale:
     #: Eintraege der koerperliste.
     body = Role(12, tracking=0.01, family='text')
     label = Role(11, tracking=0.04, family='text')
+    #: Der schwebezettel an einer apsis-raute: schluessel und wert. Er steht
+    #: MITTEN im bild, ueber der bahnlinie, und wird gelesen statt abgelesen
+    #: -- deshalb die leseschrift und nicht die instrumentenschrift.
+    tip_key = Role(10, tracking=0.12, family='text')
+    tip_value = Role(12, tracking=0.02, bold=True, family='text')
+    #: Koerpername in der system-karte -- klein, weil er nur beim ueberfahren
+    #: erscheint und den knapp bemessenen platz nicht beherrschen darf.
+    map_body = Role(11, tracking=0.03, family='text')
     heading = Role(15, tracking=0.02, bold=True, family='text')
 
     # Von den allgemeinen widgets erwartete namen.

@@ -197,6 +197,14 @@ class Telemetry:
         self.time_to_closest = None
         self.target_locked = False
 
+        # Standardgravitationsparameter des bezugskoerpers und die spezifische
+        # bahnenergie des schiffs darin. Beide stehen hier, weil sie EINE
+        # frage beantworten, die die bahnelemente allein nicht koennen: wie
+        # schnell ist das schiff an einem anderen ort SEINER bahn? Genau das
+        # will der schwebezettel an der Ap/Pe-raute wissen.
+        self.reference_mu = None
+        self.specific_energy = None
+
         self.warp_factor = 1.0
         # Ab welcher raffung (sim-sekunden je echtsekunde) der schub gesperrt
         # ist. Wird von test.py aus simulation.realtime_warp_max gesetzt und
@@ -236,6 +244,7 @@ class Telemetry:
         self._sample_attitude(ship, reference)
         self._sample_radial(ship, reference, reference_velocity)
         self._sample_target(ship, reference, reference_velocity)
+        self._sample_conic(reference)
 
         self.warp_factor = float(getattr(self.camera, 'sim_dt', 1.0)) * self.tick_rate
         # Im zeitraffer ist der schub gesperrt (siehe test.py): ein impuls je
@@ -268,6 +277,48 @@ class Telemetry:
         """Darf diese stufe gewaehlt werden?"""
         cap = self.max_warp_rate
         return cap is None or float(rate) <= cap * 1.001
+
+    def _sample_conic(self, reference):
+        """mu und spezifische bahnenergie -- die grundlage von vis-viva."""
+        self.reference_mu = None
+        self.specific_energy = None
+        e = self.elements
+        if reference is None or not e.valid or not e.radius or e.radius <= 0.0:
+            return
+        try:
+            mu = float(getattr(self.world, 'G', 6.6730831e-11)) * float(reference.mass)
+        except Exception:
+            return
+        if mu <= 0.0 or e.speed is None:
+            return
+        self.reference_mu = mu
+        self.specific_energy = 0.5 * e.speed * e.speed - mu / e.radius
+
+    def speed_at_radius(self, radius):
+        """Bahntempo relativ zum bezugskoerper in `radius` metern abstand.
+
+        Vis-viva auf der OSKULIERENDEN bahn: v = sqrt(2 (E + mu/r)). Genau
+        dieselbe zweikoerper-momentaufnahme, aus der auch AP, PE und die
+        beiden countdowns kommen -- der schwebezettel an der raute sagt damit
+        nichts anderes als der rest des HUDs.
+
+        Nicht aus den predictor-punkten interpoliert, obwohl die raute von
+        dort kommt: deren geschwindigkeits-spalten sind bei den sehnen-
+        kernen NaN (siehe .claude/rules/predictor.md), und ein wert, der je
+        nach qualitaetsstufe da ist oder nicht, ist als anzeige unbrauchbar.
+        """
+        mu = self.reference_mu
+        energy = self.specific_energy
+        try:
+            radius = float(radius)
+        except (TypeError, ValueError):
+            return None
+        if not mu or energy is None or radius <= 0.0:
+            return None
+        v_squared = 2.0 * (energy + mu / radius)
+        if v_squared <= 0.0 or not math.isfinite(v_squared):
+            return None
+        return math.sqrt(v_squared)
 
     def _sample_attitude(self, ship, reference):
         renderer = self.renderer

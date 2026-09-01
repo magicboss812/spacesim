@@ -6,7 +6,7 @@ elemente ueber den schirm verteilt lagen und die untere bildmitte so hoch
 baute, dass sie auf der bahn sass:
 
     oben links   schiffs-plakette, koerperwaehler, ziel-block
-    oben rechts  zeitraffer mit missionsuhr
+    oben rechts  zeitraffer mit missionsuhr, darunter die system-karte
     unten mitte  der navball-block (kurs, schub, steigrate, AP/PE)
                  und rechts daneben, angedockt, die snap-rosette
     unten links  bezugsrahmen und zoom
@@ -32,10 +32,12 @@ from ..core import (
     TOP_RIGHT,
 )
 from ..widgets import Stack
+from .apsis_tooltip import ApsisTooltip
 from .body_browser import BodyBrowser
 from .controls import SegmentBar, SnapRosette, WarpBar, ZoomButtons
 from .navball import WIDTH as NAVBALL_WIDTH, NavballCluster
 from .panels import IconRail, ShipBadge, build_target_panel
+from .system_map import SystemMap
 from .telemetry import Telemetry
 from . import chrome
 
@@ -127,6 +129,10 @@ class Hud:
         self.target = root.add(build_target_panel(
             telemetry, anchor=TOP_LEFT, offset=(MARGIN, MARGIN + 82),
         ))
+        # Der schwebezettel an den Ap/Pe-rauten. Er verbraucht die maus NICHT
+        # und steht deshalb ausserhalb jeder gruppe -- sein platz kommt aus
+        # der weltposition des markers, nicht aus der verankerung.
+        self.apsis_tooltip = root.add(ApsisTooltip(telemetry))
         self.target_rail = root.add(IconRail(
             [{'key': 'TG'}, {'key': 'D'}, {'key': 'V'}],
             color_role='target', anchor=CENTER_LEFT, offset=(MARGIN, 0),
@@ -142,6 +148,16 @@ class Hud:
             color_role='warp', caption=chrome.tab_text('TIME', 'WARP'),
             role='warp', min_option_width=34, cumulative=True,
             anchor=TOP_RIGHT, offset=(MARGIN, MARGIN), z=10,
+        ))
+        # Die karte haengt UNTER dem zeitraffer, und zwar an dessen fertigem
+        # rechteck statt an einem festen y-abstand: die hoehe der
+        # zeitraffer-leiste folgt schriftgroesse und notch-tab und aendert
+        # sich mit der UI-skala (siehe SystemMap.layout). Verankert ist sie
+        # trotzdem oben rechts -- so waechst sie beim ausfahren nach links
+        # und unten, weg vom bildrand.
+        self.system_map = root.add(SystemMap(
+            telemetry, self.ui_state, self.camera, below=self.warp,
+            anchor=TOP_RIGHT, offset=(MARGIN, MARGIN),
         ))
 
         # --- unten mitte: der navball-block ------------------------------
@@ -204,6 +220,12 @@ class Hud:
         self.target.visible = wide
         self.snaps.visible = wide
         self.zoom.visible = wide
+        # In der schmalen fassung faellt die karte weg -- sie ist ein
+        # ueberblick, kein fluginstrument, und in einem 800 px breiten
+        # fenster nimmt sie den platz weg, den die bahn braucht.
+        self.system_map.visible = wide
+        if not wide:
+            self.system_map.expanded = False
 
         self.target_rail.visible = not wide
         self.snaps_compact.visible = not wide

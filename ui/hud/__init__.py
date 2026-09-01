@@ -13,6 +13,8 @@ die fuenf, die den eindruck tragen:
     controls.py      zeitraffer als pegel, snap-rosette, zoom
     panels.py        schiffs-plakette und ziel-block
     body_browser.py  ausklappliste der koerper -> wahl des bezugskoerpers
+    system_map.py    die system-karte rechts unter dem zeitraffer
+    apsis_tooltip.py der schwebezettel an einer Ap/Pe-raute
     telemetry.py     datenschicht -- rechnet alle anzeigewerte einmal pro frame
     layout.py        verankerung des ganzen und die responsive umschaltung
 
@@ -52,10 +54,12 @@ WAS DIE VORLAGE NICHT VORGIBT und hier entschieden wurde:
   bedeuten. Die zuordnung liegt in theme.ROLE_INDEX.
 """
 
+from .apsis_tooltip import ApsisTooltip
 from .attitude import AttitudeRing
 from .layout import WARP_STEPS, Hud
 from .navball import NavballCluster
+from .system_map import SystemMap
 from .telemetry import Telemetry, compass_from_theta
 
-__all__ = ['AttitudeRing', 'Hud', 'NavballCluster', 'Telemetry', 'WARP_STEPS',
-           'compass_from_theta']
+__all__ = ['ApsisTooltip', 'AttitudeRing', 'Hud', 'NavballCluster', 'SystemMap',
+           'Telemetry', 'WARP_STEPS', 'compass_from_theta']
