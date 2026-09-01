@@ -346,7 +346,7 @@ class TypeScale:
     tip_value = Role(12, tracking=0.02, bold=True, family='text')
     #: Koerpername in der system-karte -- klein, weil er nur beim ueberfahren
     #: erscheint und den knapp bemessenen platz nicht beherrschen darf.
-    map_body = Role(11, tracking=0.03, family='text')
+    map_body = Role(12, tracking=0.03, family='text')
     heading = Role(15, tracking=0.02, bold=True, family='text')
 
     # Von den allgemeinen widgets erwartete namen.

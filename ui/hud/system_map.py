@@ -49,6 +49,14 @@ sie wieder ein (ueber `dismiss()`, denselben weg, den auch die koerperliste
 benutzt). Ohne diese trennung faenge eine dauerhaft grosse karte am rand
 staendig klicks ab, die dem schwenk gehoeren.
 
+Beim ausfahren wachsen KOERPER UND RAHMEN VERSCHIEDEN SCHNELL (`_DOT_COLLAPSED`).
+Die grosse karte ist nicht die kachel unter der lupe, sondern die einzige
+ansicht, in der ein punkt angeklickt und ein mondsystem gelesen wird -- die
+punkte muessen darin eine flaeche haben, und der rahmen soll dafuer nicht
+noch weiter ueber den bildrand wandern. Die kachel bleibt umgekehrt so eng
+um ihren kreis, wie das notch-tab es zulaesst: ihre breite folgt dem
+kartendurchmesser, nicht der breite des zeitraffers darueber.
+
 DIE AUSWAHL IST DIESELBE WIE IM SPIEL
 
 Ein klick auf einen koerper waehlt ihn aus, ein zweiter fliegt ihn an --
@@ -68,29 +76,45 @@ from . import chrome
 #: Zugeklappt und ausgefahren. Die zugeklappte breite ist die des
 #: zeitraffers darueber nicht ganz, aber ihre eigene: die kachel soll als
 #: eigenes bauteil lesbar bleiben und nicht als dessen fortsetzung.
-_COLLAPSED = (196.0, 150.0)
-_EXPANDED = (330.0, 330.0)
+#:
+#: BEIDE MASSE FOLGEN DEM KREIS, nicht umgekehrt. Der plotradius ist
+#: ``min(breite, hoehe)/2 - _PAD`` -- jedes pixel, um das die kachel breiter
+#: als hoch ist, ist deshalb leerer rand und sonst nichts. Bei 196x150 waren
+#: das 46 px auf jeder flanke, mehr als der halbe kartenradius; die kachel
+#: las sich als grosses bauteil mit einer kleinen zeichnung darin. Die
+#: breite liegt jetzt nur noch so weit ueber der rahmenhoehe, wie das
+#: notch-tab ueber der kante braucht.
+_COLLAPSED = (134.0, 138.0)
+_EXPANDED = (292.0, 300.0)
 
 #: Abstand zum widget darueber (dem zeitraffer).
 _GAP_ABOVE = 10.0
 #: Innenabstand zwischen rahmen und der aeussersten bahn.
-_PAD = 16.0
+_PAD = 10.0
 
 #: Kleinster und groesster bahnradius als anteil des verfuegbaren radius.
 _ORBIT_INNER = 0.30
 _ORBIT_OUTER = 1.0
 
-#: Punktgroessen der koerper. Bewusst schmal gestuft -- der groessenunterschied
-#: Sonne/Merkur ist 285-fach, als flaeche aufgetragen bliebe von Merkur ein
-#: halbes pixel. Die punkte ordnen, sie messen nicht.
-_DOT_MIN = 2.2
-_DOT_MAX = 5.0
-_STAR_DOT = 8.0
-_MOON_DOT = 2.2
+#: Punktgroessen der koerper, GEMESSEN AN DER AUSGEFAHRENEN KARTE. Bewusst
+#: schmal gestuft -- der groessenunterschied Sonne/Merkur ist 285-fach, als
+#: flaeche aufgetragen bliebe von Merkur ein halbes pixel. Die punkte
+#: ordnen, sie messen nicht.
+_DOT_MIN = 2.9
+_DOT_MAX = 7.0
+_STAR_DOT = 11.0
+_MOON_DOT = 3.4
+
+#: Punktgroesse der ZUGEKLAPPTEN kachel als anteil davon. Die punkte wachsen
+#: also mit dem ausfahren mit, der rahmen aber nicht mehr im selben mass --
+#: genau darum geht es: die ausgefahrene karte soll nicht die kachel unter
+#: der lupe sein, sondern dieselbe flaeche mit LESBAREN koerpern. Bei 0.75
+#: bleibt die kachel bei ihren gewohnten gut zwei bis fuenf pixeln.
+_DOT_COLLAPSED = 0.75
 
 #: Trefferkreis um einen punkt. Deutlich groesser als der punkt selbst, sonst
-#: ist ein 2-px-planet mit der maus nicht zu fassen.
-_HIT_RADIUS = 9.0
+#: ist ein 3-px-mond mit der maus nicht zu fassen.
+_HIT_RADIUS = 11.0
 
 #: Deckkraft der zurueckgetretenen karte, wenn ein planet angewaehlt ist.
 _DIMMED = 0.22
@@ -99,10 +123,17 @@ _DIMMED = 0.22
 #: ein boden und eine decke als anteil des kartenradius. Der abstand allein
 #: genuegt nicht -- zwischen Mars und Jupiter ist er gross, zwischen Neptun
 #: und Pluto fast null, und ein mondsystem von drei pixeln waere unlesbar.
+#:
+#: Boden und decke sind bewusst gross: die mond-ansicht ist der einzige
+#: zweck, fuer den die karte ueberhaupt ausfaehrt, und bei 0.15/0.26 des
+#: kartenradius war das Jupiter-system 21 bis 37 pixel breit -- vier ringe
+#: und vier punkte darin sind auf einem laptop nicht mehr auseinander zu
+#: halten. Der ganze rest der karte steht waehrenddessen ohnehin auf
+#: `_DIMMED`, das mondsystem darf also ueber die nachbarbahnen laufen.
 _MOON_SPAN = 0.9
-_MOON_SPAN_MIN = 0.15
-_MOON_SPAN_MAX = 0.26
-_MOON_INNER = 0.34
+_MOON_SPAN_MIN = 0.24
+_MOON_SPAN_MAX = 0.42
+_MOON_INNER = 0.38
 
 #: Wieviel der bahnverteilung aus der REIHENFOLGE statt aus dem logarithmus
 #: kommt. Rein logarithmisch liegen Neptun (4.5e12 m) und Pluto (5.9e12 m)
@@ -319,6 +350,16 @@ class SystemMap(Widget):
         radius = max(ctx.px(8.0), min(fw, fh) * 0.5 - pad)
         return cx, cy, radius
 
+    def _dot_scale(self):
+        """Punktgroesse relativ zur ausgefahrenen karte.
+
+        Die punkte wachsen MIT dem ausfahren, und zwar staerker, als der
+        rahmen es tut: die grosse karte ist keine vergroesserung der kachel,
+        sondern die einzige ansicht, in der koerper angeklickt und monde
+        gelesen werden -- dafuer muessen sie eine flaeche haben.
+        """
+        return _DOT_COLLAPSED + (1.0 - _DOT_COLLAPSED) * self._expand_t
+
     # --------------------------------------------------------------- eingabe
 
     def _pick(self, x, y):
@@ -452,9 +493,10 @@ class SystemMap(Widget):
             radius * _ORBIT_INNER, radius * _ORBIT_OUTER,
             rank_mix=_RANK_MIX,
         )
+        scale = self._dot_scale()
         dots = _log_spread(
             [getattr(b, 'radius', 0.0) for _i, b in planets],
-            ctx.px(_DOT_MIN), ctx.px(_DOT_MAX),
+            ctx.px(_DOT_MIN) * scale, ctx.px(_DOT_MAX) * scale,
         )
 
         # --- bahnen zuerst, damit kein ring ueber einem punkt liegt --------
@@ -466,11 +508,11 @@ class SystemMap(Widget):
 
         # --- zentralgestirn ------------------------------------------------
         star_color = _body_color(star_body)
-        star_r = ctx.px(_STAR_DOT) * (0.7 + 0.3 * self._expand_t)
+        star_r = ctx.px(_STAR_DOT) * scale
         ctx.draw.circle(cx, cy, star_r * 2.4,
                         fill=with_alpha(star_color, 0.10 * dim))
         ctx.draw.circle(cx, cy, star_r, fill=with_alpha(star_color, dim))
-        self._register_hit(ctx, star_index, cx, cy)
+        self._register_hit(ctx, star_index, cx, cy, star_r)
         self._draw_selection_ring(ctx, star_index, cx, cy, star_r, dim)
 
         # --- planeten -------------------------------------------------------
@@ -481,7 +523,7 @@ class SystemMap(Widget):
             alpha = 1.0 if index == focus else dim
             color = _body_color(body)
             ctx.draw.circle(px, py, dots[slot], fill=with_alpha(color, alpha))
-            self._register_hit(ctx, index, px, py)
+            self._register_hit(ctx, index, px, py, dots[slot])
             self._draw_selection_ring(ctx, index, px, py, dots[slot], alpha)
             if index == focus:
                 inner = radii[slot - 1] if slot > 0 else radius * _ORBIT_INNER * 0.4
@@ -495,15 +537,21 @@ class SystemMap(Widget):
         if self.expanded and self._hover_index is not None:
             self._draw_hover_name(ctx)
 
-    def _register_hit(self, ctx, index, x, y):
+    def _register_hit(self, ctx, index, x, y, dot=0.0):
         """Trefferflaeche merken -- nur in der ausgefahrenen karte.
 
         In der kachel darf ein klick NICHT auf einem koerper landen: er soll
         dort ausschliesslich ausfahren, sonst waehlt schon die oeffnende
         geste einen zufaelligen planeten aus.
+
+        `_HIT_RADIUS` ist ein BODEN, kein mass: die sonne ist mit elf pixeln
+        gezeichnet, und ein trefferkreis von genau elf pixeln liesse ihren
+        eigenen rand daneben gehen -- man klickte sichtbar auf den koerper
+        und traefe nichts.
         """
         if self.expanded and self._expand_t > 0.6:
-            self._hits[index] = (x, y, ctx.px(_HIT_RADIUS))
+            reach = max(ctx.px(_HIT_RADIUS), float(dot) + ctx.px(3.0))
+            self._hits[index] = (x, y, reach)
 
     def _draw_selection_ring(self, ctx, index, x, y, dot_radius, alpha):
         """Der ring um den koerper, der IM SPIEL ausgewaehlt ist.
@@ -529,6 +577,16 @@ class SystemMap(Widget):
             return
         palette = ctx.theme.palette
         fade = self._focus_t
+        # ... und der zweite grenzwert ist der RAHMEN. Pluto und Neptun
+        # stehen auf der aeussersten bahn, keine drei fingerbreit von der
+        # kante; ein mondsystem in voller groesse haengt dort halb aus der
+        # karte heraus, was wie ein zeichenfehler aussieht. Der boden von
+        # einem zehntel kartenradius laesst es die kante hoechstens
+        # beruehren, statt es auf unlesbare paar pixel zusammenzudruecken.
+        fx, fy, fw, fh = self._frame_rect(ctx)
+        room = min(px - fx, fx + fw - px, py - fy, fy + fh - py) - ctx.px(3.0)
+        _cx, _cy, plot_radius = self._plot(ctx)
+        span = min(span, max(room, plot_radius * 0.10))
         radii = _log_spread(
             [getattr(b, 'semi_major_axis', 0.0) for _i, b in moons],
             span * _MOON_INNER, span,
@@ -547,7 +605,7 @@ class SystemMap(Widget):
             ctx.draw.circle(mx, my, ctx.px(_MOON_DOT),
                             fill=with_alpha(_body_color(moon), fade))
             if fade > 0.6:
-                self._register_hit(ctx, index, mx, my)
+                self._register_hit(ctx, index, mx, my, ctx.px(_MOON_DOT))
             self._draw_selection_ring(ctx, index, mx, my, ctx.px(_MOON_DOT), fade)
 
     def _draw_hover_name(self, ctx):
@@ -571,13 +629,13 @@ class SystemMap(Widget):
         width = text_w + pad * 2.0
         height = text_h + ctx.px(4.0)
         left = x - width * 0.5
-        top = y - ctx.px(11.0) - height
+        top = y - ctx.px(13.0) - height
         # Im rahmen halten -- ein schild, das aus der karte ragt, sieht aus
         # wie ein zeichenfehler.
         fx, fy, fw, fh = self._frame_rect(ctx)
         left = max(fx + ctx.px(3.0), min(left, fx + fw - width - ctx.px(3.0)))
         if top < fy + ctx.px(3.0):
-            top = y + ctx.px(11.0)
+            top = y + ctx.px(13.0)
         chrome.plate(ctx, left, top, width, height,
                      fill=with_alpha(palette.panel_popup, 0.92), cut=3.0)
         ctx.text.draw(name, left + width * 0.5, top + height * 0.5,
