@@ -446,6 +446,13 @@ class UIRoot(Widget):
         ctx = self.ui
         ctx.dt = float(dt)
         ctx.mouse_x, ctx.mouse_y = self._mouse_pos
+        # Ausfall-sicherung: geht das MOUSEBUTTONUP verloren (fokuswechsel
+        # mitten im ziehen), bleibt `pressed` sonst fuer immer stehen -- und
+        # ein regler, der pro frame integriert (HorizonSlider), laeuft dann
+        # ungebremst weiter. Steht keine maustaste mehr an, den griff loesen.
+        if self._active_widget is not None and not any(pygame.mouse.get_pressed()):
+            self._active_widget.pressed = False
+            self._active_widget = None
         self.layout(ctx, ctx.screen_rect)
         self._refresh_hover()
         self.update(ctx, dt)

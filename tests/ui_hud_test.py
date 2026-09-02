@@ -857,6 +857,54 @@ check(loose is not None and tight is not None and abs(loose - tight) < 1e-9,
       f"{loose:.6f} gegen {tight:.6f}")
 frame()
 
+# ═══════════════════════════════════ 14. horizont-regler ist verdrahtet
+print()
+print("14. Horizont-Regler")
+
+# Eigener Hud mit ECHTEN closures ueber eine veraenderliche box -- so
+# schreibt ein simulierter griff den manuellen faktor wirklich zurueck.
+_hmult = [1.0]
+
+
+def predictor_manual_mult_getter():
+    return _hmult[0]
+
+
+def _hmult_set(m):
+    _hmult[0] = max(0.25, min(4.0, float(m)))
+
+
+hud_h = Hud(root, world, sim_ship, control, camera, renderer, predictor, state,
+            tick_rate=60.0,
+            horizon_mult_get=predictor_manual_mult_getter,
+            horizon_mult_set=_hmult_set,
+            horizon_mult_min=0.25, horizon_mult_max=4.0, horizon_sweep_s=2.5)
+
+check(getattr(hud_h, 'horizon', None) is not None,
+      "hud.horizon existiert", str(getattr(hud_h, 'horizon', None)))
+check(hud_h.horizon in hud_h.left_stack.children,
+      "sitzt im linken stapel (unter FRAME + zoom)", "")
+check(hud_h.horizon.is_grabbing is False,
+      "startet ungegriffen", "")
+
+# ein simulierter griff nach rechts hebt den manuellen faktor
+_start = predictor_manual_mult_getter()
+hud_h.horizon.pressed = True
+hud_h.horizon._offset = 1.0
+for _ in range(30):
+    hud_h.horizon.update(hud_h.ctx, 1.0 / 60.0)
+check(predictor_manual_mult_getter() > _start,
+      "griff nach rechts verlaengert den horizont",
+      f"{_start:.3f} -> {predictor_manual_mult_getter():.3f}")
+check(hud_h.horizon.is_grabbing is True, "waehrend des griffs: is_grabbing", "")
+
+hud_h.horizon.pressed = False
+for _ in range(30):
+    hud_h.horizon.update(hud_h.ctx, 1.0 / 60.0)
+check(abs(hud_h.horizon._offset) < 0.06,
+      "loslassen federt in die mitte zurueck",
+      f"offset {hud_h.horizon._offset:.4f}")
+
 print()
 if FAILURES:
     print(f"FEHLGESCHLAGEN: {len(FAILURES)}")

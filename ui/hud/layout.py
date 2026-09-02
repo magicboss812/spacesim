@@ -32,6 +32,7 @@ from ..core import (
     TOP_RIGHT,
 )
 from ..widgets import Stack
+from ..widgets.rate_slider import HorizonSlider
 from .apsis_tooltip import ApsisTooltip
 from .body_browser import BodyBrowser
 from .controls import SegmentBar, SnapRosette, WarpBar, ZoomButtons
@@ -89,7 +90,10 @@ class Hud:
 
     def __init__(self, ui_root, world, ship, ship_control, camera, renderer,
                  predictor, ui_state, tick_rate=60.0, realtime_warp_max=60.0,
-                 warp_timescale_divisor=3.0):
+                 warp_timescale_divisor=3.0,
+                 horizon_mult_get=None, horizon_mult_set=None,
+                 horizon_mult_min=0.25, horizon_mult_max=4.0,
+                 horizon_sweep_s=2.5):
         self.root = ui_root
         self.ctx = ui_root.ui
         self.camera = camera
@@ -104,6 +108,12 @@ class Hud:
         # Dieselbe zahl wie der riegel in test.py -- sonst blendet das HUD
         # andere stufen ab als die hauptschleife zulaesst.
         self.telemetry.warp_timescale_divisor = float(warp_timescale_divisor)
+        self._horizon_mult_get = horizon_mult_get
+        self._horizon_mult_set = horizon_mult_set
+        self._horizon_mult_min = float(horizon_mult_min)
+        self._horizon_mult_max = float(horizon_mult_max)
+        self._horizon_sweep_s = float(horizon_sweep_s)
+        self.horizon = None
         self._wide = None
         self._build(ship_control)
 
@@ -198,6 +208,21 @@ class Hud:
         self.zoom_compact = self.left_stack.add(
             ZoomButtons(telemetry, self.camera, compact=True)
         )
+
+        # Der vorhersage-horizont: ein mittenzentrierter raten-regler. Nach
+        # rechts ziehen verlaengert die gezeichnete linie, nach links
+        # verkuerzt sie -- die auslenkung ist die geschwindigkeit. Er
+        # aendert NUR predictor.set_display_length (O(1), kein neuaufbau);
+        # siehe plans/predictor_horizon_slider_design.md.
+        if self._horizon_mult_get is not None and self._horizon_mult_set is not None:
+            self.horizon = self.left_stack.add(HorizonSlider(
+                value=self._horizon_mult_get,
+                minimum=self._horizon_mult_min,
+                maximum=self._horizon_mult_max,
+                on_change=self._horizon_mult_set,
+                predictor=self.telemetry.predictor,
+                sweep_seconds=self._horizon_sweep_s,
+            ))
 
     # ----------------------------------------------------------------- ablauf
 

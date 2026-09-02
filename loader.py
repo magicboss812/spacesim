@@ -362,6 +362,10 @@ class ConfigLoader:
             # ruckartig), 2 = vollstaendig gleichmaessig, dafuer aeltere linie.
             ('swap_backlog_max', 'swap_backlog_max', int),
             # nur von test.py ausgewertet (tastenbelegung / ein-aus-verhalten)
+            ('display_length_quantum_points', None, None),
+            ('horizon_slider_min_mult', None, None),
+            ('horizon_slider_max_mult', None, None),
+            ('horizon_slider_sweep_seconds', None, None),
             ('quality', None, None),
             ('enabled', None, None),
             ('toggle_num_points', None, None),

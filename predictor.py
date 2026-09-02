@@ -2900,6 +2900,13 @@ class Predictor:
         # waehrend sie in echtzeit einen einzigen bogen zeigt.
         # None = alles zeichnen. Siehe set_display_length().
         self.display_length = None
+        # Die GEZEICHNETE punktzahl wird auf ein vielfaches hiervon gerundet,
+        # damit ein langsamer regler-zug nicht in JEDEM frame eine neue view
+        # (self.points[:count]) erzeugt -- der renderer-cache und
+        # get_apsis_markers() haengen an id(points). Aus config gesetzt
+        # (predictor.display_length_quantum_points), getattr-default weil eine
+        # vor __init__ gebaute (oder entpickelte) instanz sie nicht traegt.
+        self._display_quantum = 8
         self._display_view = None
         self._display_view_base = None
         self._display_view_limit = -1
@@ -6249,7 +6256,11 @@ class Predictor:
         else:
             value = float(metres)
             self.display_length = value if value > 0.0 else None
-        self._clear_display_view()
+        # KEIN _clear_display_view() hier: der regler ruft diese methode jeden
+        # frame, und ein harter cache-reset erzwaenge trotz gerundetem count
+        # (siehe _display_point_count) je frame eine neue view. get_points()
+        # verwirft die view schon selbst, sobald sich der gerundete count,
+        # das zugrundeliegende array oder der zeichne-alles-fall aendert.
 
     def _clear_display_view(self):
         self._display_view = None
@@ -6296,6 +6307,8 @@ class Predictor:
             if limit >= spacing * (n - 1):
                 return None
             count = int(math.ceil(limit / spacing)) + 1
+            q = max(1, int(getattr(self, '_display_quantum', 8)))
+            count = int(round(count / q)) * q
             return max(2, min(n, count))
 
         # Entartete kurve (stillstand, NaN) -- alter weg als rueckfall.
@@ -6305,6 +6318,8 @@ class Predictor:
         if total <= 0.0 or limit >= total:
             return None
         count = int(math.ceil(n * (limit / total)))
+        q = max(1, int(getattr(self, '_display_quantum', 8)))
+        count = int(round(count / q)) * q
         return max(2, min(n, count))
 
     def get_points(self):

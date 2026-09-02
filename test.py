@@ -36,6 +36,28 @@ def predictor_horizon_lengths(base_length, manual_mult, warp_mult,
     return drawn, drawn * warp_mult
 
 
+def horizon_targets(base_length, manual_mult, warp_mult, max_points,
+                    base_spacing, *, grabbing=False, ceiling_mult=None):
+    """Wie `predictor_horizon_lengths`, aber mit dem slider-griff.
+
+    Solange der spieler den horizont-regler HAELT (`grabbing`), wird die
+    GERECHNETE laenge so bestimmt, als staende der manuelle faktor auf
+    `ceiling_mult` -- sie aendert sich dann nicht, waehrend der knauf
+    wandert, also greift die 1e-9-schranke in `apply_predictor_horizon`
+    genau einmal und der einzige aufruf pro frame ist das O(1)
+    `set_display_length`. Die GEZEICHNETE laenge folgt weiter dem echten
+    faktor. Siehe plans/predictor_horizon_slider_design.md.
+    """
+    drawn, wanted = predictor_horizon_lengths(
+        base_length, manual_mult, warp_mult, max_points, base_spacing,
+    )
+    if grabbing and ceiling_mult is not None:
+        _, wanted = predictor_horizon_lengths(
+            base_length, float(ceiling_mult), warp_mult, max_points, base_spacing,
+        )
+    return drawn, wanted
+
+
 def main():
     import os
     import time
@@ -169,6 +191,9 @@ def main():
     predictor = Predictor(recompute_every_update=True, **predictor_kwargs)
     # Übrige Predictor-Parameter (Qualität, Toleranzen, Apsis-Marker) aus config.json
     config.apply_to_predictor(predictor)
+    # Auf wie viele punkte die GEZEICHNETE laenge gerundet wird -- haelt die
+    # view-identitaet (get_points()) waehrend eines langsamen regler-zugs stehen.
+    predictor._display_quantum = int(config.get('predictor.display_length_quantum_points', 8))
     # Look-ahead horizon (length) is the cost knob; point spacing (precision) is
     # cosmetic. Pin the horizon from startup so changing spacing ('9'/'0') no
     # longer moves the horizon (and thus no longer changes compute cost).
@@ -212,6 +237,16 @@ def main():
     precision_step = max(float(config.get('predictor.precision_step_factor', 2.0)), 1.0 + 1e-9)
     predictor_toggle_points = int(config.get('predictor.toggle_num_points', 30))
     predictor_min_precision = float(config.get('predictor.min_precision', 1.0))
+    HORIZON_MULT_MIN = float(config.get('predictor.horizon_slider_min_mult', 0.25))
+    # Die decke MUSS auf dem punktbudget liegen: darueber vergroebert der
+    # griff den punktabstand fuer die ganze zugdauer und hebt die
+    # fernfeld-schrittdecke -- genau der artefakt, den §23 verhindert.
+    HORIZON_MULT_MAX = min(
+        float(config.get('predictor.horizon_slider_max_mult', 4.0)),
+        PREDICTOR_MAX_POINTS * PREDICTOR_BASE_SPACING
+        / max(PREDICTOR_BASE_LENGTH, 1e-9),
+    )
+    HORIZON_SWEEP_S = float(config.get('predictor.horizon_slider_sweep_seconds', 2.5))
     if verbose:
         print(f"PREDICTOR DEBUG: async_compute = {predictor.async_compute}")
         print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
@@ -345,6 +380,14 @@ def main():
     ui_state.on_change = apply_frame_selection
     apply_frame_selection()
 
+    def get_predictor_horizon_mult():
+        return predictor_manual_mult
+
+    def set_predictor_horizon_mult(mult):
+        nonlocal predictor_manual_mult
+        predictor_manual_mult = max(HORIZON_MULT_MIN,
+                                    min(HORIZON_MULT_MAX, float(mult)))
+
     # Spieler-HUD aufbauen. Muss NACH ui_state und dem frame-selector
     # entstehen: die rahmenwahl im HUD schreibt in ui_state, und dessen
     # aenderungs-benachrichtigung ist erst jetzt verdrahtet.
@@ -358,6 +401,11 @@ def main():
             tick_rate=float(max(1, FPS)),
             realtime_warp_max=REALTIME_WARP_MAX,
             warp_timescale_divisor=WARP_TIMESCALE_DIVISOR,
+            horizon_mult_get=get_predictor_horizon_mult,
+            horizon_mult_set=set_predictor_horizon_mult,
+            horizon_mult_min=HORIZON_MULT_MIN,
+            horizon_mult_max=HORIZON_MULT_MAX,
+            horizon_sweep_s=HORIZON_SWEEP_S,
         )
 
     # Taste Home holt die ansicht zum schiff zurueck -- der weg heraus aus
@@ -561,10 +609,14 @@ def main():
         # Hat der spieler mit '+' bereits ueber das budget hinaus verlaengert,
         # faellt der raffungsfaktor auf 1: seine eigene vergroeberung bleibt
         # (die ist gewollt und dokumentiert), die der raffung kommt nicht dazu.
-        drawn, wanted = predictor_horizon_lengths(
+        grabbing = (hud is not None
+                    and getattr(hud, 'horizon', None) is not None
+                    and hud.horizon.is_grabbing)
+        drawn, wanted = horizon_targets(
             PREDICTOR_BASE_LENGTH, predictor_manual_mult,
             predictor_warp_length_mult(),
             PREDICTOR_MAX_POINTS, PREDICTOR_BASE_SPACING,
+            grabbing=grabbing, ceiling_mult=HORIZON_MULT_MAX,
         )
         # GEZEICHNET wird immer nur der un-geraffte horizont. Ohne das wickelt
         # sich die linie im zeitraffer mehrfach um die bahn, waehrend sie in

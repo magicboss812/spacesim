@@ -8,9 +8,10 @@ from .button import Button, SegmentedControl, Toggle
 from .dropdown import Dropdown
 from .label import Label, Readout
 from .panel import Group, Panel, Stack
+from .rate_slider import HorizonSlider
 from .slider import Slider
 
 __all__ = [
-    'Button', 'Dropdown', 'Group', 'Label', 'Panel', 'Readout',
-    'SegmentedControl', 'Slider', 'Stack', 'Toggle',
+    'Button', 'Dropdown', 'Group', 'HorizonSlider', 'Label', 'Panel',
+    'Readout', 'SegmentedControl', 'Slider', 'Stack', 'Toggle',
 ]
