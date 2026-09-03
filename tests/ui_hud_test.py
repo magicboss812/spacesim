@@ -29,7 +29,7 @@ import moderngl
 import pygame
 from pygame.locals import DOUBLEBUF, OPENGL, RESIZABLE
 
-from vec import Vec2, G
+from physics.vec import Vec2, G
 from ui.hud.telemetry import (
     OrbitalElements,
     compass_from_frame_direction,
@@ -157,7 +157,7 @@ print("3. Layout und bedienung (echtes GL-fenster)")
 
 W, H = 1280, 800
 # pygame.init() waere hier dasselbe wie im spiel: mixer und joystick
-# zaehlen geraete auf und kosten zusammen ~45 s. Siehe test.py.
+# zaehlen geraete auf und kosten zusammen ~45 s. Siehe runtime/window.py.
 pygame.display.init()
 pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL | RESIZABLE, vsync=0)
@@ -165,17 +165,18 @@ gl = moderngl.create_context()
 gl.enable(moderngl.BLEND)
 gl.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
-from camera import Camera
-from loader import ConfigLoader, SystemLoader
-from predictor import Predictor
-from rendering import Renderer
-from schiff import schiffcontrol
+from ship.camera import Camera
+from config.loader import ConfigLoader
+from runtime.system_loader import SystemLoader
+from ship.predictor import Predictor
+from render.renderer import Renderer
+from ship.control import schiffcontrol
 from ui import UIContext, UIRoot, UIState
 from ui.hud import Hud
 from ui.hud.layout import WARP_STEPS
 from ui.hud.navball import GAUGE_RADIUS, THROTTLE_ARC
 from ui import units
-from world import world as World
+from physics.world import world as World
 
 config = ConfigLoader(None)
 config.load()

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import math
 from typing import Callable, Sequence
 
-from vec import Vec2, G as NEWTONIAN_G
+from physics.vec import Vec2, G as NEWTONIAN_G
 
 try:
     import numpy as _np

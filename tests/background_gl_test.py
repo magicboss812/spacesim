@@ -52,9 +52,9 @@ pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL, vsync=0)
 gl = moderngl.create_context()
 
-from camera import Camera                                  # noqa: E402
-from loader import ConfigLoader                             # noqa: E402
-from rendering import Renderer                              # noqa: E402
+from ship.camera import Camera                                  # noqa: E402
+from config.loader import ConfigLoader                             # noqa: E402
+from render.renderer import Renderer                              # noqa: E402
 
 renderer = Renderer(W, H, enable_fxaa=False, ctx=gl)
 camera = Camera(None, W, H)

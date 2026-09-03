@@ -30,8 +30,8 @@ except Exception:
 
 import numpy as np
 
-import devui
-from devui import DevContext, TimingHistory
+from ui import devui
+from ui.devui import DevContext, TimingHistory
 
 
 FAILURES = []

@@ -135,12 +135,24 @@ class HorizonSlider(Widget):
 
     # ------------------------------------------------------------ zeichnen
     def _horizon_metres(self):
+        """Die GEZEICHNETE horizontlaenge, aus dem predictor zurueckgelesen.
+
+        `get_display_length()` gibt die GERECHNETE laenge (aufs punktbudget
+        geklemmt) -- und die eilt dem knauf waehrend eines zugs voraus, weil
+        `horizon_targets()` sie auf groben sprossen mitfaehrt. Frueher stand
+        hier deshalb den ganzen zug ueber die reglerdecke statt der gewaehlte
+        wert. Der clip `predictor.display_length` ist der ehrliche wert: genau
+        so viel wird gezeichnet.
+        """
         pred = self.predictor
         if pred is not None:
             try:
                 length = pred.get_display_length()
             except Exception:
                 length = None
+            clip = getattr(pred, 'display_length', None)
+            if clip is not None and clip > 0.0 and math.isfinite(clip):
+                length = clip if length is None else min(float(length), float(clip))
             if length and math.isfinite(length):
                 return float(length)
         return None

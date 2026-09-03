@@ -34,7 +34,7 @@ import math
 
 import numpy as np
 
-from body_style import _Rng, _imul, _MASK32, seed_from_name  # noqa: F401
+from bodies.style import _Rng, _imul, _MASK32, seed_from_name  # noqa: F401
 
 #: Die beiden gewaehlten entwuerfe.
 VARIANTS = ('rosette', 'signature')

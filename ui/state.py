@@ -14,7 +14,7 @@ eine reine darstellungs-transformation; gespeicherter koerper-zustand bleibt
 absolut (barycentrisch).
 """
 
-from reference_frames import (
+from physics.reference_frames import (
     BODY_CENTRED_BODY_DIRECTION,
     BODY_CENTRED_NON_ROTATING,
 )
@@ -181,7 +181,7 @@ class UIState:
         damit einen frame-neuaufbau -- zwei aufrufe wuerden den bezugsrahmen
         kurzzeitig in einen zwischenzustand versetzen.
         """
-        from reference_frames import (
+        from physics.reference_frames import (
             BODY_CENTRED_BODY_DIRECTION,
             BODY_CENTRED_NON_ROTATING,
         )
@@ -196,7 +196,7 @@ class UIState:
 
     def view_mode(self):
         """Aktueller modus als index fuer die HUD-rahmenwahl."""
-        from reference_frames import BODY_CENTRED_BODY_DIRECTION
+        from physics.reference_frames import BODY_CENTRED_BODY_DIRECTION
         if self.target_overlay_enabled:
             return 2
         return 0 if self.frame_extension == BODY_CENTRED_BODY_DIRECTION else 1

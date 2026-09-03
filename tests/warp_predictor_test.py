@@ -38,10 +38,11 @@ except Exception:
 
 import numpy as np
 
-from vec import G, Vec2
-from loader import ConfigLoader, SystemLoader
-from predictor import Predictor
-from world import world as World
+from physics.vec import G, Vec2
+from config.loader import ConfigLoader
+from runtime.system_loader import SystemLoader
+from ship.predictor import Predictor
+from physics.world import world as World
 
 FAILURES = []
 
@@ -373,7 +374,7 @@ print("6. Echtzeit ist bei jeder bildrate erreichbar")
 # realtime_warp_max. Im spiel hiess das: der schub war in JEDER stufe
 # gesperrt, der regler zeigte staendig "HOLD", und die vorhersage kam nie aus
 # dem zeitraffer-halt heraus.
-from camera import Camera
+from ship.camera import Camera
 from ui.hud.layout import WARP_STEPS
 
 _config = ConfigLoader(None)
@@ -497,7 +498,7 @@ print("8. Die tangente ueberlebt die schrumpfende kopfsehne")
 # verschieden, ~37 m). Der winkelfehler ist ~ d/c und wird mit c -> 0
 # beliebig gross -- das sind die navball-marker, die nach ein paar sekunden
 # zeitraffer in jede richtung springen.
-from reference_frames import IdentityReferenceFrame, _prograde_from_line
+from physics.reference_frames import IdentityReferenceFrame, _prograde_from_line
 
 _frame = IdentityReferenceFrame()
 _S = 1.0e6        # stuetzweite
@@ -564,7 +565,7 @@ check(_new is not None and _old is not None
 
 # Und dasselbe am echten lauf: ueber viele zeitraffer-frames darf der fehler
 # gegen die wahre bahntangente weder gross werden noch mit der zeit wachsen.
-from reference_frames import (
+from physics.reference_frames import (
     BodyCentredNonRotatingReferenceFrame,
     apparent_orbital_directions,
 )
@@ -1416,7 +1417,9 @@ def _w17_frame(w, ship, p, rate):
     wanted = drawn * _w17_mult(rate)
     changed = False
     if hasattr(p, 'set_display_length'):
-        p.set_display_length(drawn if wanted > drawn else None)
+        # Wie test.apply_predictor_horizon(): IMMER `drawn`, nie None -- der
+        # clip gehoert an die gewollte laenge, nicht an die angeforderte.
+        p.set_display_length(drawn)
     # Das punktbudget waechst mit dem horizont mit (apply_predictor_horizon):
     # auch das muss WEICH gehen, sonst kostet jeder stufenwechsel wieder
     # einen synchronen neuaufbau im hauptthread.
@@ -1542,7 +1545,7 @@ print("18. Welt und vorhersage rechnen dieselbe bahn")
 # Geprueft wird die groesse selbst, nicht die umsetzung: eine konvergierte
 # integration darf nicht davon abhaengen, wie fein man den weg zerlegt.
 
-from vec import Vec2 as _Vec2
+from physics.vec import Vec2 as _Vec2
 
 
 def _earth_orbit_scene(rp=2.0e7, ecc=0.3):
@@ -1748,7 +1751,7 @@ print("19. Der selbst vorangestellte kopf faelscht die apsis-suche nicht")
 # direkt auf dem schiff. Geprueft wird am kern selbst: dieselbe kurve, ein
 # kuenstlich versetzter kopf, einmal mit und einmal ohne `skip_head`.
 
-from predictor import _find_apsis_markers_numba as _apsis_kernel
+from ship.predictor import _find_apsis_markers_numba as _apsis_kernel
 
 _w19, _ship19, _p19, _erde19, _ = _earth_orbit_scene()
 try:
@@ -2118,7 +2121,7 @@ for _chunk22 in (1000.0, 4375.0):
 print()
 print("23. der zeitraffer aendert die gezeichnete linie nicht")
 
-from test import predictor_horizon_lengths as _horizon23
+from ship.horizon import predictor_horizon_lengths as _horizon23
 
 _BASE_POINTS23 = 10000
 _BASE_SPACING23 = 1.0e6
@@ -2162,7 +2165,7 @@ def _drawn_line23(manual, warp_mult):
     w, ship, p = _scene23()
     drawn, wanted = _horizon23(_BASE_LENGTH23, manual, warp_mult,
                                _MAX_POINTS23, _BASE_SPACING23)
-    p.set_display_length(drawn if wanted > drawn else None)
+    p.set_display_length(drawn)
     p.set_num_points(int(min(_MAX_POINTS23,
                              max(1, math.ceil(wanted / _BASE_SPACING23)))))
     p.set_length(wanted)

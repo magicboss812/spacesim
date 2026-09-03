@@ -33,17 +33,17 @@
 ### Requirements:
 `pip install pygame moderngl numba numpy imgui-bundle`
 ### Starten:
-`python test.py`
+`python main.py`  (aus dem ordner `spacesim/` heraus)
 
 ### Konfiguration:
-Alle spielbaren Parameter stehen in **`config.json`** — je eine Zeile pro Parameter,
+Alle spielbaren Parameter stehen in **`config/config.json`** — je eine Zeile pro Parameter,
 striktes JSON ohne Kommentare. Die Datei ist in Abschnitte
 gegliedert (`window`, `simulation`, `physics`, `camera`, `ship`, `predictor`,
-`renderer`, `debug`); `loader.ConfigLoader` liest sie und verteilt die Werte auf
-die jeweiligen Module (`world.py`, `camera.py`, `schiff.py`, `predictor.py`,
-`rendering.py`). Fehlende Schlüssel behalten den Default im Code, unbekannte
-werden beim Start gemeldet. `solar_system.json` bleibt unverändert die Datei für
-die Himmelskörper selbst.
+`renderer`, `debug`); `config.loader.ConfigLoader` liest sie und verteilt die Werte auf
+die jeweiligen Module (`physics/world.py`, `ship/camera.py`, `ship/control.py`,
+`ship/predictor/`, `render/renderer.py`). Fehlende Schlüssel behalten den Default im Code, unbekannte
+werden beim Start gemeldet. `config/solar_system.json` bleibt unverändert die Datei
+für die Himmelskörper selbst.
 
 ---
 ## Physik der Schiffsintegration

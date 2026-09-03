@@ -38,7 +38,7 @@ import numpy as np
 import pygame
 from pygame.locals import DOUBLEBUF, OPENGL
 
-import body_style
+from bodies import style as body_style
 
 W, H = 900, 700
 FAILURES = []
@@ -144,11 +144,12 @@ pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL, vsync=0)
 gl = moderngl.create_context()
 
-from camera import Camera
-from loader import ConfigLoader, SystemLoader
-from rendering import Renderer
-from vec import Vec2
-from world import world as World
+from ship.camera import Camera
+from config.loader import ConfigLoader
+from runtime.system_loader import SystemLoader
+from render.renderer import Renderer
+from physics.vec import Vec2
+from physics.world import world as World
 
 config = ConfigLoader()
 world = World(float(config.get('physics.gravitational_constant', 6.6730831e-11)))

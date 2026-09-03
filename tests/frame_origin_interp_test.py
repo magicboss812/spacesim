@@ -44,8 +44,8 @@ except Exception:
 
 import numpy as np
 
-from loader import SystemLoader
-from reference_frames import BodyCentredNonRotatingReferenceFrame
+from runtime.system_loader import SystemLoader
+from physics.reference_frames import BodyCentredNonRotatingReferenceFrame
 
 FAILURES = []
 

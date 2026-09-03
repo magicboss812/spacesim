@@ -22,8 +22,8 @@ import math
 import moderngl
 import numpy as np
 
-import background
-import body_icon
+from render import background
+from bodies import icon as body_icon
 
 try:
     from imgui_bundle import imgui

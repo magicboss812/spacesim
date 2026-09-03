@@ -1,10 +1,10 @@
 import math
-from vec import Vec2
-from bodies import body
+from physics.vec import Vec2
+from bodies.body import body
 
 try:
     import numpy as _np
-    import world_kernels as _wk
+    import physics.world_kernels as _wk
     _KERNELS_OK = bool(_wk.NUMBA_AVAILABLE)
 except Exception:                                    # pragma: no cover
     _np = None
@@ -172,6 +172,41 @@ class world:
         """Tatsaechlich benutzte decke -- nie kleiner als die konfigurierte."""
         base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
         return max(base, float(getattr(self, "integrator_max_step_effective", 0.0)))
+
+    def step(self, sim_seconds, max_substep):
+        """Rueckt die welt um `sim_seconds` vor, aufgeteilt in stuecke.
+
+        Stand frueher als `step_simulation()` in `test.py` -- also ausserhalb
+        der welt, obwohl es ihre eigene schrittregel ist.
+
+        Die stueckgroesse ist `max_substep` -- ausser im zeitraffer, wo die
+        integrator-decke darueber liegt. Das ist kein detail: solange die
+        stuecke 1000 s bleiben, kostet JEDES stueck mindestens einen
+        teilschritt, und die decke aus set_warp_step_ceiling() kann gar nicht
+        wirken. Gemessen bei 365 d/s: die teilschritt-zahl bleibt bei 176
+        (= 175200/1000) egal wie hoch die decke gesetzt wird. Es sind also
+        ZWEI decken, und beide muessen steigen, sonst bringt keine etwas.
+
+        Die reihenfolge dynamik-dann-planeten ist die des predictors und wird
+        von `tests/warp_predictor_test.py` §18 und §22 geprueft -- letzterer
+        stellt sicher, dass der weltzustand nicht davon abhaengt, wie ein
+        frame in stuecke zerlegt wurde.
+        """
+        if sim_seconds <= 0.0:
+            return
+        # Decke aus der raffung ableiten (in echtzeit bleibt sie bei 30 s, der
+        # integrator rechnet dann bit-identisch wie bisher).
+        ceiling = self.set_warp_step_ceiling(sim_seconds)
+        chunk = max(max_substep, ceiling)
+        if sim_seconds <= chunk:
+            self.update_dynamics(sim_seconds)
+            self.update_planets(sim_seconds)
+            return
+        steps = int(math.ceil(sim_seconds / chunk))
+        sub_dt = sim_seconds / steps
+        for _ in range(steps):
+            self.update_dynamics(sub_dt)
+            self.update_planets(sub_dt)
 
     def update_planets(self, dt):
         for body in self.body:
