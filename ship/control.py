@@ -1,6 +1,6 @@
 import pygame
 import math
-from vec import Vec2
+from physics.vec import Vec2
 
 
 # Latched orientation-hold modes, keyed by the field returned from

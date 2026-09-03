@@ -54,7 +54,7 @@ def check(condition, label, detail=''):
 
 
 # Nur display+font -- pygame.init() zaehlt mixer- und joystick-geraete auf
-# und kostet dabei ~45 s. Siehe test.py.
+# und kostet dabei ~45 s. Siehe runtime/window.py.
 pygame.display.init()
 pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL | RESIZABLE, vsync=0)

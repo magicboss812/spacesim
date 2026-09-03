@@ -22,9 +22,9 @@ import os
 import moderngl
 import numpy as np
 
-_SHADER_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shaders'
-)
+# Der pfad zu den GLSL-quellen kommt aus EINER quelle (render/__init__.py),
+# statt ihn hier ein drittes mal nachzurechnen.
+from render import GL_DIR as _SHADER_DIR
 
 _TAU = 6.28318530718
 _TRANSPARENT = (0.0, 0.0, 0.0, 0.0)

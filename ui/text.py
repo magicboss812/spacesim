@@ -37,9 +37,7 @@ import pygame
 from .theme import DEFAULT_THEME
 
 _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
-_SHADER_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'shaders'
-)
+from render import GL_DIR as _SHADER_DIR
 
 
 class TextRenderer:

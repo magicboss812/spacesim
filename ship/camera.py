@@ -1,5 +1,5 @@
 import pygame
-from vec import Vec2
+from physics.vec import Vec2
 import math
 
 class Camera:
@@ -506,6 +506,47 @@ class Camera:
             return
         self.min_sim_dt = min(float(self.min_sim_dt), rate / ticks)
         self.sim_dt = max(float(self.sim_dt), self.min_sim_dt)
+
+    def warp_rate(self, tick_rate):
+        """Aktuelle raffung in sim-sekunden je ECHTsekunde.
+
+        `sim_dt` ist je TICK angegeben, die zeitraffer-stufen des HUDs je
+        echtsekunde -- diese multiplikation ist der einzige uebergang zwischen
+        beiden, und sie stand vorher als closure in `test.py`.
+        """
+        return float(self.sim_dt) * float(tick_rate)
+
+    def thrust_allowed(self, tick_rate, realtime_warp_max):
+        """Schub nur in echtzeit -- siehe .claude/rules/camera-input.md.
+
+        Kleine toleranz, damit die unterste stufe nicht an rundung scheitert.
+        """
+        return self.warp_rate(tick_rate) <= float(realtime_warp_max) * 1.001
+
+    def clamp_warp_to_timescale(self, t_char, tick_rate, divisor,
+                                realtime_warp_max):
+        """Raffung auf das begrenzen, was die BAHN noch aufloest.
+
+        Nahe an einem koerper ist die obergrenze keine frage der rechen-
+        leistung: ein frame bei 1 y/s rueckt um 48 stunden vor, das sind rund
+        24 umlaeufe eines 2-stunden-orbits. Gemessen in einem 2000-km-orbit
+        bei 1 y/s: 5120 teilschritte und 270 ms je frame -- und die waeren
+        auch dann noetig, wenn sie billig waeren, weil sonst schlicht die
+        bahn verloren geht.
+
+        Das HUD blendet gesperrte stufen bereits ab; das hier ist der riegel
+        fuer PageUp/PageDown und die dev-oberflaeche, die daran vorbeigehen.
+        `t_char` kommt aus `world.characteristic_timescale(ship)`; ist sie
+        unbekannt (None oder <= 0), passiert nichts.
+        """
+        if not t_char or t_char <= 0.0:
+            return
+        ticks = float(tick_rate)
+        cap_rate = max(float(t_char) / float(divisor) * ticks,
+                       float(realtime_warp_max))
+        if self.warp_rate(ticks) > cap_rate:
+            self.sim_dt = max(float(getattr(self, 'min_sim_dt', 1e-6)),
+                              cap_rate / ticks)
 
     def _last_motion_dt(self):
         """Zeit seit dem letzten MOUSEMOTION, für die nachlauf-geschwindigkeit."""

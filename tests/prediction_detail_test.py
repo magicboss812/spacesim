@@ -70,7 +70,7 @@ def check(condition, label, detail=''):
 
 W, H = 1280, 800
 # Nur display+font -- pygame.init() zaehlt mixer- und joystick-geraete auf
-# und kostet dabei ~45 s. Siehe test.py.
+# und kostet dabei ~45 s. Siehe runtime/window.py.
 pygame.display.init()
 pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL | RESIZABLE, vsync=0)
@@ -78,14 +78,14 @@ gl = moderngl.create_context()
 gl.enable(moderngl.BLEND)
 gl.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
-from vec import Vec2, G
-from bodies import body, schiff
-from camera import Camera
-from loader import ConfigLoader
-from predictor import Predictor
-from rendering import Renderer
-from schiff import schiffcontrol
-from world import world as World
+from physics.vec import Vec2, G
+from bodies.body import body, schiff
+from ship.camera import Camera
+from config.loader import ConfigLoader
+from ship.predictor import Predictor
+from render.renderer import Renderer
+from ship.control import schiffcontrol
+from physics.world import world as World
 
 # ---------------------------------------------------------------- szene ----
 # Ein kreis, dessen radius und mittelpunkt wir exakt kennen. Erdmasse und ein

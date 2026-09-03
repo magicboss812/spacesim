@@ -18,10 +18,10 @@ except Exception:
 
 import numpy as np
 
-from bodies import body as Body
-from vec import Vec2, G
-from reference_frames import BodyCentredNonRotatingReferenceFrame
-import orbit_lines
+from bodies.body import body as Body
+from physics.vec import Vec2, G
+from physics.reference_frames import BodyCentredNonRotatingReferenceFrame
+from bodies import orbit_lines
 
 FAILURES = []
 
@@ -368,7 +368,7 @@ close(oset.alpha(mond), FLOOR, 1e-3, "praediktor aus -> boden")
 # ----------------------------------------------------------------------
 print("\n§6  kosten am echten sonnensystem")
 # ----------------------------------------------------------------------
-from loader import SystemLoader
+from runtime.system_loader import SystemLoader
 
 real_bodies = SystemLoader("solar_system.json").load()
 n_lines = sum(1 for b in real_bodies
@@ -407,7 +407,7 @@ check(quiet_ms < 0.20, "ruhiger frame (nur nachblenden) unter 0.20 ms",
 # ----------------------------------------------------------------------
 print("\n§7  projektion je ZEIT statt je PUNKT")
 # ----------------------------------------------------------------------
-from reference_frames import (BodyCentredNonRotatingReferenceFrame,
+from physics.reference_frames import (BodyCentredNonRotatingReferenceFrame,
                               BodyCentredBodyDirectionReferenceFrame)
 
 r_sonne = next(b for b in real_bodies if b.name == 'Sonne')

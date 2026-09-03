@@ -49,7 +49,7 @@ def check(condition, label, detail=''):
 
 W, H = 1280, 800
 # Nur display+font -- pygame.init() zaehlt mixer- und joystick-geraete auf
-# und kostet dabei ~45 s. Siehe test.py.
+# und kostet dabei ~45 s. Siehe runtime/window.py.
 pygame.display.init()
 pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL | RESIZABLE, vsync=0)
@@ -57,14 +57,15 @@ gl = moderngl.create_context()
 gl.enable(moderngl.BLEND)
 gl.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
-from vec import G
-from camera import Camera
-from loader import ConfigLoader, SystemLoader
-from predictor import Predictor
-from reference_frames import PlottingFrameAdapter, ReferenceFrameSelector
-from rendering import Renderer
-from schiff import schiffcontrol
-from world import world as World
+from physics.vec import G
+from ship.camera import Camera
+from config.loader import ConfigLoader
+from runtime.system_loader import SystemLoader
+from ship.predictor import Predictor
+from physics.reference_frames import PlottingFrameAdapter, ReferenceFrameSelector
+from render.renderer import Renderer
+from ship.control import schiffcontrol
+from physics.world import world as World
 
 config = ConfigLoader(None)
 config.load()
@@ -232,7 +233,7 @@ print("4. Jede stapel-transformation gegen ihre skalare fassung")
 # abgedeckt sind, die nicht als haupt-plotrahmen auftreten. Der
 # target-rahmen benennt seine koerper target/reference statt
 # primary/secondary -- eine vertauschung faellt genau hier auf.
-from reference_frames import (
+from physics.reference_frames import (
     BodyCentredBodyDirectionReferenceFrame,
     BodyCentredNonRotatingReferenceFrame,
     IdentityReferenceFrame,

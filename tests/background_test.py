@@ -27,8 +27,8 @@ except Exception:
 
 import numpy as np
 
-import background
-from background import BackgroundLayer
+from render import background
+from render.background import BackgroundLayer
 
 FAILURES = []
 
@@ -872,7 +872,7 @@ print("\n§7  konfiguration -- config.json, layer und ImGui-panel decken sich")
 
 import re as _re
 
-from loader import ConfigLoader
+from config.loader import ConfigLoader
 
 _here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

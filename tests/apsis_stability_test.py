@@ -44,10 +44,11 @@ except Exception:
 
 import numpy as np
 
-from vec import G, Vec2
-from loader import ConfigLoader, SystemLoader
-from predictor import Predictor
-from world import world as World
+from physics.vec import G, Vec2
+from config.loader import ConfigLoader
+from runtime.system_loader import SystemLoader
+from ship.predictor import Predictor
+from physics.world import world as World
 
 FAILURES = []
 

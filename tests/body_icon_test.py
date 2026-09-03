@@ -34,7 +34,7 @@ import numpy as np
 import pygame
 from pygame.locals import DOUBLEBUF, OPENGL
 
-import body_icon
+from bodies import icon as body_icon
 
 W, H = 640, 480
 FAILURES = []
@@ -167,8 +167,8 @@ pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL, vsync=0)
 gl = moderngl.create_context()
 
-from loader import ConfigLoader                                # noqa: E402
-from rendering import Renderer                                 # noqa: E402
+from config.loader import ConfigLoader                                # noqa: E402
+from render.renderer import Renderer                                 # noqa: E402
 
 renderer = Renderer(W, H, enable_fxaa=False, ctx=gl)
 _config = ConfigLoader()

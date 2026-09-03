@@ -55,7 +55,7 @@ import pygame
 from pygame.locals import DOUBLEBUF, OPENGL
 
 # Nur display+font -- pygame.init() zaehlt mixer- und joystick-geraete auf
-# und kostet dabei ~45 s. Siehe test.py.
+# und kostet dabei ~45 s. Siehe runtime/window.py.
 pygame.display.init()
 pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL, vsync=0)
@@ -63,11 +63,12 @@ gl = moderngl.create_context()
 gl.enable(moderngl.BLEND)
 gl.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
-from camera import Camera
-from loader import ConfigLoader, SystemLoader
-from rendering import Renderer
-from vec import Vec2
-from world import world as World
+from ship.camera import Camera
+from config.loader import ConfigLoader
+from runtime.system_loader import SystemLoader
+from render.renderer import Renderer
+from physics.vec import Vec2
+from physics.world import world as World
 
 config = ConfigLoader()
 world = World(float(config.get('physics.gravitational_constant', 6.6730831e-11)))
@@ -112,7 +113,7 @@ for _ in range(30):                     # aufwaermen (shader, caches)
 GAP_S = 0.006
 draw_frame()
 after_render = dict(renderer.last_frame_timings)
-busy_wait(GAP_S)                        # das tut in test.py ui_root.render()
+busy_wait(GAP_S)                        # das tut in runtime/loop.py ui_root.render()
 renderer.present()
 after_present = dict(renderer.last_frame_timings)
 

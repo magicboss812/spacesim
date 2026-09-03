@@ -20,7 +20,7 @@ import time
 
 import numpy as np
 
-from vec import G
+from physics.vec import G
 
 
 def future_track(body, times, memo=None):

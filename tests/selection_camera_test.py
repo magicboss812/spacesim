@@ -36,8 +36,8 @@ except Exception:
 
 import numpy as np
 
-from camera import Camera
-from vec import Vec2
+from ship.camera import Camera
+from physics.vec import Vec2
 
 W, H = 800, 500
 DT = 1.0 / 180.0
@@ -387,7 +387,7 @@ import pygame
 from pygame.locals import DOUBLEBUF, OPENGL
 
 # Nur display+font -- pygame.init() zaehlt mixer- und joystick-geraete auf
-# und kostet dabei ~45 s. Siehe test.py.
+# und kostet dabei ~45 s. Siehe runtime/window.py.
 pygame.display.init()
 pygame.font.init()
 pygame.display.set_mode((W, H), DOUBLEBUF | OPENGL, vsync=0)
@@ -395,15 +395,17 @@ gl = moderngl.create_context()
 gl.enable(moderngl.BLEND)
 gl.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
-from loader import ConfigLoader, SystemLoader
-from reference_frames import (
+from config.loader import ConfigLoader
+
+from runtime.system_loader import SystemLoader
+from physics.reference_frames import (
     BODY_CENTRED_BODY_DIRECTION,
     BODY_CENTRED_NON_ROTATING,
     PlottingFrameAdapter,
     ReferenceFrameSelector,
 )
-from rendering import Renderer
-from world import world as World
+from render.renderer import Renderer
+from physics.world import world as World
 
 config = ConfigLoader()
 world = World(float(config.get('physics.gravitational_constant', 6.6730831e-11)))

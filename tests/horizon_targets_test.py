@@ -1,4 +1,4 @@
-"""Kopftest fuer test.horizon_targets -- die reine laengen-regel des
+"""Kopftest fuer ship.horizon.horizon_targets -- die reine laengen-regel des
 vorhersage-horizonts. Modulebene, damit sie hier messbar ist statt
 nachgebaut (dieselbe begruendung wie bei predictor_horizon_lengths).
 
@@ -14,8 +14,13 @@ try:
 except Exception:
     pass
 
+<<<<<<< Updated upstream
 from test import (horizon_compute_rung, horizon_targets,
                   predictor_horizon_lengths)
+=======
+from ship.horizon import (horizon_compute_rung, horizon_targets,
+                          predictor_horizon_lengths)
+>>>>>>> Stashed changes
 
 FAILURES = []
 
@@ -113,8 +118,8 @@ check(a == b, "kein current_length -> unveraendert", f"{a} vs {b}")
 # --- 4. mit realem Predictor: set_length genau einmal je griff -------
 print("4. griff-kontrakt gegen einen echten Predictor")
 import numpy as np
-from predictor import Predictor
-from vec import G
+from ship.predictor import Predictor
+from physics.vec import G
 
 
 class _Body:
@@ -246,4 +251,4 @@ if FAILURES:
     for f in FAILURES:
         print(f"  {f}")
     sys.exit(1)
-print("test.horizon_targets: alle pruefungen bestanden")
+print("ship.horizon.horizon_targets: alle pruefungen bestanden")

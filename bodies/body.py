@@ -1,6 +1,6 @@
 import math
 from operator import pos
-from vec import Vec2, vec, G
+from physics.vec import Vec2, vec, G
 
 
 def kepler_relative_xy(a, e, nu0, arg, mu, dt):
