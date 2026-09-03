@@ -366,6 +366,7 @@ class ConfigLoader:
             ('horizon_slider_min_mult', None, None),
             ('horizon_slider_max_mult', None, None),
             ('horizon_slider_sweep_seconds', None, None),
+            ('horizon_grab_step_factor', None, None),
             ('quality', None, None),
             ('enabled', None, None),
             ('toggle_num_points', None, None),

@@ -14,7 +14,8 @@ try:
 except Exception:
     pass
 
-from test import horizon_targets, predictor_horizon_lengths
+from test import (horizon_compute_rung, horizon_targets,
+                  predictor_horizon_lengths)
 
 FAILURES = []
 
@@ -30,40 +31,84 @@ def check(condition, label, detail=''):
 BASE = 1.0e10          # 10000 punkte x 1e6 m abstand
 MAXP = 40000
 SPACING = 1.0e6
-CEIL = 4.0
+GRAB_STEP = 4.0
 
 # --- 1. ohne grabbing exakt wie predictor_horizon_lengths -------------
 print("1. deckungsgleich ohne grabbing")
-for mult in (0.25, 1.0, 2.0, 4.0):
+for mult in (0.25, 1.0, 2.0, 4.0, 64.0, 256.0):
     for warp in (1.0, 4.0, 64.0):
         a = horizon_targets(BASE, mult, warp, MAXP, SPACING)
         b = predictor_horizon_lengths(BASE, mult, warp, MAXP, SPACING)
         check(a == b, f"mult={mult} warp={warp}", f"{a} vs {b}")
 
-# --- 2. beim grabbing ist `wanted` konstant, `drawn` folgt der auslenkung
-print("2. grabbing pinnt die gerechnete laenge an die decke")
-prev_wanted = None
-for mult in (0.5, 1.0, 2.0, 3.7):
-    drawn, wanted = horizon_targets(BASE, mult, 1.0, MAXP, SPACING,
-                                    grabbing=True, ceiling_mult=CEIL)
+# --- 2. die raste: sprossen liegen fest an BASE -----------------------
+print("2. horizon_compute_rung")
+check(horizon_compute_rung(BASE, BASE, GRAB_STEP) == BASE,
+      "genau auf einer sprosse -> die sprosse selbst",
+      f"{horizon_compute_rung(BASE, BASE, GRAB_STEP)}")
+check(horizon_compute_rung(BASE, BASE * 1.01, GRAB_STEP) == BASE * 4.0,
+      "knapp darueber -> naechste sprosse", "")
+check(horizon_compute_rung(BASE, BASE * 4.0, GRAB_STEP) == BASE * 4.0,
+      "exakt die naechste sprosse -> keine weitere", "")
+check(horizon_compute_rung(BASE, BASE * 5.0, GRAB_STEP) == BASE * 16.0,
+      "darueber -> uebernaechste", "")
+# Die sprosse DECKT `wanted` immer -- 0.3x liegt zwischen 0.25x und 1x, also
+# ist 1x die richtige. Nie darunter: eine zu kurze kurve waere sichtbar, eine
+# zu lange schneidet der zeichen-clip weg.
+check(horizon_compute_rung(BASE, BASE * 0.3, GRAB_STEP) == BASE,
+      "unter BASE -> die naechste sprosse darueber",
+      f"{horizon_compute_rung(BASE, BASE * 0.3, GRAB_STEP)}")
+check(horizon_compute_rung(BASE, BASE * 0.2, GRAB_STEP) == BASE * 0.25,
+      "weiter unten -> sprosse nach unten", "")
+# Ueber die ganze spanne 0.25x..256x sind es hoechstens 6 verschiedene werte.
+rungs = {horizon_compute_rung(BASE, BASE * (0.25 * (1024.0 ** (i / 400.0))),
+                              GRAB_STEP) for i in range(401)}
+check(len(rungs) <= 6, "hoechstens 6 sprossen ueber 0.25x..256x",
+      f"{len(rungs)} sprossen")
+
+# --- 3. beim grabbing waechst `wanted` nur, `drawn` folgt dem knauf ---
+print("3. grabbing rastet nach oben und schrumpft nie")
+cur = BASE
+seen = []
+for i in range(200):                       # zug nach aussen, 1x -> 256x
+    mult = 1.0 * (256.0 ** (i / 199.0))
+    drawn, cur = horizon_targets(BASE, mult, 1.0, MAXP, SPACING,
+                                 grabbing=True, current_length=cur,
+                                 grab_step_factor=GRAB_STEP)
     exp_drawn, _ = predictor_horizon_lengths(BASE, mult, 1.0, MAXP, SPACING)
-    check(abs(drawn - exp_drawn) < 1.0, f"drawn folgt mult={mult}",
-          f"{drawn} vs {exp_drawn}")
-    if prev_wanted is not None:
-        check(wanted == prev_wanted, f"wanted konstant bei mult={mult}",
-              f"{wanted} vs {prev_wanted}")
-    prev_wanted = wanted
+    if abs(drawn - exp_drawn) > 1.0:
+        check(False, f"drawn folgt mult={mult:g}", f"{drawn} vs {exp_drawn}")
+        break
+    if not seen or seen[-1] != cur:
+        seen.append(cur)
+else:
+    check(True, "drawn folgt dem knauf ueber den ganzen zug", "200 frames")
+check(all(b > a for a, b in zip(seen, seen[1:])), "wanted waechst monoton",
+      f"{[f'{v:.3g}' for v in seen]}")
+check(len(seen) <= 6, "hoechstens 6 wechsel = 6 set_length ueber den zug",
+      f"{len(seen)} wechsel")
+check(cur >= BASE * 256.0, "am ende deckt die raste den knauf",
+      f"{cur:.3g} vs {BASE * 256.0:.3g}")
 
-_, ceil_wanted = predictor_horizon_lengths(BASE, CEIL, 1.0, MAXP, SPACING)
-check(prev_wanted == ceil_wanted, "wanted == die decken-laenge",
-      f"{prev_wanted} vs {ceil_wanted}")
+# zug nach innen: kein einziger wechsel
+inward = cur
+changes = 0
+for i in range(200):
+    mult = 256.0 / (256.0 ** (i / 199.0))
+    _, new = horizon_targets(BASE, mult, 1.0, MAXP, SPACING, grabbing=True,
+                             current_length=inward, grab_step_factor=GRAB_STEP)
+    if new != inward:
+        changes += 1
+    inward = new
+check(changes == 0, "zug nach innen aendert die gerechnete laenge nie",
+      f"{changes} wechsel")
 
-# --- 3. grabbing ohne ceiling_mult faellt auf das alte verhalten -----
-print("3. grabbing ohne decke = normalverhalten")
+# --- 3b. grabbing ohne current_length faellt auf das normalverhalten --
+print("3b. grabbing ohne current_length = normalverhalten")
 a = horizon_targets(BASE, 2.0, 1.0, MAXP, SPACING, grabbing=True,
-                    ceiling_mult=None)
+                    current_length=None)
 b = predictor_horizon_lengths(BASE, 2.0, 1.0, MAXP, SPACING)
-check(a == b, "kein ceiling_mult -> unveraendert", f"{a} vs {b}")
+check(a == b, "kein current_length -> unveraendert", f"{a} vs {b}")
 
 # --- 4. mit realem Predictor: set_length genau einmal je griff -------
 print("4. griff-kontrakt gegen einen echten Predictor")
@@ -115,14 +160,16 @@ pred.set_length = lambda m, _o=_orig_sl, _c=calls: (_c.__setitem__('set_length',
 pred.set_display_length = lambda m, _o=_orig_sdl, _c=calls: (_c.__setitem__('set_display_length', _c['set_display_length'] + 1), _o(m))[1]
 
 BASE = pred.num_points * pred.precision
-CEIL = 4.0
+GRAB_STEP = 4.0
 
 
 def apply(mult, grabbing):
     """Der schwanz von test.apply_predictor_horizon, nachgebaut."""
     drawn, wanted = horizon_targets(BASE, mult, 1.0, 40000, 1.0e6,
-                                    grabbing=grabbing, ceiling_mult=CEIL)
-    pred.set_display_length(drawn if wanted > drawn else None)
+                                    grabbing=grabbing,
+                                    current_length=pred.length,
+                                    grab_step_factor=GRAB_STEP)
+    pred.set_display_length(drawn)
     pw = int(min(40000, max(1, _m.ceil(wanted / 1.0e6))))
     if pw != int(pred.num_points):
         pred.set_num_points(pw, soft=True)
@@ -136,7 +183,7 @@ apply(1.0, grabbing=False)                       # ausgangslage
 calls['set_length'] = 0
 calls['set_display_length'] = 0
 
-# 30 frames "ziehen": mult waechst, griff gehalten
+# 30 frames "ziehen": mult waechst 1x -> 4x, griff gehalten
 for i in range(30):
     apply(1.0 + i * 0.1, grabbing=True)
 check(calls['set_length'] <= 1, "set_length hoechstens 1x waehrend des griffs",
@@ -144,11 +191,28 @@ check(calls['set_length'] <= 1, "set_length hoechstens 1x waehrend des griffs",
 check(calls['set_display_length'] == 30, "set_display_length jeden frame",
       f"{calls['set_display_length']}x")
 
-# loslassen: ein weiterer set_length auf den settled-wert
+# DER FEHLER: beim loslassen darf der clip nicht ausgehen. `wanted` faellt auf
+# `drawn` zurueck, waehrend die lange kurve noch im speicher liegt -- mit dem
+# alten `drawn if wanted > drawn else None` wurde sie fuer die paar frames bis
+# zum eintreffen des kurzen auftrags ungeschnitten gezeichnet.
 before = calls['set_length']
 apply(3.9, grabbing=False)
 check(calls['set_length'] == before + 1, "beim loslassen genau ein set_length",
       f"{calls['set_length']} (war {before})")
+drawn_after, _ = predictor_horizon_lengths(BASE, 3.9, 1.0, 40000, 1.0e6)
+check(pred.display_length is not None
+      and abs(pred.display_length - drawn_after) < 1.0,
+      "der clip bleibt nach dem loslassen auf dem knauf stehen",
+      f"{pred.display_length} vs {drawn_after}")
+
+# Gegenprobe fuer die kosten der raste: ein voller zug bis 256x kostet nur
+# eine handvoll set_length, nicht eines je frame.
+apply(1.0, grabbing=False)
+calls['set_length'] = 0
+for i in range(200):
+    apply(1.0 * (256.0 ** (i / 199.0)), grabbing=True)
+check(calls['set_length'] <= 6, "voller zug bis 256x: hoechstens 6 set_length",
+      f"{calls['set_length']}x")
 
 pred.close()
 

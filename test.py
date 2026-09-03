@@ -36,26 +36,72 @@ def predictor_horizon_lengths(base_length, manual_mult, warp_mult,
     return drawn, drawn * warp_mult
 
 
+def horizon_compute_rung(base_length, wanted, step_factor):
+    """Naechsthoehere sprosse einer groben leiter ueber `wanted`.
+
+    Die leiter haengt an `base_length` (nicht am aktuellen wert), also liegen
+    ihre sprossen fest und wandern nicht mit: base, base*f, base*f^2, ...
+    Sonst driftete sie waehrend eines langen zugs immer weiter mit.
+    """
+    base = float(base_length)
+    want = float(wanted)
+    step = max(float(step_factor), 1.0 + 1e-9)
+    if base <= 0.0 or want <= 0.0:
+        return want
+    n = math.ceil(math.log(want / base) / math.log(step) - 1e-12)
+    return base * step ** n
+
+
 def horizon_targets(base_length, manual_mult, warp_mult, max_points,
-                    base_spacing, *, grabbing=False, ceiling_mult=None):
+                    base_spacing, *, grabbing=False, current_length=None,
+                    grab_step_factor=4.0):
     """Wie `predictor_horizon_lengths`, aber mit dem slider-griff.
 
-    Solange der spieler den horizont-regler HAELT (`grabbing`), wird die
-    GERECHNETE laenge so bestimmt, als staende der manuelle faktor auf
-    `ceiling_mult` -- sie aendert sich dann nicht, waehrend der knauf
-    wandert, also greift die 1e-9-schranke in `apply_predictor_horizon`
-    genau einmal und der einzige aufruf pro frame ist das O(1)
-    `set_display_length`. Die GEZEICHNETE laenge folgt weiter dem echten
-    faktor. Siehe plans/predictor_horizon_slider_design.md.
+    DIE GERECHNETE LAENGE DARF WAEHREND DES ZUGS NICHT AM KNAUF KLEBEN.
+    `set_length()` verwirft den halt und storniert den laufenden auftrag
+    (predictor.set_length -> _cancel_pending_job); je frame gerufen kommt
+    deshalb NIE eine kurve an, und der zug zeigt bis zum loslassen dieselbe
+    alte linie. Gleichzeitig ist die naive gegenrichtung -- die gerechnete
+    laenge waehrend des griffs auf die REGLER-DECKE pinnen -- der grund fuer
+    genau zwei fehler:
+
+      * der ablesewert las `predictor.length` zurueck und stand deshalb den
+        ganzen zug ueber auf der decke statt auf dem knauf;
+      * beim loslassen fiel `wanted` auf `drawn` zurueck, der clip wurde
+        damit abgeschaltet (`drawn if wanted > drawn else None`) -- waehrend
+        die decken-lange kurve noch im speicher lag. Fuer die paar frames,
+        bis der kurze auftrag ankam, wurde sie ungeschnitten gezeichnet: die
+        linie sprang auf die decke und wieder zurueck.
+
+    Und die decke skaliert nicht: je hoeher `horizon_slider_max_mult`, desto
+    teurer wird JEDES antippen des reglers, auch wenn der spieler nur von 1x
+    auf 1.2x will.
+
+    Deshalb eine RASTE: waehrend des griffs faehrt die gerechnete laenge nur
+    auf groben sprossen (`grab_step_factor`, an `base_length` verankert) nach
+    OBEN mit und schrumpft gar nicht -- zu lang ist harmlos, das schneidet der
+    zeichen-clip weg. Ueber einen vollen zug sind das log_f(spanne) aufrufe
+    statt einer je frame, und die kosten haengen an dem horizont, den der
+    spieler wirklich waehlt, nicht an der decke. Beim loslassen faellt
+    `wanted` in einem schritt auf den genauen wert.
+
+    Siehe plans/predictor_horizon_slider_design.md.
     """
     drawn, wanted = predictor_horizon_lengths(
         base_length, manual_mult, warp_mult, max_points, base_spacing,
     )
-    if grabbing and ceiling_mult is not None:
-        _, wanted = predictor_horizon_lengths(
-            base_length, float(ceiling_mult), warp_mult, max_points, base_spacing,
-        )
-    return drawn, wanted
+    if not grabbing:
+        return drawn, wanted
+    if current_length is None or float(current_length) <= 0.0:
+        return drawn, wanted
+    current = float(current_length)
+    if wanted <= current:
+        # NACH UNTEN passiert waehrend des zugs nichts: die vorhandene kurve
+        # ist dann nur zu lang, und `drawn` schneidet sie ohnehin. Null
+        # aufrufe, null stornierte auftraege.
+        return drawn, current
+    return drawn, max(current, horizon_compute_rung(base_length, wanted,
+                                                    grab_step_factor))
 
 
 def main():
@@ -238,15 +284,28 @@ def main():
     predictor_toggle_points = int(config.get('predictor.toggle_num_points', 30))
     predictor_min_precision = float(config.get('predictor.min_precision', 1.0))
     HORIZON_MULT_MIN = float(config.get('predictor.horizon_slider_min_mult', 0.25))
-    # Die decke MUSS auf dem punktbudget liegen: darueber vergroebert der
-    # griff den punktabstand fuer die ganze zugdauer und hebt die
-    # fernfeld-schrittdecke -- genau der artefakt, den §23 verhindert.
-    HORIZON_MULT_MAX = min(
-        float(config.get('predictor.horizon_slider_max_mult', 4.0)),
-        PREDICTOR_MAX_POINTS * PREDICTOR_BASE_SPACING
-        / max(PREDICTOR_BASE_LENGTH, 1e-9),
+    # DIE DECKE IST DIE DES SPIELERS, NICHT DIE DES PUNKTBUDGETS.
+    #
+    # Sie lag frueher auf `max_num_points * base_spacing / base_length` (= 4x,
+    # 40 Gm), weil oberhalb davon der punktabstand vergroebert. Das ist aber
+    # dieselbe vergroeberung, die '+' seit jeher erlaubt -- gewollt und
+    # dokumentiert. Was §23 verhindert, ist die vergroeberung durch die
+    # RAFFUNG, und die klemmt weiterhin in predictor_horizon_lengths(): dort
+    # wird `warp_mult` aufs budget gedeckelt, unabhaengig von dieser zahl.
+    #
+    # Ohne diesen deckel kostet eine hohe zahl hier auch nichts im ruhezustand:
+    # die gerechnete laenge folgt dem knauf ueber die raste in
+    # horizon_targets(), nicht der decke.
+    HORIZON_MULT_MAX = max(
+        HORIZON_MULT_MIN * (1.0 + 1e-9),
+        float(config.get('predictor.horizon_slider_max_mult', 256.0)),
     )
-    HORIZON_SWEEP_S = float(config.get('predictor.horizon_slider_sweep_seconds', 2.5))
+    HORIZON_SWEEP_S = float(config.get('predictor.horizon_slider_sweep_seconds', 3.5))
+    # Sprossenweite der raste waehrend des griffs. Grob halten: jede sprosse
+    # kostet ein set_length() und damit einen stornierten auftrag. Bei 4.0 sind
+    # es ueber die spanne 0.25x..256x genau fuenf.
+    HORIZON_GRAB_STEP = max(
+        float(config.get('predictor.horizon_grab_step_factor', 4.0)), 1.0 + 1e-9)
     if verbose:
         print(f"PREDICTOR DEBUG: async_compute = {predictor.async_compute}")
         print(f"PREDICTOR DEBUG: force_sync_on_stale = {predictor.force_sync_on_stale}")
@@ -616,15 +675,25 @@ def main():
             PREDICTOR_BASE_LENGTH, predictor_manual_mult,
             predictor_warp_length_mult(),
             PREDICTOR_MAX_POINTS, PREDICTOR_BASE_SPACING,
-            grabbing=grabbing, ceiling_mult=HORIZON_MULT_MAX,
+            grabbing=grabbing, current_length=predictor.length,
+            grab_step_factor=HORIZON_GRAB_STEP,
         )
         # GEZEICHNET wird immer nur der un-geraffte horizont. Ohne das wickelt
         # sich die linie im zeitraffer mehrfach um die bahn, waehrend sie in
         # echtzeit einen einzigen bogen zeigt -- und die Ap/Pe-fahnen stapeln
         # sich uebereinander. GERECHNET wird trotzdem die volle laenge, weil
         # genau die den halt am leben haelt (siehe predictor_warp_length_mult).
+        #
+        # IMMER `drawn`, nie `None`: der clip gehoert an die GEWOLLTE laenge,
+        # nicht an die gerade angeforderte. `wanted > drawn` als bedingung
+        # schaltete ihn in dem moment ab, in dem `wanted` zurueckfiel -- also
+        # beim loslassen des reglers, waehrend die lange kurve noch dalag; die
+        # linie sprang dann fuer ein paar frames auf deren volle laenge.
+        # `set_display_length` ist O(1) und `_display_point_count` gibt bei
+        # einer kurve, die ohnehin nicht laenger ist als `drawn`, None zurueck
+        # -- der dauerhaft gesetzte clip kostet also nichts.
         if hasattr(predictor, 'set_display_length'):
-            predictor.set_display_length(drawn if wanted > drawn else None)
+            predictor.set_display_length(drawn)
         # Punktbudget zuerst, damit `set_length` gleich darauf arbeitet.
         # WEICH: der zeitraffer-schritt verstellt den horizont bei jedem
         # stufenwechsel und damit auch das budget -- ein harter reset waere

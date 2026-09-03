@@ -6304,10 +6304,19 @@ class Predictor:
         spacing = math.hypot(float(pts[mid, 0]) - float(pts[mid - 1, 0]),
                              float(pts[mid, 1]) - float(pts[mid - 1, 1]))
         if spacing > 0.0 and math.isfinite(spacing):
-            if limit >= spacing * (n - 1):
+            q = max(1, int(getattr(self, '_display_quantum', 8)))
+            # EIN QUANTUM SPIELRAUM, sonst kostet der dauerhaft gesetzte clip
+            # das kurvenende. test.apply_predictor_horizon() ruft
+            # set_display_length(drawn) inzwischen in JEDEM frame, auch wenn
+            # die kurve genau auf `drawn` gerechnet wurde; `spacing` ist aber
+            # eine EINZELNE sehne aus der kurvenmitte, also nur ein schaetzer
+            # fuer den mittleren abstand. Ohne spielraum kippt der vergleich
+            # bei der kleinsten abweichung nach unten, und die rundung auf das
+            # quantum schnitt dann bis zu q punkte ab -- bei 8 punkten x 1 Mm
+            # grundabstand acht sichtbar fehlende Mm am linienende.
+            if limit >= spacing * (n - 1 - q):
                 return None
             count = int(math.ceil(limit / spacing)) + 1
-            q = max(1, int(getattr(self, '_display_quantum', 8)))
             count = int(round(count / q)) * q
             return max(2, min(n, count))
 

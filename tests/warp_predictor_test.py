@@ -1416,7 +1416,9 @@ def _w17_frame(w, ship, p, rate):
     wanted = drawn * _w17_mult(rate)
     changed = False
     if hasattr(p, 'set_display_length'):
-        p.set_display_length(drawn if wanted > drawn else None)
+        # Wie test.apply_predictor_horizon(): IMMER `drawn`, nie None -- der
+        # clip gehoert an die gewollte laenge, nicht an die angeforderte.
+        p.set_display_length(drawn)
     # Das punktbudget waechst mit dem horizont mit (apply_predictor_horizon):
     # auch das muss WEICH gehen, sonst kostet jeder stufenwechsel wieder
     # einen synchronen neuaufbau im hauptthread.
@@ -2162,7 +2164,7 @@ def _drawn_line23(manual, warp_mult):
     w, ship, p = _scene23()
     drawn, wanted = _horizon23(_BASE_LENGTH23, manual, warp_mult,
                                _MAX_POINTS23, _BASE_SPACING23)
-    p.set_display_length(drawn if wanted > drawn else None)
+    p.set_display_length(drawn)
     p.set_num_points(int(min(_MAX_POINTS23,
                              max(1, math.ceil(wanted / _BASE_SPACING23)))))
     p.set_length(wanted)
