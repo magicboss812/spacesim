@@ -14,13 +14,8 @@ try:
 except Exception:
     pass
 
-<<<<<<< Updated upstream
-from test import (horizon_compute_rung, horizon_targets,
-                  predictor_horizon_lengths)
-=======
 from ship.horizon import (horizon_compute_rung, horizon_targets,
                           predictor_horizon_lengths)
->>>>>>> Stashed changes
 
 FAILURES = []
 

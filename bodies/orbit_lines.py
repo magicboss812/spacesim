@@ -568,15 +568,7 @@ class OrbitLineSet:
                          reference_body=None, selected_body=None,
                          origin_body=None):
         count = 0 if points is None else int(np.asarray(points).shape[0])
-        # BRENNPUNKT UND URSPRUNG GEHOEREN IN DEN SCHLUESSEL. Beide steuern,
-        # WELCHE koerper ein eigenes zeichen-gitter bekommen und wie fein es
-        # sein muss (_build_draw_track). Ohne sie zeigte eine frisch
-        # angeklickte linie erst das grobe gemeinsame gitter und sprang erst
-        # bei der naechsten neuberechnung glatt -- genau das "low poly beim
-        # anwaehlen, dann sofort glatt" aus dem bericht. Ein klick oder ein
-        # rahmenwechsel ist ein seltenes ereignis; die neuberechnung kostet
-        # 0.67 ms und laeuft dann einmal.
-        key = (generation, None if points is None else id(points), count,
+        key = (generation, count,
                None if reference_body is None else id(reference_body),
                None if selected_body is None else id(selected_body),
                None if origin_body is None else id(origin_body))
