@@ -1,0 +1,6 @@
+
+| **KI-Modell**   | **Nutzung**                                                                                                                                                                     | **Ergebnis/Bewertung**                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `claude-opus-5` | Grammatikalische Verbesserung von "1.1 Motivation" sowie fachspezifische Synonyme und Wortwahl (gestützte Nachbesserung)                                                        | richtige Anwendung von fachspezifischer Wortwahl & Korrektur von falschen Wörtern                          |
+| `claude-opus-5` | Recherche-Arbeit um zentrale Aussagen in 1.1 zu belegen (kein Plagiat, Ansatz aber hauptsächlich selbst erdacht), Aussagen mit Eigenanteil (simuliert z.B.) keine nötige Quelle | möglichst kurze Quellen, wobei [2] Missions-Bericht (+500 Seiten) ist, weitere Überarbeitung nötig für [2] |
+

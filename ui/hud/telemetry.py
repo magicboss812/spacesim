@@ -162,7 +162,12 @@ class Telemetry:
     """
 
     def __init__(self, world, ship, ship_control, camera, renderer, predictor,
-                 ui_state, tick_rate=60.0):
+                 ui_state, tick_rate=60.0,
+                 maneuver_plan=None, maneuver_preview=None,
+                 maneuver_executor=None, maneuver_selected_get=None,
+                 maneuver_selected_set=None, maneuver_add=None,
+                 maneuver_delete=None, maneuver_execute=None,
+                 maneuver_dv_step_fine=1.0, maneuver_dv_step_coarse=10.0):
         self.world = world
         self.ship = ship
         self.ship_control = ship_control
@@ -228,6 +233,35 @@ class Telemetry:
         self.thrust_max = float(getattr(ship_control, 'thrust_acc', 600.0) or 600.0)
         self.thrust_level = 1.0
 
+        # -- manoeverknoten -------------------------------------------------
+        # Die telemetrie BESITZT nichts davon; sie liest den plan und reicht
+        # die aktionen weiter. Dieselbe regel wie beim horizont-regler: das
+        # HUD ruft closures, die die hauptschleife gebaut hat, damit tastatur
+        # und knopf denselben weg nehmen.
+        self.maneuver_plan = maneuver_plan
+        self.maneuver_preview = maneuver_preview
+        self.maneuver_executor = maneuver_executor
+        self._maneuver_selected_get = maneuver_selected_get
+        self._maneuver_selected_set = maneuver_selected_set
+        self._maneuver_add = maneuver_add
+        self._maneuver_delete = maneuver_delete
+        self._maneuver_execute = maneuver_execute
+        self.maneuver_dv_step_fine = float(maneuver_dv_step_fine)
+        self.maneuver_dv_step_coarse = float(maneuver_dv_step_coarse)
+
+        self.maneuver_count = 0
+        self.maneuver_max = int(getattr(maneuver_plan, 'max_nodes', 5))
+        self.maneuver_selected = 0
+        self.maneuver_node = None
+        self.maneuver_dv_prograde = 0.0
+        self.maneuver_dv_normal = 0.0
+        self.maneuver_dv_total = 0.0
+        self.maneuver_burn_seconds = None
+        self.maneuver_time_to_node = None
+        self.maneuver_time_to_ignition = None
+        self.maneuver_state = 'idle'
+        self.maneuver_can_arm = False
+
     # ------------------------------------------------------------- abtastung
 
     def sample(self):
@@ -253,6 +287,107 @@ class Telemetry:
         self.thrust_locked = self.warp_factor > self.realtime_warp_max * 1.001
         self._sample_warp_limit(ship)
         self.snap_mode = getattr(self.ship_control, 'snap_mode', None)
+        self._sample_maneuver()
+
+    def _sample_maneuver(self):
+        """Alles, was der MANEUVER-block je frame zeigt -- einmal gelesen.
+
+        Brenndauer und zuendzeitpunkt werden hier NICHT gerechnet, sondern
+        von `BurnProfile` geholt. Eine zweite rechnung im HUD waere genau die
+        zweite wahrheit, die ship/maneuver/profile.py verhindern soll.
+        """
+        plan = self.maneuver_plan
+        executor = self.maneuver_executor
+        self.maneuver_state = (getattr(executor, 'state', 'idle')
+                               if executor is not None else 'idle')
+        self.maneuver_can_arm = bool(
+            executor is not None and executor.can_arm())
+
+        if plan is None:
+            self.maneuver_count = 0
+            self.maneuver_node = None
+            return
+
+        self.maneuver_count = len(plan)
+        self.maneuver_max = int(getattr(plan, 'max_nodes', 5))
+
+        index = 0
+        if self._maneuver_selected_get is not None:
+            try:
+                index = int(self._maneuver_selected_get())
+            except Exception:
+                index = 0
+        index = (max(0, min(index, self.maneuver_count - 1))
+                 if self.maneuver_count else 0)
+        self.maneuver_selected = index
+
+        node = plan.nodes[index] if self.maneuver_count else None
+        self.maneuver_node = node
+        if node is None:
+            self.maneuver_dv_prograde = 0.0
+            self.maneuver_dv_normal = 0.0
+            self.maneuver_dv_total = 0.0
+            self.maneuver_burn_seconds = None
+            self.maneuver_time_to_node = None
+            self.maneuver_time_to_ignition = None
+            return
+
+        self.maneuver_dv_prograde = float(node.dv_prograde)
+        self.maneuver_dv_normal = float(node.dv_normal)
+        self.maneuver_dv_total = float(node.dv_total)
+
+        now = float(getattr(self.world, 'time', 0.0))
+        self.maneuver_time_to_node = float(node.t_node) - now
+        if executor is not None and self.maneuver_dv_total > 0.0:
+            profile = node.profile(executor.a_max_sim(), executor.ramp_seconds)
+            self.maneuver_burn_seconds = profile.total_time
+            self.maneuver_time_to_ignition = (
+                profile.ignition_time(node.t_node) - now)
+        else:
+            self.maneuver_burn_seconds = None
+            self.maneuver_time_to_ignition = None
+
+    # -- die fuenf aktionen des MANEUVER-blocks -----------------------------
+
+    def adjust_node_dv(self, axis, amount):
+        """`axis` ist 'prograde' oder 'normal'. Zaehlt plan.version hoch."""
+        node = self.maneuver_node
+        if node is None or self.maneuver_plan is None:
+            return False
+        if axis == 'prograde':
+            node.dv_prograde = float(node.dv_prograde) + float(amount)
+        elif axis == 'normal':
+            node.dv_normal = float(node.dv_normal) + float(amount)
+        else:
+            return False
+        # OHNE touch() bliebe die gezeichnete linie auf dem alten stand --
+        # die vorschau rechnet nur bei geaenderter version neu.
+        self.maneuver_plan.touch()
+        return True
+
+    def select_node(self, index):
+        if self._maneuver_selected_set is None:
+            return False
+        self._maneuver_selected_set(int(index))
+        return True
+
+    def add_node(self):
+        if self._maneuver_add is None:
+            return False
+        self._maneuver_add()
+        return True
+
+    def delete_node(self):
+        if self._maneuver_delete is None:
+            return False
+        self._maneuver_delete()
+        return True
+
+    def toggle_execute(self):
+        if self._maneuver_execute is None:
+            return False
+        self._maneuver_execute()
+        return True
 
     def _sample_warp_limit(self, ship):
         """Obergrenze der raffung aus der bahn-zeitskala."""

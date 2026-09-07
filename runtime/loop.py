@@ -91,6 +91,9 @@ def _handle_resize(app, event):
 def run(app):
     """Die schleife. Laeuft, bis Esc, das fensterkreuz oder max_frames greift."""
     router = InputRouter(app)
+    # Die HUD-knoepfe rufen ueber diese box denselben router wie die tasten.
+    if getattr(app, 'maneuver_router_ref', None) is not None:
+        app.maneuver_router_ref[0] = router
     timing = FrameTimingPrinter()
     devui_toggle_key = pygame.K_F1
 
@@ -182,6 +185,17 @@ def run(app):
                 # gehaltene vorhersage in jedem frame ungueltig. Deshalb ist
                 # der schub gesperrt, solange gerafft wird -- der spieler geht
                 # zum manoevrieren auf die unterste stufe zurueck.
+                # Handeingabe schlaegt den autopiloten. Geprueft werden
+                # alle vier steuertasten, nicht nur der schub: wer im
+                # brennvorgang dreht, meint es ebenso ernst, und eine
+                # gedrehte nase macht die restliche brenndauer ohnehin
+                # ungueltig.
+                if (app.maneuver_executor is not None
+                        and app.maneuver_executor.is_active
+                        and (keys[pygame.K_UP] or keys[pygame.K_DOWN]
+                             or keys[pygame.K_LEFT] or keys[pygame.K_RIGHT])):
+                    app.maneuver_executor.notify_manual_input()
+                    print("MANEUVER: abgebrochen (handeingabe)")
                 if app.thrust_allowed():
                     app.ship_control.apply_thrust(keys, frame_dt)
 
@@ -189,6 +203,7 @@ def run(app):
         # stufen bereits ab; das hier ist der riegel fuer PageUp/PageDown und
         # die dev-oberflaeche, die daran vorbeigehen.
         _clamp_warp(app)
+        _apply_maneuver(app)
         # Horizont an die raffung anpassen (no-op, solange die stufe steht).
         _apply_horizon(app)
 
@@ -208,8 +223,20 @@ def run(app):
         #
         # frame_dt ist bereits auf max_frame_dt gekappt, ein stall kann also
         # keinen riesigen sprung einspeisen.
-        app.world.step(app.camera.sim_dt * app.tick_rate * frame_dt,
-                       app.max_substep)
+        sim_step = app.camera.sim_dt * app.tick_rate * frame_dt
+        # Ein scharfgeschalteter knoten deckelt den schritt: sonst rueckt ein
+        # zeitraffer-frame um stunden vor und der ganze brennvorgang faellt
+        # zwischen zwei bilder. Waehrend des brennens haelt die decke die
+        # kick-then-drift-naeherung klein (siehe ship/maneuver/executor.py).
+        cap = (app.maneuver_executor.max_sim_seconds(app.world)
+               if app.maneuver_executor is not None else None)
+        if cap is not None:
+            sim_step = min(sim_step, max(1e-9, cap))
+        # Das delta-v des SCHRITTES anlegen, BEVOR er gegangen wird -- so
+        # traegt die positionsintegration dieses schrittes es bereits.
+        if app.maneuver_executor is not None:
+            app.maneuver_executor.update(app.world, sim_step)
+        app.world.step(sim_step, app.max_substep)
 
         # kamera mit echtem frame-delta fuer interaktives panning aktualisieren
         # (zoom/schwenk laufen ihren zielen geglaettet nach)
@@ -217,6 +244,9 @@ def run(app):
 
         # -- orbit-prognose ---------------------------------------------------
         points = _update_predictor(app)
+        # NACH dem predictor: die vorschau liest dessen linie, und mit der
+        # linie des vorframes saesse sie einen frame lang daneben.
+        _update_maneuver_preview(app)
 
         # Rendern. Der Orientierungs-snap wird INNERHALB von render() angewendet,
         # unmittelbar bevor der Schiffspfeil gezeichnet wird, mit demselben Frame
@@ -268,6 +298,10 @@ def run(app):
             running = False
 
     app.devui.shutdown()
+    if getattr(app, 'maneuver_preview', None) is not None:
+        # Der arbeiter der vorschau ist kein daemon-thread: ohne dieses
+        # abmelden haengt der prozess am ende an einem laufenden neuaufbau.
+        app.maneuver_preview.shutdown()
     app.window.close()
 
 
@@ -283,6 +317,42 @@ def _clamp_warp(app):
     app.camera.clamp_warp_to_timescale(
         t_char, app.tick_rate, app.warp_timescale_divisor,
         app.realtime_warp_max)
+
+
+def _apply_maneuver(app):
+    """Raffung auf echtzeit ziehen, sobald die zuendung naeherrueckt.
+
+    Der spieler darf zum knoten hin raffen; kurz davor muss die welt aber
+    zurueck auf echtzeit, weil der schub nur dort ueberhaupt erlaubt ist
+    (app.thrust_allowed()). Ohne diesen griff steht der spieler bei 1 d/s
+    vor einem brennvorgang, der nie beginnt.
+    """
+    executor = getattr(app, 'maneuver_executor', None)
+    if executor is None or not executor.wants_realtime(app.world):
+        return
+    ceiling = app.realtime_warp_max / max(1.0, app.tick_rate)
+    if app.camera.sim_dt > ceiling:
+        app.camera.sim_dt = ceiling
+
+
+def _update_maneuver_preview(app):
+    """Die geplante bahn nachfuehren -- nur bei aenderung, nie je frame."""
+    preview = getattr(app, 'maneuver_preview', None)
+    if preview is not None and app.ship is not None:
+        preview.maybe_rebuild(
+            app.maneuver_plan, app.ship, app.world, app.predictor,
+            app.ui_state.reference_body,
+            app.maneuver_executor.a_max_sim(),
+            app.maneuver_config['ramp_seconds'],
+        )
+    executor = getattr(app, 'maneuver_executor', None)
+    # Die schubrichtung eines laufenden manoevers veroeffentlichen -- der
+    # orientierungs-snap in render/ship.py holt sie sich dort ab.
+    app.renderer.maneuver_burn_direction = (
+        (executor.dir_x, executor.dir_y)
+        if executor is not None and executor.is_active else None)
+    app.renderer.maneuver_selected_index = int(
+        getattr(app, 'selected_node_index', 0))
 
 
 def _apply_horizon(app):

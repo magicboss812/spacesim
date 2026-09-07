@@ -130,10 +130,10 @@ _DIMMED = 0.22
 #: und vier punkte darin sind auf einem laptop nicht mehr auseinander zu
 #: halten. Der ganze rest der karte steht waehrenddessen ohnehin auf
 #: `_DIMMED`, das mondsystem darf also ueber die nachbarbahnen laufen.
-_MOON_SPAN = 0.9
-_MOON_SPAN_MIN = 0.24
-_MOON_SPAN_MAX = 0.42
-_MOON_INNER = 0.38
+_MOON_SPAN = 1.5
+_MOON_SPAN_MIN = 0.54
+_MOON_SPAN_MAX = 0.82
+_MOON_INNER = 0.48
 
 #: Wieviel der bahnverteilung aus der REIHENFOLGE statt aus dem logarithmus
 #: kommt. Rein logarithmisch liegen Neptun (4.5e12 m) und Pluto (5.9e12 m)

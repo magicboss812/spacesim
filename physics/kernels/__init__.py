@@ -70,3 +70,5 @@ def _widen_points(points):
     wide[:, :have] = points
     wide[:, have:] = np.nan
     return wide
+
+from .burn import _burn_arc_numba, _profile_accel_numba  # noqa: E402,F401

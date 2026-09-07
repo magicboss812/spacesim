@@ -16,6 +16,11 @@ die fuenf, die den eindruck tragen:
     system_map.py    die system-karte rechts unter dem zeitraffer
     apsis_tooltip.py der schwebezettel an einer Ap/Pe-raute
     telemetry.py     datenschicht -- rechnet alle anzeigewerte einmal pro frame
+    maneuver.py      die vier manoever-plaettchen IM navball-raster --
+                     ueber ORB die brenndaten, unter THR die delta-v-
+                     eingabefelder, ueber ALT die vorschau-reichweite,
+                     unter V/S die knotenwahl; dazu der ziehgriff an
+                     der bahnlinie
     layout.py        verankerung des ganzen und die responsive umschaltung
 
 Einstieg ist Hud(...) aus layout.py: es baut den widget-baum in eine
@@ -42,11 +47,15 @@ WAS DIE VORLAGE NICHT VORGIBT und hier entschieden wurde:
 - **Ziel = bezugskoerper.** Die simulation kennt keine eigene zielauswahl.
   Der bezugskoerper ist der koerper, auf den sich ohnehin alle bahnwerte
   beziehen, und damit die ehrliche entsprechung.
-- **Schub = schubstufe.** Es gibt keinen dauerschub, nur impulse pro frame.
-  Der bogen skaliert schiffcontrol.thrust_acc und ist damit wirksam, keine
-  attrappe. Im zeitraffer ist er gesperrt und beschriftet sich mit HOLD --
-  ohne das drueckt der spieler 'Up', nichts passiert, und nichts auf dem
-  schirm sagt warum.
+- **Schub = schubstufe -- ausser beim manoever-autopiloten.** VON HAND gibt es
+  nur impulse je frame; der bogen skaliert schiffcontrol.thrust_acc und ist
+  damit wirksam, keine attrappe. Ein ausgefuehrter manoeverknoten ist der eine
+  DAUERSCHUB in diesem spiel: `ship/maneuver/` faehrt ein rampenprofil ab und
+  schreibt seine hebelstellung je frame in set_thrust_level, der bogen zeigt
+  also die rampe. Im zeitraffer bleibt der schub gesperrt und der bogen
+  beschriftet sich mit HOLD -- ohne das drueckt der spieler 'Up', nichts
+  passiert, und nichts auf dem schirm sagt warum. Ein scharfer knoten zieht
+  die raffung vor der zuendung selbst auf echtzeit herunter.
 - **Symbole gezeichnet, nicht gesetzt.** ◉ und ⊗ (U+25C9 / U+2297) fehlen in
   vielen oberflaechen-schriften; als vektoren stimmen sie immer.
 - **Eine festgelegte palette.** Vier farben mit je EINER bedeutung, kein

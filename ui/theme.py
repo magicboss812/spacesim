@@ -146,7 +146,9 @@ ROLE_INDEX = {
     'throttle': 2,    # schub
     'altitude': 2,    # hoehe ueber dem bezugskoerper
     'star': 2,        # zentralgestirn
+    'node': 2,        # manoeverknoten: ein brennvorgang, also energie
     'snap': 3,        # orientierungs-autopilot
+    'node_path': 3,   # die geplante bahn: das versprechen des autopiloten
     'ship': 3,        # schiff
 }
 

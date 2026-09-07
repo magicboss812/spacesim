@@ -320,6 +320,18 @@ class ComputeMixin:
             return None
         return value if math.isfinite(value) and value > 0.0 else None
 
+    def make_maneuver_snapshot(self, ship, world, max_points):
+        """Ein schnappschuss fuer die manoever-vorschau.
+
+        Die vorschau (ship/maneuver/preview.py) rechnet mit DENSELBEN
+        koerper-arrays und derselben epoche wie die vorhersagelinie, gegen
+        die sie ihre knoten setzt -- mit einem eigenen serialisierer waeren
+        es zwei leicht verschiedene sonnensysteme und die kette saesse
+        neben der linie. Ein oeffentlicher name dafuer, damit die kopplung
+        greppbar ist und nicht als privatzugriff versteckt.
+        """
+        return self._make_snapshot(ship, world, int(max_points))
+
     def _make_snapshot(self, ship, world, max_points):
         effective_precision = self._effective_precision()
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)

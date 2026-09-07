@@ -361,8 +361,13 @@ class SnapRosette(Widget):
                         ctx.px(7.0 * scale), text_color)
 
         if not self.compact:
-            label = (dict((m, l) for m, l, _c, _r in self.MODES).get(active_mode)
-                     if active_mode else 'FREE')
+            if active_mode == 'node':
+                # Den kurs haelt hier der manoever-autopilot, nicht der
+                # spieler -- und 'FREE' waere schlicht falsch.
+                label = 'NODE'
+            else:
+                label = (dict((m, l) for m, l, _c, _r in self.MODES).get(active_mode)
+                         if active_mode else 'FREE')
             chrome.tab(ctx, chrome.tab_text('SNAP', label),
                        cx, cy + span * 0.5,
                        color=palette.snap if active_mode else palette.text_dim,

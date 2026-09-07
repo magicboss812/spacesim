@@ -25,6 +25,7 @@ from physics.reference_frames import (
 from ship.camera import Camera
 from ship.control import schiffcontrol
 from ship.horizon import HorizonPolicy
+from ship.maneuver import ManeuverExecutor, ManeuverPlan, ManeuverPreview
 from ship.predictor import Predictor
 from render.renderer import Renderer
 from runtime.window import Window
@@ -144,6 +145,8 @@ class App:
         'tick_rate', 'max_substep', 'max_frame_dt', 'realtime_warp_max',
         'warp_timescale_divisor', 'max_frames', 'verbose', 'print_timings',
         'predictor_toggle_points', 'predictor_min_precision', 'precision_step',
+        'maneuver_plan', 'maneuver_preview', 'maneuver_executor',
+        'maneuver_config', 'selected_node_index', 'maneuver_router_ref',
     )
 
     def warp_rate(self):
@@ -251,12 +254,67 @@ def build_app(config):
     app.ship_control = schiffcontrol(app.ship) if app.ship else None
     config.apply_to_ship_control(app.ship_control)
 
+    # -- manoeverknoten ------------------------------------------------------
+    # Muss VOR renderer und HUD stehen: beide bekommen den plan als verweis
+    # gereicht und lesen ihn je frame.
+    app.maneuver_config = config.maneuver_kwargs()
+    mc = app.maneuver_config
+    app.maneuver_plan = ManeuverPlan(
+        max_nodes=mc['max_nodes'],
+        min_executable_dv=mc['min_executable_dv'],
+    )
+    app.maneuver_preview = ManeuverPreview(
+        max_points=mc['preview_max_points'],
+        burn_step_s=mc['burn_step_s'],
+        burn_min_steps=mc['burn_min_steps'],
+        burn_max_steps=mc['burn_max_steps'],
+        min_interval_s=mc['preview_min_interval_s'],
+        burn_draw_points=mc['burn_draw_points'],
+        length_mult=mc['preview_length_mult'],
+        length_mult_min=mc['preview_length_mult_min'],
+        length_mult_max=mc['preview_length_mult_max'],
+        async_compute=mc['preview_async'],
+    )
+    app.maneuver_executor = ManeuverExecutor(
+        app.maneuver_plan, app.ship, app.ship_control, camera=app.camera,
+        # `thrust_acc_max` kommt aus der KONFIGURATION, nicht aus
+        # ship_control.thrust_acc: der schubregler des HUDs schreibt jenes
+        # feld, und der ausfuehrer wuerde sonst seine brennstaerke vom
+        # regler abhaengig machen.
+        thrust_acc_max=float(config.get('ship.thrust_acc', 600.0)),
+        realtime_warp_max=app.realtime_warp_max,
+        tick_rate=float(max(1, app.window.fps)),
+        ramp_seconds=mc['ramp_seconds'],
+        max_accel=mc['max_accel'],
+        orient_lead_seconds=mc['orient_lead_seconds'],
+        burn_step_max_s=mc['burn_step_max_s'],
+        min_executable_dv=mc['min_executable_dv'],
+    )
+    #: Welchen knoten der HUD-block gerade bearbeitet.
+    app.selected_node_index = 0
+    # Die knoepfe des HUD-blocks nehmen DENSELBEN weg wie die tasten
+    # N / Shift+N / X -- sonst gaebe es zwei wege, einen knoten zu setzen,
+    # und sie liefen auseinander. Der router entsteht erst in
+    # runtime/loop.py::run(), deshalb eine box, die dort gefuellt wird.
+    app.maneuver_router_ref = [None]
+
     app.renderer = Renderer(
         width, height,
         enable_fxaa=bool(config.get('window.enable_fxaa', True)),
         ctx=gl_ctx,
     )
     config.apply_to_renderer(app.renderer)
+
+    # Der renderer BESITZT den plan nicht, er liest ihn. Verweise statt
+    # durchreichen durch render(): die signatur traegt schon neun argumente,
+    # und der plan aendert sich nicht je frame.
+    app.renderer.maneuver_plan = app.maneuver_plan
+    app.renderer.maneuver_preview = app.maneuver_preview
+    app.renderer._maneuver_predictor = predictor
+    app.renderer.maneuver_enabled = bool(mc['enabled'])
+    app.renderer.maneuver_max_draw_points = int(mc['path_draw_points'])
+    app.renderer.maneuver_coarse_points = int(mc['path_coarse_points'])
+    app.renderer.maneuver_end_caps = bool(mc['end_caps'])
 
     # Entwickler-oberflaeche (Dear ImGui, moderngl-nativ auf demselben
     # context). Standardmaessig unsichtbar; F1 blendet sie ein. Rein werkzeug
@@ -311,6 +369,20 @@ def build_app(config):
     # baut das HUD GAR NICHT erst auf (statt es nur zu verstecken): so laesst
     # sich der reine welt-render sauber gegen den mit HUD messen.
     app.tick_rate = float(max(1, app.window.fps))
+
+    # `App` hat __slots__, ein lambda kann `app.selected_node_index` also
+    # nicht per closure schreiben -- deshalb zwei benannte funktionen.
+    def _selected_node_get():
+        return app.selected_node_index
+
+    def _selected_node_set(index):
+        app.selected_node_index = max(0, int(index))
+
+    def _call_router(method):
+        router = app.maneuver_router_ref[0]
+        if router is not None:
+            getattr(router, method)()
+
     app.hud = None
     if bool(config.get('renderer.hud_enabled', True)):
         app.hud = Hud(
@@ -324,7 +396,31 @@ def build_app(config):
             horizon_mult_min=app.horizon.mult_min,
             horizon_mult_max=app.horizon.mult_max,
             horizon_sweep_s=app.horizon.sweep_s,
+            maneuver_plan=app.maneuver_plan,
+            maneuver_preview=app.maneuver_preview,
+            maneuver_executor=app.maneuver_executor,
+            maneuver_selected_get=_selected_node_get,
+            maneuver_selected_set=_selected_node_set,
+            maneuver_add=lambda: _call_router('add_node_at_cursor'),
+            maneuver_delete=lambda: _call_router('delete_selected_node'),
+            maneuver_execute=lambda: _call_router('toggle_execute'),
+            maneuver_dv_step_fine=mc['dv_step_fine'],
+            maneuver_dv_step_coarse=mc['dv_step_coarse'],
+            maneuver_dv_rate=mc['handle_dv_rate'],
+            maneuver_handle_travel_px=mc['handle_travel_px'],
+            maneuver_length_get=lambda: app.maneuver_preview.length_mult,
+            maneuver_length_set=app.maneuver_preview.set_length_mult,
+            maneuver_length_min=mc['preview_length_mult_min'],
+            maneuver_length_max=mc['preview_length_mult_max'],
+            maneuver_length_sweep_s=mc['preview_length_sweep_seconds'],
         )
+
+    # Der ausfuehrer treibt den schubbogen des HUDs -- die rampe wird damit
+    # sichtbar, ohne dass etwas zusaetzlich gezeichnet werden muss.
+    # Nachgereicht, weil das HUD erst hier existiert; ohne telemetrie laeuft
+    # der ausfuehrer trotzdem, nur ohne anzeige.
+    if app.hud is not None:
+        app.maneuver_executor.telemetry = app.hud.telemetry
 
     # Taste Home holt die ansicht zum schiff zurueck -- der weg heraus aus
     # einem angeflogenen planeten, ohne neue tastenbelegung.

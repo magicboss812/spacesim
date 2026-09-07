@@ -33,6 +33,7 @@ from render.bodies import BodyDrawMixin
 from render.ship import ShipDrawMixin
 from render.orbits import OrbitDrawMixin
 from render.prediction import PredictionDrawMixin
+from render.maneuver import ManeuverDrawMixin
 from render.line_kernels import (
     _LINE_KERNELS_OK,
     _clip_runs_numba,
@@ -53,6 +54,7 @@ class Renderer(
     ShipDrawMixin,
     OrbitDrawMixin,
     PredictionDrawMixin,
+    ManeuverDrawMixin,
 ):
     """Der Renderer -- zusammengesetzt aus mixins, ein zustand.
 
@@ -301,6 +303,48 @@ class Renderer(
         self.apsis_tooltip_hover_px = 14.0
         #: (sx, sy, radius_px, is_apoapsis, distance_m, t_abs, alpha)
         self.apsis_marker_hits = []
+
+        # -- manoeverknoten (render/maneuver.py) ---------------------------
+        #: Vom bootstrap gesetzt; der renderer besitzt sie nicht.
+        self.maneuver_plan = None
+        self.maneuver_preview = None
+        self._maneuver_predictor = None
+        self.maneuver_enabled = True
+        #: Schirmpositionen fuer das HUD -- je zeichendurchgang geleert und
+        #: neu gefuellt, wie apsis_marker_hits.
+        self.maneuver_node_hits = []
+        #: Die BASISlinie in schirmkoordinaten. Nur waehrend eines zugs
+        #: gefuellt (das bauen kostet einen frame-transform je punkt).
+        self.maneuver_curve_screen = None
+        self.maneuver_drag_active = False
+        #: Nur der MARKER-zug braucht die basislinie in schirmkoordinaten;
+        #: ein griff-zug verschiebt den knoten nicht (render/maneuver.py).
+        self.maneuver_drag_curve = False
+        #: (knoten-index, griffart, ausschlag_px) waehrend eines griff-zugs.
+        self.maneuver_drag_handle = None
+        self.maneuver_selected_index = 0
+        #: Weltrichtung des laufenden brennvorgangs, oder None. Der
+        #: orientierungs-snap liest sie (render/ship.py).
+        self.maneuver_burn_direction = None
+        self.maneuver_marker_radius_px = 8.0
+        self.maneuver_handle_offset_px = 30.0
+        self.maneuver_handle_radius_px = 7.0
+        self.maneuver_path_width = 1.8
+        self.maneuver_path_alpha = 0.85
+        #: Wieviele punkte der GEPLANTEN linie je frame projiziert werden.
+        #: Gemessen bei 1920x1080: 900 punkte kosten 3.2 ms je frame, 400
+        #: noch 2.0 -- und die kette ist ein kegelschnitt, der bei 480
+        #: punkten schon glatt aussieht (die vorhersagelinie selbst zeichnet
+        #: adaptiv rund 200). Ueberschreibbar aus maneuver.path_draw_points.
+        self.maneuver_max_draw_points = 480
+        #: Grobgitter VOR der verfeinerung. Es muss nur die form tragen --
+        #: die glattheit kommt aus `_hermite_refine_world`, und je weniger
+        #: grobe punkte, desto mehr budget bleibt fuer die stellen, an denen
+        #: die kurve wirklich biegt.
+        self.maneuver_coarse_points = 160
+        #: Gruene endkappe + koerper-radien zur planendzeit.
+        self.maneuver_end_caps = True
+        self.maneuver_curve_screen_points = 400
         self._prediction_line_cache_key_value = None
         self._prediction_line_cache_points = None
         self._prediction_line_cache_stats = {}
@@ -1038,6 +1082,11 @@ class Renderer(
         # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
         # grund wie die beschriftungen -- und vor ihnen, damit ein label nicht
         # unter einem pfeil verschwindet.
+        # Die geplante bahn und ihre griffe NACH dem FXAA-resolve: es sind
+        # duenne linien und kleine pfeilspitzen, und ein kantenfilter
+        # verschmiert genau die.
+        self.draw_maneuver(camera, bodies)
+
         self._draw_selection_marker(camera)
 
         # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,

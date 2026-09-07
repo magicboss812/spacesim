@@ -67,6 +67,22 @@ print("countdown")
 check(units.countdown(125.0), 'T-00:02:05', 'vor dem manoever')
 check(units.countdown(-125.0), 'T+00:02:05', 'nach dem manoever')
 
+print("countdown_compact")
+# Die genauigkeit wandert mit der groessenordnung: ueber einem tag sagen
+# sekunden nichts, unter einer stunde sind sie das einzige, worauf es
+# ankommt. Der grund ist breite -- die volle form passt in eine 124
+# einheiten breite zelle nur ohne ihre beschriftung.
+check(units.countdown_compact(125.0), 'T-02:05', 'minuten und sekunden')
+check(units.countdown_compact(-125.0), 'T+02:05', 'nach dem manoever')
+check(units.countdown_compact(3600.0 * 2 + 55 * 60), 'T-02:55', 'stunden')
+check(units.countdown_compact(86400.0 + 3600.0 * 2), 'T-1d 02h', 'tage')
+check(units.countdown_compact(3.2e7), 'T-1y 5d', 'jahre')
+check(units.countdown_compact(None), '--', 'kein wert')
+# GEGENPROBE: sie ist wirklich kuerzer als die volle form, sonst waere die
+# ganze abkuerzung sinnlos.
+check(len(units.countdown_compact(86400.0 + 3600.0 * 2))
+      < len(units.countdown(86400.0 + 3600.0 * 2)), True, 'kuerzer als voll')
+
 print("mass")
 check(units.mass(5.9722e24), '5.97e+24kg', 'erdmasse')
 check(units.mass(1.989e30), '1.99e+30kg', 'sonne')

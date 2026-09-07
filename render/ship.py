@@ -13,6 +13,7 @@ import moderngl
 import numpy as np
 
 from physics.reference_frames import apparent_orbital_directions
+from physics.vec import Vec2
 from ship import art as ship_art
 
 
@@ -75,10 +76,26 @@ class ShipDrawMixin:
         if reference_body is None:
             reference_body = getattr(self, "current_reference_body", None)
         ref_pos = getattr(reference_body, "position", None)
-        return frame, apparent_orbital_directions(
+        directions = apparent_orbital_directions(
             frame, self._frame_time_s, ship.position, ship.velocity, ref_pos,
             points=prediction_points,
         )
+        # Die FUENFTE richtung: die schubrichtung eines scharfgeschalteten
+        # manoeverknotens. Sie kommt als WELTvektor herein (der ausfuehrer
+        # loest sie einmal auf und haelt sie fest) und wird hier in
+        # frame-koordinaten gedreht, damit _apply_orientation_snap sie wie
+        # jede andere behandeln kann -- ohne sonderweg fuer den autopiloten.
+        burn = getattr(self, "maneuver_burn_direction", None)
+        if burn is not None:
+            try:
+                fx, fy = frame.to_this_frame_vector_xy(
+                    self._frame_time_s, float(burn[0]), float(burn[1]))
+                length = math.hypot(fx, fy)
+                if length > 1e-30:
+                    directions["node"] = Vec2(fx / length, fy / length)
+            except Exception:
+                pass
+        return frame, directions
 
     def _apply_orientation_snap(self, ship, ship_control, reference_body,
                                 prediction_points, real_dt):

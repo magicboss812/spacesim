@@ -232,6 +232,30 @@ class NavballCluster(Widget):
 
     # ---------------------------------------------------------- die flanken
 
+    # -- OEFFENTLICHE geometrie ------------------------------------------
+    #
+    # Das manoever-werkzeug haengt seine vier plaettchen an genau diese
+    # rechtecke (ui/hud/maneuver.py): ueber die flanken und unter die
+    # streifen. Ein zweiter satz zahlen dort waere ein zweites layout --
+    # die flanken folgen schriftgroesse und UI-skala, und schon eine
+    # geaenderte BOX_H liesse die plaettchen danebenstehen.
+
+    def flank_rect(self, ctx, side):
+        """Das ORB- (links) bzw. ALT-kaestchen (rechts)."""
+        return self._flank_rect(ctx, side)
+
+    def strip_rect(self, ctx, side):
+        """Der THR- (links) bzw. V/S-streifen (rechts) darunter."""
+        return self._strip_rect(ctx, side)
+
+    def info_rect(self, ctx):
+        """Der ORBITAL.INFO-block am unteren rand.
+
+        Er ist nur um eine halbe flankenbreite eingerueckt, ragt also unter
+        beide flanken -- was darunter haengt, muss oberhalb davon aufhoeren.
+        """
+        return self._info_rect(ctx)
+
     def _flank_rect(self, ctx, side):
         width = ctx.px(BOX_W)
         height = ctx.px(BOX_H)

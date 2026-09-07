@@ -35,6 +35,8 @@ from ..widgets import Stack
 from ..widgets.rate_slider import HorizonSlider
 from .apsis_tooltip import ApsisTooltip
 from .body_browser import BodyBrowser
+from .maneuver import (ManeuverAxesBlock, ManeuverBurnBlock, ManeuverGizmo,
+                       ManeuverNodesBar, ManeuverPlanBlock)
 from .controls import SegmentBar, SnapRosette, WarpBar, ZoomButtons
 from .navball import WIDTH as NAVBALL_WIDTH, NavballCluster
 from .panels import IconRail, ShipBadge, build_target_panel
@@ -93,7 +95,16 @@ class Hud:
                  warp_timescale_divisor=3.0,
                  horizon_mult_get=None, horizon_mult_set=None,
                  horizon_mult_min=0.25, horizon_mult_max=4.0,
-                 horizon_sweep_s=2.5):
+                 horizon_sweep_s=2.5,
+                 maneuver_plan=None, maneuver_preview=None,
+                 maneuver_executor=None, maneuver_selected_get=None,
+                 maneuver_selected_set=None, maneuver_add=None,
+                 maneuver_delete=None, maneuver_execute=None,
+                 maneuver_dv_step_fine=1.0, maneuver_dv_step_coarse=10.0,
+                 maneuver_dv_rate=260.0, maneuver_handle_travel_px=96.0,
+                 maneuver_length_get=None, maneuver_length_set=None,
+                 maneuver_length_min=0.25, maneuver_length_max=32.0,
+                 maneuver_length_sweep_s=2.5):
         self.root = ui_root
         self.ctx = ui_root.ui
         self.camera = camera
@@ -101,7 +112,24 @@ class Hud:
         self.telemetry = Telemetry(
             world, ship, ship_control, camera, renderer, predictor, ui_state,
             tick_rate=tick_rate,
+            maneuver_plan=maneuver_plan,
+            maneuver_preview=maneuver_preview,
+            maneuver_executor=maneuver_executor,
+            maneuver_selected_get=maneuver_selected_get,
+            maneuver_selected_set=maneuver_selected_set,
+            maneuver_add=maneuver_add,
+            maneuver_delete=maneuver_delete,
+            maneuver_execute=maneuver_execute,
+            maneuver_dv_step_fine=maneuver_dv_step_fine,
+            maneuver_dv_step_coarse=maneuver_dv_step_coarse,
         )
+        self._maneuver_dv_rate = float(maneuver_dv_rate)
+        self._maneuver_travel_px = float(maneuver_handle_travel_px)
+        self._maneuver_length_get = maneuver_length_get
+        self._maneuver_length_set = maneuver_length_set
+        self._maneuver_length_min = float(maneuver_length_min)
+        self._maneuver_length_max = float(maneuver_length_max)
+        self._maneuver_length_sweep_s = float(maneuver_length_sweep_s)
         # Schwelle, ab der der schub gesperrt ist -- der schubbogen im
         # navball-block zeigt das an.
         self.telemetry.realtime_warp_max = float(realtime_warp_max)
@@ -193,6 +221,40 @@ class Hud:
                     + SnapRosette.SIZE * 0.76 * 0.5, MARGIN + 22),
         ))
 
+        # --- das manoever-werkzeug IM navball-raster ---------------------
+        #
+        # Vier plaettchen in den vier freien feldern des blocks: ueber der
+        # ORB-flanke die brenndaten, unter dem THR-streifen die beiden
+        # delta-v-achsen, ueber der ALT-flanke die reichweite der vorschau,
+        # unter dem V/S-streifen die knotenwahl. Sie bekommen KEINE eigene
+        # verankerung -- `layout()` liest breite und x-lage aus
+        # `NavballCluster.flank_rect()` / `strip_rect()`, sonst waeren es
+        # zwei layouts fuer eine flanke. Begruendung: ui/hud/maneuver.py.
+        self.maneuver_burn = root.add(ManeuverBurnBlock(
+            telemetry, navball=self.navball))
+        self.maneuver_axes = root.add(ManeuverAxesBlock(
+            telemetry, navball=self.navball))
+        self.maneuver_nodes = root.add(ManeuverNodesBar(
+            telemetry, navball=self.navball))
+        if (self._maneuver_length_get is not None
+                and self._maneuver_length_set is not None):
+            self.maneuver_length = root.add(ManeuverPlanBlock(
+                telemetry, navball=self.navball,
+                value=self._maneuver_length_get,
+                on_change=self._maneuver_length_set,
+                minimum=self._maneuver_length_min,
+                maximum=self._maneuver_length_max,
+                sweep_seconds=self._maneuver_length_sweep_s,
+            ))
+        else:
+            self.maneuver_length = None
+        # Der ziehgriff steht AUSSERHALB jeder gruppe -- sein platz kommt aus
+        # der weltposition des knotens, nicht aus der verankerung. Wie der
+        # Ap/Pe-schwebezettel.
+        self.gizmo = root.add(ManeuverGizmo(
+            telemetry, dv_rate=self._maneuver_dv_rate,
+            travel_px=self._maneuver_travel_px))
+
         # --- unten links: bezugsrahmen und zoom --------------------------
         self.left_stack = root.add(Stack(
             gap=8, align='start', anchor=BOTTOM_LEFT, offset=(MARGIN, MARGIN),
@@ -255,6 +317,18 @@ class Hud:
         self.target_rail.visible = not wide
         self.snaps_compact.visible = not wide
         self.zoom_compact.visible = not wide
+
+        # Unter dem umbruch fallen alle drei manoever-plaetten weg -- sie
+        # sind ein PLANUNGSwerkzeug, kein fluginstrument, und in einem
+        # schmalen fenster nehmen sie den platz weg, den die bahn braucht.
+        # Die tasten N / Shift+N / X bleiben in jeder groesse erreichbar,
+        # und der ziehgriff an der linie ebenso: der haengt an der bahn,
+        # nicht an der chrome.
+        self.maneuver_axes.visible = wide
+        self.maneuver_nodes.visible = wide
+        self.maneuver_burn.visible = wide
+        if self.maneuver_length is not None:
+            self.maneuver_length.visible = wide
 
     # ------------------------------------------------------------- aktionen
 

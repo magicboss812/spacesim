@@ -322,6 +322,59 @@ class ConfigLoader:
         kwargs['debug'] = bool(self.get_bool('debug.predictor_debug', False))
         return kwargs
 
+    def maneuver_kwargs(self):
+        """maneuver-abschnitt -> plan, vorschau und ausfuehrer.
+
+        Ein reines woerterbuch statt eines `_assign` auf ein objekt: die drei
+        empfaenger (ManeuverPlan, ManeuverPreview, ManeuverExecutor) teilen
+        sich den abschnitt, und keiner von ihnen soll alle schluessel
+        besitzen.
+
+        `max_accel: null` heisst ABLEITEN (thrust_acc / realtime_warp_max),
+        nicht 'null m/s^2' -- siehe ship/maneuver/executor.py.
+        """
+        raw_accel = self.get('maneuver.max_accel', None)
+        return {
+            'enabled': bool(self.get('maneuver.enabled', True)),
+            'max_nodes': int(self.get('maneuver.max_nodes', 5)),
+            'ramp_seconds': float(self.get('maneuver.ramp_seconds', 0.6)),
+            'max_accel': None if raw_accel is None else float(raw_accel),
+            'orient_lead_seconds': float(
+                self.get('maneuver.orient_lead_seconds', 5.0)),
+            'burn_step_max_s': float(self.get('maneuver.burn_step_max_s', 0.5)),
+            'min_executable_dv': float(
+                self.get('maneuver.min_executable_dv', 1e-3)),
+            'preview_max_points': int(
+                self.get('maneuver.preview_max_points', 2000)),
+            'preview_min_interval_s': float(
+                self.get('maneuver.preview_min_interval_s', 0.0)),
+            'preview_async': bool(self.get('maneuver.preview_async', True)),
+            'preview_length_mult': float(
+                self.get('maneuver.preview_length_mult', 2.0)),
+            'preview_length_mult_min': float(
+                self.get('maneuver.preview_length_mult_min', 0.25)),
+            'preview_length_mult_max': float(
+                self.get('maneuver.preview_length_mult_max', 32.0)),
+            'preview_length_sweep_seconds': float(
+                self.get('maneuver.preview_length_sweep_seconds', 2.5)),
+            'burn_step_s': float(self.get('maneuver.burn_step_s', 0.25)),
+            'burn_min_steps': int(self.get('maneuver.burn_min_steps', 16)),
+            'burn_max_steps': int(self.get('maneuver.burn_max_steps', 512)),
+            'burn_draw_points': int(self.get('maneuver.burn_draw_points', 24)),
+            'path_draw_points': int(self.get('maneuver.path_draw_points', 480)),
+            'path_coarse_points': int(
+                self.get('maneuver.path_coarse_points', 160)),
+            'end_caps': bool(self.get('maneuver.end_caps', True)),
+            'default_node_lead_fraction': float(
+                self.get('maneuver.default_node_lead_fraction', 0.5)),
+            'handle_dv_rate': float(
+                self.get('maneuver.handle_dv_rate', 260.0)),
+            'handle_travel_px': float(
+                self.get('maneuver.handle_travel_px', 96.0)),
+            'dv_step_fine': float(self.get('maneuver.dv_step_fine', 1.0)),
+            'dv_step_coarse': float(self.get('maneuver.dv_step_coarse', 10.0)),
+        }
+
     def apply_to_predictor(self, predictor):
         """predictor-abschnitt -> predictor.py (genauigkeit, reichweite, marker)."""
         if predictor is None:

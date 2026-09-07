@@ -15,6 +15,7 @@ from physics.reference_frames import (
     BODY_CENTRED_NON_ROTATING,
 )
 from ship.horizon import warp_length_mult
+from ship.maneuver import ManeuverNode
 
 # Erst ein zeigerweg unter dieser laenge gilt als klick (siehe handle_mouse).
 CLICK_SLOP_PX = 4.0
@@ -115,6 +116,17 @@ class InputRouter:
             if not app.ui_state.toggle_target_overlay():
                 print("FRAME: no ship available for target overlay")
 
+        # N: knoten setzen. Shift+N: den gewaehlten knoten loeschen.
+        elif key == pygame.K_n:
+            if event.mod & pygame.KMOD_SHIFT:
+                self.delete_selected_node()
+            else:
+                self.add_node_at_cursor()
+
+        # X: den naechsten knoten scharfschalten bzw. abbrechen.
+        elif key == pygame.K_x:
+            self.toggle_execute()
+
         # I/K/J/L: orientierungs-snap (rastender autopilot) umschalten.
         # Tippen rastet ein, erneutes Tippen loest; render() haelt die Nase
         # smooth an den gezeichneten orbital-vektoren im aktiven Frame.
@@ -147,6 +159,93 @@ class InputRouter:
         return True
 
     # -- die etwas laengeren einzelfaelle ------------------------------------
+
+    # -- manoeverknoten ------------------------------------------------------
+
+    def _node_time_from_cursor(self):
+        """Zeit auf der vorhersagelinie, die dem mauszeiger am naechsten liegt.
+
+        Der renderer legt die linie in schirmkoordinaten ab, waehrend ein
+        griff gezogen wird (`renderer.maneuver_curve_screen`, siehe
+        render/maneuver.py). Ist sie nicht da oder der zeiger zu weit weg,
+        faellt die zeit auf einen festen bruchteil des horizonts zurueck --
+        ein knoten muss auch dann entstehen, wenn die maus gerade woanders
+        ist.
+        """
+        app = self.app
+        points = app.predictor.get_points()
+        if points is None or len(points) < 2:
+            return None
+        t0 = float(points[0, 2])
+        t_end = float(points[len(points) - 1, 2])
+
+        curve = getattr(app.renderer, 'maneuver_curve_screen', None)
+        if curve is not None and len(curve) > 1:
+            mx, my = pygame.mouse.get_pos()
+            best_t = None
+            best_d2 = None
+            for entry in curve:
+                dx = float(entry[0]) - float(mx)
+                dy = float(entry[1]) - float(my)
+                d2 = dx * dx + dy * dy
+                if best_d2 is None or d2 < best_d2:
+                    best_d2 = d2
+                    best_t = float(entry[2])
+            # 64 px: weit genug, um die linie nicht pixelgenau treffen zu
+            # muessen, eng genug, dass ein klick am bildrand nicht zaehlt.
+            if best_d2 is not None and best_d2 <= 64.0 * 64.0:
+                return best_t
+
+        fraction = float(app.maneuver_config['default_node_lead_fraction'])
+        return t0 + (t_end - t0) * max(0.02, min(0.98, fraction))
+
+    def add_node_at_cursor(self):
+        app = self.app
+        if app.maneuver_plan.is_full:
+            print(f"MANEUVER: plan voll ({app.maneuver_plan.max_nodes} knoten)")
+            return
+        t_node = self._node_time_from_cursor()
+        if t_node is None:
+            print("MANEUVER: keine vorhersagelinie, kein knoten")
+            return
+        node = ManeuverNode(t_node)
+        app.maneuver_plan.add(node)
+        index = app.maneuver_plan.index_of(node)
+        app.selected_node_index = 0 if index is None else index
+        print(f"MANEUVER: knoten bei T+{t_node:.1f} s "
+              f"({len(app.maneuver_plan)}/{app.maneuver_plan.max_nodes})")
+
+    def delete_selected_node(self):
+        app = self.app
+        if app.maneuver_plan.remove_at(app.selected_node_index):
+            app.selected_node_index = max(
+                0, min(app.selected_node_index, len(app.maneuver_plan) - 1))
+            print(f"MANEUVER: knoten geloescht ({len(app.maneuver_plan)} uebrig)")
+
+    def toggle_execute(self):
+        app = self.app
+        executor = app.maneuver_executor
+        if executor.is_active:
+            executor.abort('cancelled')
+            print("MANEUVER: abgebrochen")
+            return
+        # Auf die vorschau WARTEN, bevor scharf geschaltet wird. Sie rechnet
+        # nebenher, und die schubrichtung kommt aus ihren markern -- wer
+        # gleich nach dem setzen eines knotens X drueckt, traefe sonst
+        # gelegentlich auf eine kette, die den knoten noch nicht kennt, und
+        # bekaeme ein 'nicht ausfuehrbar', das beim zweiten druck weg ist.
+        # Einmalige zehn millisekunden an einer stelle, an der der spieler
+        # ohnehin gerade etwas ausloest.
+        if app.maneuver_preview is not None:
+            app.maneuver_preview.wait(1.0)
+        ok = executor.arm(app.world, app.ui_state.reference_body,
+                          app.maneuver_preview)
+        if ok:
+            print(f"MANEUVER: scharf, zuendung T+{executor.t_ignition:.1f} s, "
+                  f"dauer {executor.profile.total_time:.2f} s")
+        else:
+            print("MANEUVER: nicht ausfuehrbar (kein knoten, kein delta-v, "
+                  "oder er liegt in der vergangenheit)")
 
     def _toggle_epicycles(self):
         app = self.app

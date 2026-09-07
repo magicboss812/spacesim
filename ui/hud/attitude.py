@@ -56,6 +56,10 @@ _MARKER_ORDER = (
     ('retrograde', 'RETRO', 'velocity'),
     ('normal_in', 'NORM', 'normal'),
     ('antinormal_out', 'ANTI', 'normal'),
+    # Die schubrichtung eines scharfgeschalteten knotens. Sie erscheint nur,
+    # wenn wirklich einer scharf ist -- `marker_headings` traegt den
+    # schluessel sonst gar nicht, und _draw_markers ueberspringt ihn dann.
+    ('node', 'NODE', 'node'),
 )
 
 
@@ -369,6 +373,18 @@ class AttitudeRing(Widget):
                           width=width, cap='round')
             ctx.draw.line(x - arm, y + arm, x + arm, y - arm, color,
                           width=width, cap='round')
+        elif key == 'node':
+            # Dasselbe sechseck wie der marker an der linie
+            # (render/maneuver.py::_draw_maneuver_marker) -- eine form, eine
+            # bedeutung, an beiden orten.
+            pts = []
+            for i in range(7):
+                ang = math.pi / 6.0 + i * (math.pi / 3.0)
+                pts.append((x + math.cos(ang) * radius * 0.6,
+                            y + math.sin(ang) * radius * 0.6))
+            for i in range(6):
+                ctx.draw.line(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1],
+                              color, width=max(1.0, 1.4 * scale), cap='round')
         else:
             ctx.text.draw(
                 'N' if key == 'normal_in' else 'A', x, y,

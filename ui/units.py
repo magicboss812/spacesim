@@ -140,6 +140,39 @@ def countdown(seconds, placeholder='--'):
     return marker + duration(abs(value))
 
 
+def countdown_compact(seconds, placeholder='--'):
+    """Countdown fuer eine SCHMALE zelle: 'T-1d 02h', 'T-02:55', 'T-55:56'.
+
+    Die volle form ('T-1d 02:55:56', 125 px im wert-schriftgrad) passt in
+    124 design-einheiten breite nur, wenn man ihre beschriftung weglaesst --
+    und ausgerechnet die unterscheidet NODE von IGN. Die genauigkeit wandert
+    deshalb mit der groessenordnung: ueber einem tag sagen sekunden nichts,
+    unter einer stunde sind sie das einzige, worauf es ankommt.
+    """
+    value = _finite(seconds)
+    if value is None:
+        return placeholder
+    marker = 'T-' if value >= 0 else 'T+'
+    remaining = abs(value)
+
+    years = int(remaining // _YEAR_S)
+    remaining -= years * _YEAR_S
+    days = int(remaining // _DAY_S)
+    remaining -= days * _DAY_S
+    hours = int(remaining // _HOUR_S)
+    remaining -= hours * _HOUR_S
+    minutes = int(remaining // _MINUTE_S)
+    secs = int(remaining - minutes * _MINUTE_S)
+
+    if years:
+        return f"{marker}{years}y {days}d"
+    if days:
+        return f"{marker}{days}d {hours:02d}h"
+    if hours:
+        return f"{marker}{hours:02d}:{minutes:02d}"
+    return f"{marker}{minutes:02d}:{secs:02d}"
+
+
 def mass(kilograms, digits=2, placeholder='--'):
     """Masse in kg / t / kt / Mt / Gt, darueber wissenschaftlich in kg.
 
