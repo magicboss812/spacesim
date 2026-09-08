@@ -37,9 +37,18 @@ DIE BEIDEN DELTA-V-ZEILEN SIND EINGABEFELDER, keine schrittknoepfe. Vier
 pfeilknoepfe je achse frassen 60 der 124 einheiten breite, und wer 1900 m/s
 einstellen will, klickt 190-mal. Angeklickt nimmt die zeile die tastatur
 und man tippt die zahl hinein -- ZIFFERN UND PUNKT, sonst nichts, und das
-feld waechst an ort und stelle statt in einem dialog woanders. Tippen
-ERSETZT: das feld startet leer, weil vorbelegt anhaengen hiesse (aus '0.0'
-und getippten '250.5' wurde '0.02505'). Die
+feld waechst an ort und stelle statt in einem dialog woanders. Es startet
+MIT DEM STEHENDEN WERT, aber als ganzes markiert: die erste ziffer ERSETZT
+ihn (bloss vorbelegt hiesse anhaengen -- aus '0.0' und getippten '250.5'
+wurde '0.02505'), ein RUECKSCHRITT steigt in ihn ein und aendert ihn
+weiter. Leer zu starten war die andere haelfte desselben fehlers: die zeile
+zeigte '0', waehrend der knoten noch 250 trug. GESCHRIEBEN WIRD ERST BEIM
+ABSCHLUSS -- Enter, Tab oder ein klick woanders --, nicht bei jedem
+anschlag: jeder anschlag ist sonst ein `plan.touch()`, und wer '25000'
+tippt, laesst die kette auch die ZWISCHENSTUFEN 2, 25, 250 und 2500
+rechnen. Die teuerste davon ist die letzte vor der gewollten, und ein
+vertipptes '250000' haengt die eingabe an einem brennbogen fest, den
+niemand sehen wollte. Die
 RICHTUNG ist kein vorzeichen zum tippen, sondern die beschriftung selbst:
 `PRO` schaltet auf `RET`, `NRM` auf `ANM`. Deshalb ist der kleinste
 tippbare wert 0.0 -- ein minus gaebe es zweimal, einmal als zeichen und
@@ -120,6 +129,23 @@ _AXES = (
 #: Was ein eingabefeld annimmt. Ziffern und EIN punkt -- ein minus waere die
 #: zweite art, die richtung zu sagen (siehe modulkopf).
 _DIGITS = '0123456789'
+
+#: Blinkdauer des carets in sekunden (60 % davon hell). Ein stehender
+#: strich in einem HUD voller ruhiger anzeigen liest sich als teil der
+#: zeichnung; das blinken ist, was ihn als schreibstelle ausweist.
+_CARET_BLINK_S = 1.06
+
+
+def _edit_text(value):
+    """Ein delta-v als das, was man beim OEFFNEN vorfindet.
+
+    Wie die anzeige auf eine nachkommastelle, aber OHNE die tote '.0':
+    vorbelegt ist der text der weiterzutippende, und eine stelle, die man
+    erst wieder wegloeschen muss, um eine ganze zahl zu aendern, waere im
+    weg. Das vorzeichen bleibt draussen -- es ist der richtungsknopf.
+    """
+    text = f"{abs(float(value or 0.0)):.1f}"
+    return text[:-2] if text.endswith('.0') else text
 
 
 class _ManeuverPlate(Widget):
@@ -342,6 +368,21 @@ class ManeuverAxesBlock(_ManeuverPlate):
         #: Welche achse gerade getippt wird, und was bisher dasteht.
         self._editing = None
         self._buffer = ''
+        #: Die SCHREIBSTELLE im puffer, 0..len. Pfeile, pos1/ende und ein
+        #: klick ins offene feld setzen sie; eingefuegt wird genau hier.
+        self._caret = 0
+        #: Ist der ganze wert MARKIERT (der zustand beim oeffnen)? Dann
+        #: ersetzt die naechste ziffer ihn, und ein pfeil hebt die markierung
+        #: auf, statt sie wegzuwerfen. Gezeichnet wird sie als band.
+        self._select_all = False
+        #: Blinkphase des carets, in sekunden. Jeder anschlag setzt sie auf
+        #: 0 zurueck -- ein caret, der beim tippen gerade dunkel ist, sieht
+        #: aus wie ein haenger.
+        self._caret_phase = 0.0
+        #: Ob am offenen feld ueberhaupt eine taste war. Trennt 'nichts
+        #: gesagt' (klick, dann weg -- schreibt nicht) von 'auf null
+        #: geloescht' (getippt und wieder weggeloescht -- schreibt 0.0).
+        self._touched = False
         #: Die zuletzt gewaehlte richtung je achse. Die WAHRHEIT ist das
         #: vorzeichen des werts; dies hier ist nur das gedaechtnis fuer den
         #: fall 0.0, wo es keines gibt.
@@ -420,19 +461,37 @@ class ManeuverAxesBlock(_ManeuverPlate):
             self._sign[field] = -1.0 if value < 0.0 else 1.0
 
     def _commit(self):
-        """Das feld schliessen. Ein LEERER puffer schreibt nicht.
+        """Das feld schliessen UND DABEI SCHREIBEN -- der einzige schreibweg.
 
         Wer anklickt und wieder weggeht, ohne zu tippen, hat nichts gesagt
-        -- und ein feld, das dabei auf 0.0 springt, waere eine falle. Was
-        getippt WURDE, steht ohnehin schon im knoten: `_apply_buffer` laeuft
-        bei jedem anschlag.
+        -- und ein feld, das dabei auf 0.0 springt, waere eine falle.
+        Deshalb `_touched` und nicht der puffer: ein LEERER puffer nach dem
+        wegloeschen der stellen IST die eingabe 0.0, ein leerer puffer ohne
+        jeden anschlag ist keine.
         """
         if self._editing is None:
             return
-        if self._buffer:
+        if self._touched:
             self._apply_buffer()
+        self._close()
+
+    def _open(self, field):
+        """Das feld oeffnen: vorbelegt, und der wert als GANZES markiert."""
+        self._commit()
+        self._editing = field
+        self._buffer = _edit_text(self._value_of(field))
+        self._caret = len(self._buffer)
+        self._select_all = True
+        self._caret_phase = 0.0
+        self._touched = False
+
+    def _close(self):
+        """Das feld schliessen OHNE zu schreiben -- der escape-weg."""
         self._editing = None
         self._buffer = ''
+        self._caret = 0
+        self._select_all = False
+        self._touched = False
 
     def dismiss(self):
         # Woanders geklickt: die eingabe steht, das feld schliesst.
@@ -461,14 +520,21 @@ class ManeuverAxesBlock(_ManeuverPlate):
                 if self._node() is None:
                     return True
                 if self._editing != field:
-                    self._commit()
-                    self._editing = field
-                    # LEER, nicht mit dem alten wert vorbelegt. Vorbelegt
-                    # heisst anhaengen: aus '0.0' und getippten '250.5'
-                    # wurde '0.02505' -- und der punkt, den man tippt, ist
-                    # dann schon vergeben. Tippen ERSETZT; wer nichts
-                    # tippt, aendert nichts.
-                    self._buffer = ''
+                    # MIT DEM STEHENDEN WERT VORBELEGT, aber als GANZES
+                    # MARKIERT. Ein leeres feld log ueber den knoten: der
+                    # wert stand noch drin, die zeile zeigte '0'. Blosses
+                    # vorbelegen dagegen hiesse ANHAENGEN -- aus '0.0' und
+                    # getippten '250.5' wurde '0.02505', und der punkt, den
+                    # man tippt, war schon vergeben. Markiert kann beides:
+                    # tippen ersetzt, pfeil oder klick steigen ein.
+                    self._open(field)
+                else:
+                    # SCHON OFFEN: der klick setzt den caret dorthin, wo er
+                    # hinzeigt. Ohne das waere der pfeil der einzige weg in
+                    # eine stehende zahl hinein.
+                    self._caret = self._caret_from_x(ctx, x)
+                    self._select_all = False
+                    self._caret_phase = 0.0
                 return True
         return True
 
@@ -484,49 +550,145 @@ class ManeuverAxesBlock(_ManeuverPlate):
             if self._hover_key != f'{prefix}_value':
                 continue
             step = float(getattr(self.telemetry, 'maneuver_dv_step_fine', 1.0))
-            current = abs(self._value_of(field) or 0.0)
+            # ERST schliessen, DANN lesen: der getippte wert steht bis zum
+            # `_commit` nur im puffer, und vorher gelesen schriebe das rad
+            # den alten wert plus einen schritt zurueck.
             if self._editing == field:
                 self._commit()
+            current = abs(self._value_of(field) or 0.0)
             self._write(field, current + step * (1.0 if dy > 0 else -1.0))
             return True
         return False
 
     def on_key(self, ctx, event):
-        """ZIFFERN UND PUNKT, sonst nichts (siehe modulkopf)."""
+        """Ein richtiges textfeld: caret, pfeile, ZIFFERN UND PUNKT."""
         if self._editing is None:
             return False
         key = event.key
+        # Jeder anschlag zeigt den caret sofort wieder.
+        self._caret_phase = 0.0
+
         if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
             self._commit()
             return True
         if key == pygame.K_ESCAPE:
-            self._editing = None
-            self._buffer = ''
+            # VERWERFEN: geschrieben wird erst beim schliessen, also steht
+            # noch der alte wert im knoten und nichts ist rueckgaengig zu
+            # machen.
+            self._close()
             return True
-        if key == pygame.K_BACKSPACE:
-            self._buffer = self._buffer[:-1]
-            self._apply_buffer()
+
+        if key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_HOME, pygame.K_END):
+            # Die pfeile HEBEN DIE MARKIERUNG AUF und setzen den caret an
+            # ihren rand -- das ist der weg in eine stehende zahl hinein.
+            # Sie duerfen NICHT als eingabe zaehlen: `event.unicode` ist
+            # fuer sie leer, und `'' in _DIGITS` ist wahr (siehe unten).
+            length = len(self._buffer)
+            if key == pygame.K_LEFT:
+                self._caret = 0 if self._select_all else max(0, self._caret - 1)
+            elif key == pygame.K_RIGHT:
+                self._caret = (length if self._select_all
+                               else min(length, self._caret + 1))
+            elif key == pygame.K_HOME:
+                self._caret = 0
+            else:
+                self._caret = length
+            self._select_all = False
+            return True
+
+        if key in (pygame.K_BACKSPACE, pygame.K_DELETE):
+            if self._select_all:
+                # Auf der markierung loescht er sie GANZ -- wie in jedem
+                # textfeld. In die zahl hinein kommt man mit pfeil oder
+                # klick, nicht mit dem rueckschritt.
+                self._buffer = ''
+                self._caret = 0
+            elif key == pygame.K_BACKSPACE and self._caret > 0:
+                self._buffer = (self._buffer[:self._caret - 1]
+                                + self._buffer[self._caret:])
+                self._caret -= 1
+            elif key == pygame.K_DELETE and self._caret < len(self._buffer):
+                self._buffer = (self._buffer[:self._caret]
+                                + self._buffer[self._caret + 1:])
+            self._select_all = False
+            self._touched = True
             return True
 
         char = event.unicode
-        if char in _DIGITS:
-            self._buffer += char
-        elif char in '.,' and '.' not in self._buffer:
-            # Komma wie punkt: auf einer deutschen tastatur liegt auf dem
-            # ziffernblock ein komma, und beides meint hier dieselbe stelle.
-            self._buffer += '.'
-        else:
+        # DIE LAENGE ZUERST PRUEFEN. `'' in '0123456789'` ist WAHR -- ein
+        # teilstring-test, kein zeichentest. Ohne diese zeile zaehlte jede
+        # taste OHNE zeichen (pfeile, umschalt, F-tasten) als ziffer: sie
+        # warf die markierung weg und haengte nichts an, das feld sprang
+        # also beim ersten pfeildruck auf leer und beim schliessen auf 0.
+        if len(char) != 1:
+            return True
+        # Komma wie punkt: auf einer deutschen tastatur liegt auf dem
+        # ziffernblock ein komma, und beides meint hier dieselbe stelle.
+        if char == ',':
+            char = '.'
+        if char not in _DIGITS + '.':
             # Alles andere wird VERSCHLUCKT, nicht durchgereicht: sonst
             # setzte ein 'n' waehrend des tippens einen knoten.
             return True
-        self._apply_buffer()
+        if self._select_all:
+            # Die erste ziffer ERSETZT den markierten wert als ganzes.
+            self._buffer = ''
+            self._caret = 0
+            self._select_all = False
+        if char == '.' and '.' in self._buffer:
+            return True
+        self._buffer = (self._buffer[:self._caret] + char
+                        + self._buffer[self._caret:])
+        self._caret += 1
+        # NICHT schreiben -- der puffer ist die anzeige, geschrieben wird
+        # in `_commit`. Warum: siehe den block ueber `_commit`.
+        self._touched = True
         return True
 
-    def _apply_buffer(self):
-        """Nach jedem anschlag schreiben -- die linie folgt beim tippen mit.
+    # ------------------------------------------------- caret und schriftgrad
 
-        Ein leerer puffer heisst hier 0.0 und nicht 'nichts': er entsteht
-        nur, indem man die stellen wegloescht, und das IST die eingabe.
+    def _value_role(self, ctx, text):
+        """Der grad, in dem eine wertspalte gezeichnet wird.
+
+        Muss in `draw` und im treffertest DERSELBE sein, sonst zeigt der
+        caret auf eine stelle, die anders breit gesetzt ist.
+        """
+        room = self._regions(ctx)['pro_value'][2] - ctx.px(4.0) * 2.0
+        return ('value' if ctx.text.measure(text, 'value')[0] <= room
+                else 'caption')
+
+    def _text_left(self, ctx, region, text, role):
+        """Linke kante des RECHTSBUENDIG gesetzten textes."""
+        return region[0] + region[2] - ctx.px(4.0) \
+            - ctx.text.measure(text, role)[0]
+
+    def _caret_from_x(self, ctx, x):
+        """Die schreibstelle, auf die ein klick bei `x` zeigt.
+
+        Gemessen wird ueber die PRAEFIXE desselben textes, nicht ueber eine
+        angenommene zeichenbreite: der anzeigegrad ist tabellarisch, der
+        punkt aber nicht, und ein '.' waere sonst eine ziffer breit.
+        """
+        text = self._buffer
+        if not text:
+            return 0
+        prefix = 'pro' if self._editing == 'prograde' else 'nrm'
+        region = self._regions(ctx)[f'{prefix}_value']
+        role = self._value_role(ctx, text)
+        left = self._text_left(ctx, region, text, role)
+        best, best_d = 0, abs(x - left)
+        for i in range(1, len(text) + 1):
+            d = abs(x - (left + ctx.text.measure(text[:i], role)[0]))
+            if d < best_d:
+                best, best_d = i, d
+        return best
+
+    def _apply_buffer(self):
+        """Den puffer in den knoten schreiben. NUR aus `_commit` heraus.
+
+        Ein leerer puffer heisst hier 0.0 und nicht 'nichts' -- `_commit`
+        ruft nur, wenn ueberhaupt getippt wurde, und dann ist das
+        wegloeschen der stellen die eingabe null.
         """
         if self._editing is None:
             return
@@ -546,6 +708,8 @@ class ManeuverAxesBlock(_ManeuverPlate):
             self._commit()
         if self._editing is None:
             self._sync_signs()
+        else:
+            self._caret_phase += float(dt)
 
     def draw(self, ctx):
         palette = ctx.theme.palette
@@ -575,12 +739,39 @@ class ManeuverAxesBlock(_ManeuverPlate):
             vx, vy, vw, vh = regions[f'{prefix}_value']
             editing = self._editing == field
             if editing:
-                # Der CARET macht sichtbar, dass die tastatur hier landet.
-                # Ohne ihn sieht ein eingabefeld aus wie eine anzeige.
-                text = (self._buffer or '0') + '_'
+                text = self._buffer
                 text_color = palette.text
                 ctx.draw.rect(vx, vy, vw, vh, fill=palette.active,
                               radius=-ctx.px(3.0))
+                # ZWEI ZUSTAENDE, ZWEI ZEICHEN. Markiert: ein band unter
+                # dem ganzen wert, denn die naechste ziffer ersetzt ihn --
+                # ohne das sah es aus, als loesche das feld die zahl von
+                # selbst. Sonst: ein caret GENAU an der schreibstelle, denn
+                # eingefuegt wird dort und nicht am ende.
+                #
+                # Das band traegt die ACHSENFARBE, keine neue: die vier
+                # akzente tragen bedeutung (siehe modulkopf).
+                erole = self._value_role(ctx, text)
+                ewidth = ctx.text.measure(text, erole)[0] if text else 0.0
+                eleft = vx + vw - pad - ewidth
+                if self._select_all and text:
+                    ctx.draw.rect(eleft - ctx.px(2.0), vy + ctx.px(2.0),
+                                  ewidth + ctx.px(4.0), vh - ctx.px(4.0),
+                                  fill=with_alpha(color, 0.5),
+                                  radius=-ctx.px(2.0))
+                elif (self._caret_phase % _CARET_BLINK_S) < _CARET_BLINK_S * 0.6:
+                    # IN DER ACHSENFARBE und ueber der ganzen zeilenhoehe.
+                    # Gemessen: in `palette.text`, einen pixel breit und auf
+                    # der schreibstelle beginnend, unterschied er sich vom
+                    # bild ohne ihn in genau VIER pixeln -- er lag unter dem
+                    # weissen stamm der naechsten ziffer und war dieselbe
+                    # farbe. Er sitzt deshalb MITTIG auf der zeichengrenze,
+                    # also in der luecke zwischen zwei ziffern.
+                    cw = max(2.0, ctx.px(1.5))
+                    cx = eleft + (ctx.text.measure(text[:self._caret], erole)[0]
+                                  if self._caret else 0.0)
+                    ctx.draw.rect(cx - cw * 0.5, vy + ctx.px(1.0),
+                                  cw, vh - ctx.px(2.0), fill=color)
             elif not enabled:
                 text = units.delta_v(None)
                 text_color = palette.text_dimmer

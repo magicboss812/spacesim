@@ -17,9 +17,14 @@ Fuenf ebenen:
    die geschwindigkeit, `update(dt)` integriert sie. Gehalten, ohne die
    maus weiter zu bewegen, laeuft der wert weiter; losgelassen steht er.
 5. **Eingabefeld** -- die beiden delta-v-zeilen nehmen ZIFFERN UND PUNKT
-   und sonst nichts, schreiben bei jedem anschlag durch, und die tastatur
-   gehoert ihnen nur, solange sie gebraucht wird -- sonst verschluckte ein
-   klick auf das plaettchen die tasten N / X.
+   und sonst nichts, oeffnen MIT dem stehenden wert (als ganzes markiert:
+   die erste ziffer ersetzt ihn, pfeil oder klick steigen ein und setzen
+   den caret), fuegen AN DER SCHREIBSTELLE ein und
+   schreiben erst beim ABSCHLUSS durch (enter, tab, klick
+   woanders -- nicht bei jedem anschlag, sonst rechnet die vorschaukette
+   jede zwischenstufe einer getippten zahl mit), und die tastatur gehoert
+   ihnen nur, solange sie gebraucht wird -- sonst verschluckte ein klick
+   auf das plaettchen die tasten N / X.
 
 Aufruf: python tests/maneuver_hud_test.py
 """
@@ -299,15 +304,22 @@ check(axes._editing == 'prograde', "und es bleibt ueber den frame hinaus offen",
 for ch in '250.5':
     check(key(ch, ch) is True, f"'{ch}' landet im feld", "")
 frame()
-check(abs(node.dv_prograde - 250.5) < 1e-9,
-      "waehrend des tippens steht der wert schon im knoten",
+# WAEHREND DES TIPPENS WIRD NICHT GESCHRIEBEN. Jeder anschlag waere sonst
+# ein plan.touch(), und wer '25000' tippt, liesse die kette auch 2, 25,
+# 250 und 2500 rechnen -- eine davon teuer genug, um als hakler zu lesen.
+check(axes._buffer == '250.5', "die ziffern stehen im puffer",
+      f"{axes._buffer!r}")
+check(node.dv_prograde == 0.0,
+      "und NICHT im knoten -- geschrieben wird erst beim abschluss",
       f"{node.dv_prograde}")
-check(plan.version > before_version, "und plan.version zaehlt hoch", "")
+check(plan.version == before_version,
+      "plan.version steht still, die kette rechnet also nicht mit",
+      f"{plan.version} vs {before_version}")
 
 # Buchstaben werden VERSCHLUCKT, nicht durchgereicht -- sonst setzte ein 'n'
 # beim tippen einen knoten.
 check(key(pygame.K_n, 'n') is True, "ein buchstabe wird verschluckt", "")
-check(abs(node.dv_prograde - 250.5) < 1e-9, "und aendert nichts", "")
+check(axes._buffer == '250.5', "und aendert nichts", f"{axes._buffer!r}")
 
 # Ein ZWEITER punkt ebenso.
 key('.', '.')
@@ -315,13 +327,113 @@ check(axes._buffer == '250.5', "ein zweiter punkt wird abgelehnt",
       f"{axes._buffer!r}")
 
 key(pygame.K_BACKSPACE)
-check(abs(node.dv_prograde - 250.0) < 1e-9,
-      "rueckschritt loescht die letzte stelle", f"{node.dv_prograde}")
+check(axes._buffer == '250.',
+      "rueckschritt loescht die letzte stelle", f"{axes._buffer!r}")
+check(node.dv_prograde == 0.0, "auch er schreibt noch nicht",
+      f"{node.dv_prograde}")
 
 key(pygame.K_RETURN, '\r')
 check(axes._editing is None, "enter schliesst das feld", "")
+check(abs(node.dv_prograde - 250.0) < 1e-9,
+      "UND SCHREIBT: jetzt steht der wert im knoten", f"{node.dv_prograde}")
+check(plan.version > before_version, "und plan.version zaehlt hoch", "")
 frame()
 check(abs(node.dv_prograde - 250.0) < 1e-9, "der wert steht", "")
+
+# ESCAPE verwirft -- moeglich, weil bis zum abschluss nichts geschrieben ist.
+x, y, w, h = regions['pro_value']
+press(x + w * 0.5, y + h * 0.5)
+for ch in '999':
+    key(ch, ch)
+key(pygame.K_ESCAPE)
+check(axes._editing is None, "escape schliesst das feld", "")
+check(abs(node.dv_prograde - 250.0) < 1e-9,
+      "und laesst den alten wert stehen", f"{node.dv_prograde}")
+
+# Alle stellen wegloeschen IST die eingabe null -- im unterschied zu 4b,
+# wo gar nicht getippt wurde.
+press(x + w * 0.5, y + h * 0.5)
+for ch in '12':
+    key(ch, ch)
+key(pygame.K_BACKSPACE)
+key(pygame.K_BACKSPACE)
+check(axes._buffer == '', "der puffer ist leer", f"{axes._buffer!r}")
+key(pygame.K_RETURN, '\r')
+check(node.dv_prograde == 0.0,
+      "leergeloescht und abgeschlossen schreibt 0.0", f"{node.dv_prograde}")
+node.dv_prograde = 250.0
+plan.touch()
+frame()
+
+# VORBELEGT, aber als GANZES markiert. Leer zu oeffnen zeigte '0', waehrend
+# der knoten 250 trug; bloss vorbelegt hiesse anhaengen -- aus '0.0' und
+# getippten '250.5' wurde '0.02505'.
+press(x + w * 0.5, y + h * 0.5)
+check(axes._buffer == '250',
+      "das feld oeffnet MIT dem stehenden wert -- ohne tote '.0'",
+      f"{axes._buffer!r}")
+check(axes._select_all is True, "und der wert ist als GANZES markiert", "")
+key('3', '3')
+check(axes._buffer == '3',
+      "die erste ziffer ERSETZT ihn (angehaengt waere es '2503')",
+      f"{axes._buffer!r}")
+key(pygame.K_ESCAPE)
+
+# DIE PFEILE NAVIGIEREN, sie loeschen nicht. Das ist die gegenprobe zu
+# `'' in '0123456789'` -- ein teilstring-test, der fuer JEDE taste ohne
+# zeichen wahr ist: der pfeil zaehlte als ziffer, warf die markierung weg
+# und haengte nichts an, das feld stand also sofort auf leer.
+press(x + w * 0.5, y + h * 0.5)
+check(key(pygame.K_LEFT) is True, "der pfeil wird verbraucht (kein drehen)", "")
+check(axes._buffer == '250', "und LAESST DEN WERT STEHEN",
+      f"{axes._buffer!r}")
+check(axes._caret == 0 and axes._select_all is False,
+      "er hebt die markierung auf und setzt den caret an ihren anfang",
+      f"caret={axes._caret} select={axes._select_all}")
+key('9', '9')
+check(axes._buffer == '9250', "getippt wird AN DER SCHREIBSTELLE",
+      f"{axes._buffer!r}")
+key(pygame.K_END)
+check(axes._caret == 4, "ende springt hinter die letzte stelle",
+      f"{axes._caret}")
+key(pygame.K_BACKSPACE)
+check(axes._buffer == '925', "der rueckschritt loescht VOR dem caret",
+      f"{axes._buffer!r}")
+key(pygame.K_LEFT)
+key(pygame.K_LEFT)
+key(pygame.K_DELETE)
+check(axes._buffer == '95', "entf loescht die stelle UNTER dem caret",
+      f"{axes._buffer!r}")
+key(pygame.K_RETURN, '\r')
+check(abs(node.dv_prograde - 95.0) < 1e-9,
+      "abgeschlossen steht die zusammengetippte zahl", f"{node.dv_prograde}")
+
+# Ein klick ins SCHON OFFENE feld setzt den caret dorthin, wo er hinzeigt.
+node.dv_prograde = 250.0
+plan.touch()
+press(x + w * 0.5, y + h * 0.5)
+press(x + 2.0, y + h * 0.5)
+check(axes._caret == 0, "ein klick links vom text setzt den caret auf 0",
+      f"{axes._caret}")
+check(axes._select_all is False, "und hebt die markierung auf", "")
+press(x + w - 2.0, y + h * 0.5)
+check(axes._caret == len(axes._buffer),
+      "ein klick rechts davon hinter die letzte stelle",
+      f"{axes._caret} von {axes._buffer!r}")
+key(pygame.K_ESCAPE)
+check(abs(node.dv_prograde - 250.0) < 1e-9,
+      "und nichts davon hat geschrieben", f"{node.dv_prograde}")
+
+# Eine nachkommastelle ueberlebt das oeffnen.
+node.dv_prograde = 250.5
+plan.touch()
+press(x + w * 0.5, y + h * 0.5)
+check(axes._buffer == '250.5', "auch mit nachkommastelle",
+      f"{axes._buffer!r}")
+key(pygame.K_ESCAPE)
+node.dv_prograde = 250.0
+plan.touch()
+frame()
 
 print("\n4b) angeklickt und NICHT getippt aendert nichts")
 # Ein feld, das beim blossen anklicken auf 0.0 springt, waere eine falle.
