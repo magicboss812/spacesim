@@ -1,7 +1,8 @@
 {
   "window": {
-    "width": 1280,
-    "height": 800,
+    "width": 2560,
+    "height": 1440,
+    "borderless": true,
     "fps": 180,
     "vsync": true,
     "resizable": true,

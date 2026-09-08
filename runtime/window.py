@@ -8,7 +8,7 @@ import os
 
 import moderngl
 import pygame
-from pygame.locals import DOUBLEBUF, OPENGL, RESIZABLE
+from pygame.locals import DOUBLEBUF, NOFRAME, OPENGL, RESIZABLE
 
 
 class Window:
@@ -29,6 +29,19 @@ class Window:
         # sein.
         if os.name == 'nt':
             os.environ.setdefault('SDL_WINDOWS_DPI_AWARENESS', 'permonitorv2')
+
+        # Randloses fenster (window.borderless): ein rahmenloses fenster in
+        # bildschirmgroesse. KEIN echtes vollbild -- weder `pygame.FULLSCREEN`
+        # noch `SDL_SetWindowFullscreen`; beide lassen den GPU-treiber die
+        # monitor-ausgabe neu synchronisieren (der schwarze moment beim start),
+        # auch wenn die aufloesung dieselbe bleibt.
+        #
+        # Es MUSS bei (0,0) sitzen, sonst zentriert SDL das bildschirmgrosse
+        # fenster und die haelfte haengt daneben. Der env-hint muss vor
+        # set_mode stehen.
+        self.borderless = bool(config.get('window.borderless', False))
+        if self.borderless:
+            os.environ['SDL_VIDEO_WINDOW_POS'] = '0,0'
 
         # Starte Pygame mit OpenGL.
         #
@@ -55,11 +68,26 @@ class Window:
         # UI-skala folgen ueber den WINDOWSIZECHANGED-handler in der
         # hauptschleife.
         flags = DOUBLEBUF | OPENGL
-        if bool(config.get('window.resizable', True)):
+        if self.borderless:
+            desktop = pygame.display.Info()
+            self.width = desktop.current_w
+            # EIN pixel hoeher als der schirm. Ein rahmenloses fenster, das den
+            # monitor EXAKT deckt, wird von Windows/NVIDIA "Fullscreen
+            # Optimizations" wie echtes vollbild behandelt -- dann kommt genau
+            # der re-sync, den dieser modus vermeiden soll. Eine zeile
+            # ueberstand (unsichtbar, unter der schirmkante) haelt es ein
+            # echtes fenster. Kein RESIZABLE -- die groesse ist fix.
+            self.height = desktop.current_h + 1
+            flags |= NOFRAME
+        elif bool(config.get('window.resizable', True)):
             flags |= RESIZABLE
         self.screen = pygame.display.set_mode(
             (self.width, self.height), flags, vsync=1 if self.vsync else 0
         )
+        if self.borderless:
+            # Die echte flaeche gewinnt -- SDL kann bei DPI/skalierung minimal
+            # abweichen, und Camera/Renderer brauchen die tatsaechlichen masse.
+            self.width, self.height = self.screen.get_size()
         self.ctx = moderngl.create_context()
         info = self.ctx.info
         print(info['GL_VENDOR'], info['GL_RENDERER'], info['GL_VERSION'])
