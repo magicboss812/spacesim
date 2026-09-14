@@ -26,7 +26,7 @@ Basis: 15 Seiten Fließtext. Prozentwerte skalieren, falls der Umfang anders aus
 | 7 | Fazit und Ausblick | 0,5 | 4 % |
 
 Astronomischer Anteil (2, 3, 4, 6): 10 Seiten, 66 %.
-Eigenanteil-Dokumentation (5): 3,5 Seiten, 23 %.
+Eigenanteil-Dokumentation (5): 3,5 Seiten, 33 %.
 Damit bleibt es formal eine Astro-Arbeit, obwohl das Spiel überall drinsteckt.
 
 ---
