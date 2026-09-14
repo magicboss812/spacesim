@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -Command \":*)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Martin\\\\Desktop\\\\Bahnmechanik Seminararbeit - Astronomie\\\\Werk\\\\spacesim\" -Recurse -File -Name)"
+    ]
+  }
+}
