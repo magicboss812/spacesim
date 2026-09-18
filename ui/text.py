@@ -29,6 +29,7 @@ aufgeweicht werden:
 
 import math
 import os
+from collections import OrderedDict
 
 import moderngl
 import numpy as np
@@ -56,7 +57,9 @@ class TextRenderer:
         self._vao = None
         self._quad_vbo = None
         self._fonts = {}            # rolle -> pygame.Font
-        self._cache = {}            # (text, font_key) -> (texture, w, h)
+        # LRU, NICHT FIFO -- die reihenfolge ist die des letzten ZUGRIFFS,
+        # nicht die des einfuegens (siehe _texture_for).
+        self._cache = OrderedDict()  # (text, font_key) -> (texture, w, h)
         self._deferred = []
         self._font_paths = None
         self._digit_widths = {}
@@ -329,7 +332,7 @@ class TextRenderer:
                 entry[0].release()
             except Exception:
                 pass
-        self._cache = {}
+        self._cache = OrderedDict()
         for bucket in self._texture_pool.values():
             for texture in bucket:
                 try:
@@ -346,6 +349,10 @@ class TextRenderer:
         key = (text, role, font.get_height())
         entry = self._cache.get(key)
         if entry is not None:
+            # DER TREFFER MACHT DEN EINTRAG JUNG. Ohne das ist die
+            # reihenfolge die des EINFUEGENS, und der deckel unten wirft
+            # dann genau die falschen weg -- siehe dort.
+            self._cache.move_to_end(key)
             return entry
         antialias = self._role_antialias(role)
         try:
@@ -365,9 +372,20 @@ class TextRenderer:
         except Exception:
             return None
 
-        # FIFO-deckel: staendig wechselnde texte (geschwindigkeits-anzeige,
-        # timer) wuerden sonst unbegrenzt GL-texturen anhaeufen. Stabile
-        # labels werden nach einer verdraengung einfach neu erzeugt.
+        # LRU-deckel: staendig wechselnde texte (geschwindigkeits-anzeige,
+        # timer) wuerden sonst unbegrenzt GL-texturen anhaeufen.
+        #
+        # DIE REIHENFOLGE MUSS DIE DES ZUGRIFFS SEIN, nicht die des
+        # einfuegens. Als reines dict war sie letzteres, und ein TREFFER hat
+        # nichts umsortiert -- also standen die STATISCHEN beschriftungen
+        # ('DIST', 'CLOSEST', 'SATURNV', ...), einmal im ersten bild
+        # eingetragen und danach nur noch getroffen, fuer immer ganz vorn und
+        # wurden als erste verworfen. Verdraengt wurden sie von den
+        # wechselnden zahlen, die den deckel ueberhaupt erst reissen -- und
+        # die ueberlebten hinten. Gemessen ueber 300 bilder: 2237 fehlgriffe,
+        # davon 843 (38 %) an texten, die schon einmal da waren; die
+        # statischen labels wurden je 9 mal neu gerastert. Mit move_to_end()
+        # im trefferfall sind sie immer unter den juengsten und bleiben.
         if len(self._cache) >= self.cache_max:
             for old_key in list(self._cache.keys())[: max(1, self.cache_max // 4)]:
                 try:

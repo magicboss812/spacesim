@@ -660,11 +660,18 @@ class OrbitLineSet:
 
             # Die faint volllinie: EIN umlauf ab dem fensteranfang. Eigenes
             # zeitgitter je koerper (jeder hat eine andere periode), also ein
-            # eigener durchlauf -- bei 0-3 sichtbaren linien vernachlaessigbar.
+            # eigener SOLO-durchlauf samt elternkette -- deshalb hinter
+            # demselben riegel wie das zeichen-gitter oben. Ohne ihn war die
+            # umlaufzeit (`full_max_span_s`, 2.4 jahre) die EINZIGE bedingung,
+            # und die trifft auf jeden inneren planeten und jeden mond zu:
+            # gemessen 21 gebaute volllinien fuer die 1-4, die der renderer
+            # dann zeichnet (er rechnet in `_draw_orbit_lines` selbst mit
+            # "nur 0-3"). Das waren 6.38 der 8.47 ms einer neuberechnung.
             entry.full_track = None
             entry.full_track_t = None
             entry.full_track_len = 0.0
-            if self.full_orbit_enabled:
+            if self.full_orbit_enabled and self._line_will_be_drawn(
+                    entry, b, is_focus=body_id in focus_ids):
                 period = orbital_period(b)
                 if period is not None and 0.0 < period <= self.full_max_span_s:
                     win_start = float(sample_t[0])
@@ -680,6 +687,31 @@ class OrbitLineSet:
             del self._entries[stale]
 
         self.last_recompute_ms = (time.perf_counter() - t0) * 1000.0
+
+    def _line_will_be_drawn(self, entry, b, is_focus=False):
+        """Ob dieser koerper in DIESEM bild ueberhaupt eine linie bekommt.
+
+        Der gemeinsame riegel vor jedem SOLO-durchlauf -- also vor allem, was
+        ein eigenes zeitgitter braucht und damit eine eigene Kepler-loesung
+        samt elternkette kostet (`_build_draw_track` und die faint volllinie).
+        Das gemeinsame gitter ist davon nicht betroffen, das faellt fuer alle
+        koerper in EINEM stapel an.
+
+        BEIDE zeitstaende werden gebraucht, und das ist der ganze witz:
+        `entry.miss` ist der FRISCHE wert aus diesem `_recompute`,
+        `entry.reveal` der stand des VORIGEN bildes -- `_retarget` und
+        `_ease` laufen erst NACH `_recompute`. Der frische wert faengt das
+        EINblenden ab (die linie soll da sein, bevor sie sichtbar wird), der
+        alte das AUSblenden (sonst verschwaende sie mitten in der blende).
+
+        Referenz- und auswahlkoerper bekommen in `_retarget` bedingungslos
+        `reveal_target = 1.0` und muessen deshalb immer durch.
+        """
+        if is_focus:
+            return True
+        visible = reveal_fraction(entry.miss, soi_radius(b),
+                                  self.reveal_full, self.reveal_fade)
+        return visible > 0.0 or float(entry.reveal) > 0.002
 
     def _build_draw_track(self, entry, b, sample_t, track, is_focus=False,
                           origin_body=None):
@@ -724,12 +756,8 @@ class OrbitLineSet:
         # `entry.reveal` ist der stand des VORIGEN bildes und faengt damit
         # das ausblenden ab -- sonst fiele die linie fuer die dauer der
         # blende auf das grobe gitter zurueck.
-        if not is_focus:
-            soi = soi_radius(b)
-            visible = reveal_fraction(entry.miss, soi,
-                                      self.reveal_full, self.reveal_fade)
-            if visible <= 0.0 and float(entry.reveal) <= 0.002:
-                return
+        if not self._line_will_be_drawn(entry, b, is_focus=is_focus):
+            return
 
         # Gezeichnet werden hoechstens `max_periods_drawn` umlaeufe, und zwar
         # die LETZTEN -- die endkappe (koerper zur endzeit) ist der messwert,
