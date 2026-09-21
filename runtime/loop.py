@@ -30,11 +30,9 @@ class FrameTimingPrinter:
     def emit(self, renderer, predictor, frame_ms):
         rt = getattr(renderer, 'last_frame_timings', {}) or {}
         ps = getattr(renderer, '_last_prediction_render_stats', {}) or {}
-        # `frame_ms` ist die dauer von render() selbst (present() ruehrt es
-        # nicht mehr an), also ist rend_calc genau das. Was zwischen render()
+        # rend_calc ist die dauer von render() selbst. Was zwischen render()
         # und present() gezeichnet wird -- spieler-HUD und dev-oberflaeche --
-        # steht getrennt als ui_calc; frueher lief es unsichtbar unter
-        # rend_calc und hat die zahl verdoppelt.
+        # steht getrennt als ui_calc.
         rend_calc = float(rt.get('frame_ms', 0.0))
         rend_draw = float(rt.get('swap_or_present_ms', 0.0))
         ui_calc = float(rt.get('overlay_ms', 0.0))
@@ -175,21 +173,15 @@ def run(app):
             # geprueft werden, sonst fliegt das schiff waehrend einer
             # texteingabe in der dev-oberflaeche mit.
             if not ui_wants_keyboard:
-                # rotation: in echtzeit sanft. DREHEN BLEIBT IMMER ERLAUBT,
-                # auch im zeitraffer -- es aendert die bahn nicht.
+                # DREHEN BLEIBT IMMER ERLAUBT, auch im zeitraffer -- es
+                # aendert die bahn nicht.
                 app.ship_control.handle_rotation(keys, frame_dt)
-                # SCHUB NUR IN ECHTZEIT. Oberhalb der untersten zeitraffer-
-                # stufe rueckt die welt je frame um stunden bis tage vor; ein
-                # impuls "einmal pro frame" waere dort weder dosierbar noch
-                # reproduzierbar (er haenge an der bildrate), und er macht die
-                # gehaltene vorhersage in jedem frame ungueltig. Deshalb ist
-                # der schub gesperrt, solange gerafft wird -- der spieler geht
-                # zum manoevrieren auf die unterste stufe zurueck.
-                # Handeingabe schlaegt den autopiloten. Geprueft werden
-                # alle vier steuertasten, nicht nur der schub: wer im
-                # brennvorgang dreht, meint es ebenso ernst, und eine
-                # gedrehte nase macht die restliche brenndauer ohnehin
-                # ungueltig.
+                # SCHUB NUR IN ECHTZEIT: im zeitraffer rueckt die welt je frame
+                # um stunden bis tage vor, ein impuls je frame waere weder
+                # dosierbar noch bildratenunabhaengig.
+                # Handeingabe schlaegt den autopiloten. Geprueft werden alle
+                # vier steuertasten: eine gedrehte nase macht die restliche
+                # brenndauer ebenso ungueltig wie schub.
                 if (app.maneuver_executor is not None
                         and app.maneuver_executor.is_active
                         and (keys[pygame.K_UP] or keys[pygame.K_DOWN]
@@ -212,14 +204,10 @@ def run(app):
         # Die simulationsrate ist damit konstant camera.sim_dt * TICK_RATE
         # sim-sekunden pro echtsekunde, unabhaengig von der bildrate.
         #
-        # Ein akkumulator mit FESTEN ticks waere die lehrbuch-loesung, ist hier
-        # aber falsch: die tick-rate liegt bei der bildrate, also quantisiert
-        # der akkumulator gegen den vsync-jitter. Gemessen ueber 600 frames:
-        # 9 frames ruecken GAR NICHT vor, 7 frames DOPPELT (16.4 % streuung
-        # statt 4.2 %). Sichtbar wird das als stotterndes schiff, das gegen die
-        # jeden frame neu gezeichnete predictor-linie springt. Der integrator
-        # ist adaptiv und world.step() zerlegt ohnehin in stuecke, ein
-        # variables aeusseres dt ist also unproblematisch.
+        # Bewusst KEIN akkumulator mit festen ticks: die tick-rate liegt bei
+        # der bildrate, feste ticks quantisierten gegen den vsync-jitter (frames
+        # ohne und mit doppeltem vorruecken -> stotterndes schiff). Der
+        # integrator ist adaptiv und world.step() zerlegt ohnehin in stuecke.
         #
         # frame_dt ist bereits auf max_frame_dt gekappt, ein stall kann also
         # keinen riesigen sprung einspeisen.
@@ -260,8 +248,7 @@ def run(app):
             selected_body=app.ui_state.selected_body,
         )
 
-        # Overlays NACH der welt und VOR dem swap. render() macht den swap
-        # nicht mehr selbst -- das uebernimmt renderer.present() unten.
+        # Overlays NACH der welt und VOR dem swap (renderer.present() unten).
         #
         # Reihenfolge: spieler-HUD zuerst, entwicklerwerkzeuge darueber. Das
         # HUD landet damit hinter dem FXAA-resolve (render() ist fertig) --
@@ -283,10 +270,8 @@ def run(app):
         # `render draw` konstant null. Das panel zeigt damit den stand des
         # VORIGEN frames, was bei 180 fps niemand sieht.
         #
-        # Laeuft unbedingt, auch mit geschlossenem panel: ein puffer, der nur
-        # gefuellt wird, waehrend man hinschaut, ist beim aufklappen leer.
-        # Kostet dafuer gemessene 1.0 us je frame (0.02 % eines 5.6-ms-frames),
-        # siehe tests/devui_timing_test.py.
+        # Laeuft unbedingt, auch mit geschlossenem panel, damit der puffer
+        # beim aufklappen schon gefuellt ist (kosten: tests/devui_timing_test.py).
         frame_ms = (time.perf_counter() - loop_t0) * 1000.0
         app.dev_ctx.sample_timings(frame_ms)
 
@@ -370,21 +355,14 @@ def _update_predictor(app):
         if not target:
             target = next((b for b in app.world.body if not b.fixed), None)
         if target:
-            # Im zeitraffer die kurve HALTEN statt jeden frame neu rechnen --
-            # sonst zieht _anchor_first_point sie je frame um die volle
-            # bahnbewegung starr mit und sie zittert. Siehe
-            # Predictor._hold_advance.
+            # Im zeitraffer die kurve HALTEN statt jeden frame neu rechnen.
+            # Siehe Predictor._hold_advance.
             predictor.set_hold(not app.thrust_allowed())
             if hasattr(predictor, 'set_view_scale'):
-                # WICHTIG: das zoom-ZIEL einspeisen, nicht die gerade
-                # nachlaufende skala. set_view_scale() setzt bei jeder
-                # aenderung > snapshot_view_rel_tol (1e-6) das flag
-                # _view_scale_changed, was in Predictor.update() einen
-                # SYNCHRONEN _compute_full() im hauptthread ausloest. Mit der
-                # animierten skala waere das ein voller neuaufbau der
-                # trajektorie in JEDEM frame einer zoom-animation. Das ziel ist
-                # waehrend der animation konstant -> genau ein neuaufbau pro
-                # mausrad-raste.
+                # Das zoom-ZIEL einspeisen, nicht die nachlaufende skala: jede
+                # skalenaenderung loest einen synchronen neuaufbau aus, und das
+                # ziel ist waehrend der zoom-animation konstant -> genau ein
+                # neuaufbau pro mausrad-raste.
                 predictor.set_view_scale(app.camera.target_scale)
             predictor.update(target, app.world)
     return predictor.get_points()

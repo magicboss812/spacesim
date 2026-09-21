@@ -1,18 +1,16 @@
 """Bahn-linien der himmelskoerper -- reine geometrie, kein GL.
 
-Zwei kurven je koerper, beide in WELT-koordinaten:
+Kurven je koerper in WELT-koordinaten: die zukunfts-spur (`future_track`),
+also wo der koerper waehrend des prognose-fensters wirklich stehen wird, und
+die faint volllinie ueber genau einen umlauf. `FrameAffineTable` projiziert
+sie in den plot-frame.
 
-* die volle kepler-ellipse (`ellipse_offsets`), elternrelativ und damit
-  zeitlos -- sie haengt nur an (a, e, arg_periapsis) und wird gecacht;
-* die zukunfts-spur (`future_track`), also wo der koerper waehrend des
-  prognose-fensters wirklich stehen wird.
-
-Die deckkraft beider kommt aus der dichtesten annaeherung zwischen der
+Die deckkraft kommt aus der dichtesten annaeherung zwischen der
 prognostizierten schiffsbahn und der ZUKUENFTIGEN position des koerpers zur
 JEWEILS GLEICHEN zeit -- nicht aus dem abstand zur bahnlinie selbst.
 
-Wie `body_style.py`: reines numpy, damit der ganze block headless testbar
-bleibt. Das zeichnen liegt in `rendering.py`.
+Wie `bodies/style.py`: reines numpy, damit der ganze block headless testbar
+bleibt. Das zeichnen liegt in `render/orbits.py`.
 """
 
 import math
@@ -56,37 +54,18 @@ def future_tracks(bodies, times):
     Gibt `{id(koerper): (k, 2)-array}` zurueck, einschliesslich der
     vorfahren -- die fallen beim aufsummieren der kette ohnehin an.
 
-    Modell: die KEPLER-loesung aus `predictor.py`
-    (`_body_scripted_relative_xy_numba`) -- mittlere anomalie `M0 + n*dt`,
+    Modell: die KEPLER-loesung (`physics/kernels/kepler.py`,
+    `bodies.body.kepler_relative_xy`) -- mittlere anomalie `M0 + n*dt`,
     Newton-iteration auf die exzentrische, daraus die wahre anomalie.
-
-    NICHT `bodies.body.position_at_time`, obwohl das hier frueher stand.
-    Jenes modell schreibt die winkelrate am epochen-lesezeichen fest
-    (`theta_t = theta_ref + omega_ref*dt`) und gilt nur fuer den
-    welt-integrator (`world_kernels.py`, siehe die notiz dort). Der
-    praediktor UND `reference_frames` rechnen beide Kepler -- und der
-    plot-frame zieht seinen ursprung aus `reference_frames`. Wer hier das
-    welt-modell benutzt, zeichnet `koerper_konstantrate(t) -
-    ursprung_kepler(t)`, und die differenz der beiden modelle landet in der
-    linie. Gemessen fuer den Mond im Erd-rahmen bei 90 tagen horizont: der
-    abstand lief von 5.9e7 bis 3.1e9 m, statt in seiner bahnschale
-    3.633e8..4.055e8 m zu bleiben -- der Mond flog scheinbar davon. Mit
-    Kepler bleibt er bei JEDEM horizont in der schale (gegen die
-    ursprungs-propagation des rahmens: < 4 mm bei 365 tagen).
-
-    Der fehler steckt ausschliesslich in der ELTERNKETTE. Die eigene
-    ellipse ist unter beiden modellen dieselbe kurve -- die konstante rate
-    verschiebt nur die phase darauf --, aber der ELTER wandert unter dem
-    falschen modell vom rahmen-ursprung weg und zieht das kind mit. Deshalb
-    war die Erde im Sonnen-rahmen unauffaellig: die Sonne steht fest, es
-    gibt keine kette.
+    Gezeichnet wird `spur(t) - ursprung(t)`, und der ursprung kommt aus
+    `reference_frames`; beide muessen dasselbe koerpermodell rechnen, sonst
+    landet die differenz der modelle in der linie.
 
     Warum als STAPEL und nicht je koerper: die Newton-iteration konvergiert
-    nach drei bis vier schritten, der aufwand liegt also nicht in der
-    mathematik, sondern in numpys aufruf-overhead auf 192 kurzen arrays --
-    gemessen 172 us je koerper einzeln gegen 34 us im stapel. Alle koerper
-    teilen sich hier ohnehin EIN zeitgitter (das des praediktors), also
-    wird EINE (k, t)-iteration fuer alle zusammen geloest.
+    nach drei bis vier schritten, der aufwand liegt also in numpys
+    aufruf-overhead auf vielen kurzen arrays. Alle koerper teilen sich EIN
+    zeitgitter (das des praediktors), also wird EINE (k, t)-iteration fuer
+    alle zusammen geloest.
     """
     times = np.ascontiguousarray(times, dtype=np.float64)
     nt = times.shape[0]
@@ -155,10 +134,9 @@ def future_tracks(bodies, times):
         for i, row in enumerate(solved):
             (_b, a[i], e[i], m0[i], mm[i], s1e2[i], ca[i], sa[i]) = row
 
-        # Das lesezeichen bleibt dasselbe wie zuvor: `world.update_planets`
-        # schreibt (_kepler_ref_theta, _kepler_ref_time) jeden schritt auf
-        # den JETZIGEN zustand, und von dort zaehlt auch der praediktor
-        # seine `local_t`. Nur das fortschreibungs-gesetz wechselt.
+        # Die epoche: `world.update_planets` schreibt (_kepler_ref_theta,
+        # _kepler_ref_time) jeden schritt auf den JETZIGEN zustand, und von
+        # dort zaehlt auch der praediktor seine `local_t`.
         ref_t = np.array([float(row[0]._kepler_ref_time) for row in solved])
         dt = times[None, :] - ref_t[:, None]
 
@@ -265,11 +243,9 @@ def relative_min_period(body, origin_body):
     elternketten -- bis auf die glieder, die beide gemeinsam haben, denn die
     heben sich in der differenz exakt weg.
 
-    Beispiel aus dem fehlerbericht: im Titania-rahmen laeuft *Uranus* einmal
-    je 8.7 tagen um den bildmittelpunkt (es ist Titanias bahn, mit
-    umgekehrtem vorzeichen) -- nicht einmal je 84 jahren. Nach seiner eigenen
-    periode bemessen sah das fenster harmlos aus, und die spur aliaste
-    trotzdem zum sternpolygon.
+    Beispiel: im Titania-rahmen laeuft *Uranus* einmal je 8.7 tagen um den
+    bildmittelpunkt (es ist Titanias bahn, mit umgekehrtem vorzeichen) --
+    nicht einmal je 84 jahren.
 
     Rueckgabe: sekunden, oder None wenn keine der beiden ketten eine bahn
     hergibt (dann gibt es auch nichts zu verfehlen).
@@ -346,8 +322,7 @@ def closest_approach(sample_t, ship_xy, body_xy):
     Verfeinert wird auf dem QUADRAT des abstands, nicht auf dem abstand:
     bei geradliniger relativbewegung ist d^2 exakt eine parabel in t, die
     scheitelpunkt-formel also exakt -- waehrend d selbst eine hyperbel ist.
-    Das kostet nichts und holt den fehler weg, den die grobe abtastung
-    sonst hinterlaesst (gemessen: ein faktor >1000 beim vorbeiflug).
+    Das kostet nichts und holt den fehler der groben abtastung weg.
     """
     n = int(sample_t.shape[0])
     if n == 0:
@@ -457,15 +432,11 @@ class OrbitLineSet:
         # EIN BODEN FUER DIE WINKELAUFLOESUNG DER SPUR.
         #
         # `track_samples` stichproben werden GLEICHMAESSIG ueber das
-        # praediktor-fenster gelegt. Das fenster ist aber das des SCHIFFS,
-        # und ein mond kuemmert sich nicht darum: gemessen ueber ein fenster
-        # von 30 jahren (transfer Erde -> Neptun) bekommt Triton bei 192
-        # stichproben **3527 grad je stichprobe** -- fast zehn umlaeufe
-        # zwischen zwei benachbarten punkten. Gezeichnet wird daraus ein
-        # sternpolygon, dessen sehnen quer durch die bahn schneiden; die
-        # linie ist dann nicht mehr grob, sondern schlicht falsch.
+        # praediktor-fenster gelegt. Das fenster ist aber das des SCHIFFS;
+        # ein mond kann darin viele umlaeufe machen, und zu wenige
+        # stichproben je umlauf zeichnen ein sternpolygon statt der bahn.
         #
-        # Zwei schrauben, und die reihenfolge ist wichtig:
+        # Zwei schrauben:
         #
         # * `samples_per_period` ist der boden: so viele stuetzstellen je
         #   umlauf, mindestens. 64 gibt 5.6 grad je stichprobe, pfeilhoehe
@@ -474,27 +445,15 @@ class OrbitLineSet:
         # * `max_periods_drawn` deckelt, wie viele umlaeufe ueberhaupt
         #   GEZEICHNET werden -- vorbelegt mit genau dem, was
         #   `max_track_samples / samples_per_period` traegt (16). Mehr
-        #   stichproben helfen ab da nicht mehr: 1871 uebereinanderliegende
-        #   umlaeufe sind auch sauber abgetastet nur eine gefuellte scheibe,
-        #   und sie kosten 1.5 mio Kepler-loesungen. Bei ueberschreitung wird
-        #   deshalb nur das ENDE des fensters gezeichnet -- die letzten
-        #   umlaeufe vor der ankunft. Das erhaelt genau das, worauf die
-        #   anzeige hinauslaeuft: die endkappe steht weiterhin beim koerper
-        #   zur ENDZEIT des praediktors, also da, wo man ihn trifft. (In
-        #   einem nicht rotierenden rahmen fallen die umlaeufe ohnehin
-        #   aufeinander, dort ist der unterschied zwischen 3 und 16 keiner.)
+        #   uebereinanderliegende umlaeufe sind nur eine gefuellte scheibe.
+        #   Bei ueberschreitung wird nur das ENDE des fensters gezeichnet --
+        #   die endkappe steht damit weiterhin beim koerper zur ENDZEIT des
+        #   praediktors; die enthuellung rollt dann vom anfang des
+        #   gezeichneten fensters ab statt von der heutigen position.
         #
-        # GEKAPPT WIRD ERST, WENN VERFEINERN NICHT MEHR REICHT. Eine spur
-        # ueber zehn Mars-umlaeufe war vorher schon brauchbar (10 grad je
-        # stichprobe); sie bekommt jetzt 649 stichproben statt 192 und bleibt
-        # vollstaendig. Kuerzer wird nur, was ohne kappung gar nicht mehr
-        # darstellbar waere.
-        #
-        # Was sich damit aendert: die enthuellung rollt sich dann nicht mehr
-        # von der HEUTIGEN position des koerpers ab, sondern vom anfang des
-        # gezeichneten fensters. Fuer koerper, deren periode laenger ist als
-        # das fenster (alle planeten), aendert sich gar nichts -- die spur
-        # bleibt bit-identisch das gemeinsame gitter.
+        # Gekappt wird erst, wenn verfeinern nicht mehr reicht. Fuer koerper,
+        # deren periode laenger ist als das fenster, bleibt die spur das
+        # gemeinsame gitter.
         self.samples_per_period = max(8.0, float(samples_per_period))
         self.max_track_samples = max(int(track_samples), int(max_track_samples))
         self.max_periods_drawn = max(0.25, float(max_periods_drawn))
@@ -661,12 +620,8 @@ class OrbitLineSet:
             # Die faint volllinie: EIN umlauf ab dem fensteranfang. Eigenes
             # zeitgitter je koerper (jeder hat eine andere periode), also ein
             # eigener SOLO-durchlauf samt elternkette -- deshalb hinter
-            # demselben riegel wie das zeichen-gitter oben. Ohne ihn war die
-            # umlaufzeit (`full_max_span_s`, 2.4 jahre) die EINZIGE bedingung,
-            # und die trifft auf jeden inneren planeten und jeden mond zu:
-            # gemessen 21 gebaute volllinien fuer die 1-4, die der renderer
-            # dann zeichnet (er rechnet in `_draw_orbit_lines` selbst mit
-            # "nur 0-3"). Das waren 6.38 der 8.47 ms einer neuberechnung.
+            # demselben riegel wie das zeichen-gitter oben, damit sie nur fuer
+            # die wenigen linien gebaut wird, die auch gezeichnet werden.
             entry.full_track = None
             entry.full_track_t = None
             entry.full_track_len = 0.0
@@ -749,10 +704,8 @@ class OrbitLineSet:
             return
 
         # NUR FUER KOERPER, DIE UEBERHAUPT EINE LINIE BEKOMMEN. Ein eigenes
-        # gitter kostet einen weiteren Kepler-durchlauf samt elternkette; bei
-        # 26 kandidaten und 1024 stichproben waeren das ~27000 loesungen je
-        # neuberechnung fuer 20+ linien, die nie gezeichnet werden. Typisch
-        # stehen 0-3 auf dem schirm (siehe reveal_fraction).
+        # gitter kostet einen weiteren Kepler-durchlauf samt elternkette, und
+        # typisch stehen nur 0-3 linien auf dem schirm (siehe reveal_fraction).
         # `entry.reveal` ist der stand des VORIGEN bildes und faengt damit
         # das ausblenden ab -- sonst fiele die linie fuer die dauer der
         # blende auf das grobe gitter zurueck.
@@ -822,7 +775,7 @@ def frame_affine_at(frame, t):
     einem koerperzentrierten rahmen die (negative) position des
     bezugskoerpers, also bis zu 1e12 m. Eine sondierung bei L = 1 wuerde
     diese zahl von sich selbst abziehen und nur noch rundungsrauschen
-    uebrig lassen -- gemessen 1e-4 relativ statt 1e-16.
+    uebrig lassen.
     """
     to_xy = getattr(frame, 'to_this_frame_xy', None)
     if to_xy is None:
@@ -851,12 +804,8 @@ def frame_affine_at(frame, t):
 def frame_project(frame, times, xs, ys, cache=None):
     """Weltpunkte in den plot-frame, je ZEIT statt je PUNKT.
 
-    Die ellipse besteht aus hunderten punkten zu EINER zeit und die
-    zukunfts-spuren aller koerper teilen sich DASSELBE zeit-array. Punktweise
-    ausgewertet ist das hundertfach dieselbe rechnung: gemessen ~27 000
-    skalare frame-aufrufe je bild und 17 ms, weil
-    `to_this_frame_xy_arrays` fuer zeiten ausserhalb seines
-    knoten-fensters None liefert und die schleife uebernimmt.
+    Die zukunfts-spuren aller koerper teilen sich DASSELBE zeit-array;
+    punktweise ausgewertet waere das vielfach dieselbe rechnung.
 
     Hier wird stattdessen `frame_affine_at` je EINDEUTIGER zeit bestimmt
     und dann in numpy angewandt. Das ist zugleich genauer als der
@@ -872,7 +821,7 @@ def frame_project(frame, times, xs, ys, cache=None):
     if n == 0:
         return xs.copy(), ys.copy()
 
-    # Skalare zeit (die ellipse gilt zu EINEM zeitpunkt): eine
+    # Skalare zeit (alle punkte zu EINEM zeitpunkt): eine
     # transformation, keine tabelle, kein np.unique. Ausdruecklich
     # ausgeschrieben statt sich auf das broadcasting eines 0-d-arrays zu
     # verlassen -- das haengt an der numpy-fassung.
@@ -897,10 +846,7 @@ def frame_project(frame, times, xs, ys, cache=None):
 
     # Der cache haelt die FERTIG AUFGEZOGENE koeffiziententabelle, nicht
     # einzelne transformationen je zeit. Alle koerper stehen auf derselben
-    # zeitachse, also baut sie der erste und die restlichen 25 lesen sie --
-    # gemessen 1811 us fuer den ersten und danach 6 us statt 113 us. Die
-    # tabelle je koerper neu zusammenzusetzen war eine Python-schleife ueber
-    # alle stichprobenzeiten und hat 5.0 ms je bild gekostet.
+    # zeitachse, also baut sie der erste und die restlichen lesen sie.
     key = None
     if cache is not None and times.shape[0] == n:
         key = ('coef', frame_key, id(times), n,
@@ -927,8 +873,7 @@ def frame_project(frame, times, xs, ys, cache=None):
                 cache[(frame_key, t)] = got
         rows.append(got)
 
-    # In EINEM zug in ein array statt sechs numpy-skalarzuweisungen je
-    # zeit -- das war der eigentliche kostenpunkt.
+    # In EINEM zug in ein array statt sechs numpy-skalarzuweisungen je zeit.
     table = np.asarray(rows, dtype=np.float64)[inverse.reshape(-1)]
     a = np.ascontiguousarray(table[:, 0])
     b = np.ascontiguousarray(table[:, 1])
@@ -967,12 +912,11 @@ STRIDE_LADDER = (1, 2, 4, 8, 16, 32, 64)
 def polyline_stride(n_points, arc_len_px, r_px, view_diagonal_px, tolerance_px):
     """Groesster stride, mit dem die gezeichnete spur die toleranz haelt.
 
-    Dieselbe rechnung wie `ellipse_segments`, nur andersherum: gegeben sind
-    die stichproben, gesucht ist, wie viele davon ueberhaupt gezeichnet
-    werden muessen. Die spur wird mit 192 punkten GEMESSEN, weil die
-    dichteste annaeherung das braucht -- gezeichnet werden muss sie fast
-    nie so fein, und jeder gezeichnete punkt kostet eine
-    frame-transformation.
+    Gegeben sind die stichproben, gesucht ist, wie viele davon ueberhaupt
+    gezeichnet werden muessen (sehnen-pfeilhoehe `c^2/8r` <= toleranz).
+    Die spur wird mit 192 punkten GEMESSEN, weil die dichteste annaeherung
+    das braucht -- gezeichnet werden muss sie fast nie so fein, und jeder
+    gezeichnete punkt kostet eine frame-transformation.
     """
     n_points = int(n_points)
     if n_points <= 2:
@@ -1059,7 +1003,7 @@ def _cubic_4pt(p0, p1, p2, p3, s):
 class FrameAffineTable:
     """Die starre transformation eines plot-frames ueber ein ZEITFENSTER.
 
-    Alle koerper stehen jetzt auf demselben fenster (dem des praediktors),
+    Alle koerper stehen auf demselben fenster (dem des praediktors),
     also lohnt es sich, die transformation EINMAL auf einem knotengitter zu
     bestimmen und fuer jeden koerper daraus zu interpolieren -- statt sie je
     stichprobenzeit neu zu sondieren.
@@ -1187,17 +1131,15 @@ def frame_origin_body(frame):
     """Der koerper, der im ursprung dieses plot-frames sitzt, oder None.
 
     Er bekommt KEINE bahnlinie: in seinem eigenen rahmen bewegt er sich
-    definitionsgemaess nicht, eine linie fuer ihn zeigt also nur noch den
-    unterschied zwischen zwei kepler-modellen (siehe die notiz in
-    CLAUDE.md). Genau das war der fehlerbericht -- die Erde zog im
-    Erd-rahmen eine bahn um die Sonne.
+    definitionsgemaess nicht, eine linie fuer ihn zeigte nur rundungs- und
+    interpolationsreste.
 
     `TargetBodyDirectionReferenceFrame` nennt ihn `target`, nicht `primary`;
     beide namen werden geprueft, in der reihenfolge ihrer eindeutigkeit.
     """
     if frame is None:
         return None
-    for attr in ('primary_body', 'target_body', 'child_body'):
+    for attr in ('primary_body', 'target_body'):
         body = getattr(frame, attr, None)
         if body is not None:
             return body

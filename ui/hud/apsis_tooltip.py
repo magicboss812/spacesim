@@ -2,14 +2,14 @@
 
 Die raute selbst und ihre abstands-fahne zeichnet der renderer, weil nur er
 die zeitabhaengige frame-transformation kennt, die den marker auf der
-gezeichneten linie haelt. Was dort FEHLTE, sind die beiden zahlen, die man
+gezeichneten linie haelt. Der zettel ergaenzt die beiden zahlen, die man
 beim planen eines manoevers wirklich braucht: WANN das schiff dort ankommt
-und WIE SCHNELL es dann ist. Beide gehoeren nicht dauerhaft ins bild -- vier
-zusaetzliche zeilen ueber der bahn waeren genau die textwand, die das HUD
-ersetzt hat --, also erscheinen sie beim ueberfahren der raute.
+und WIE SCHNELL es dann ist. Beide gehoeren nicht dauerhaft ins bild --
+zusaetzliche zeilen ueber der bahn waeren eine textwand --, also erscheinen
+sie beim ueberfahren der raute.
 
 WARUM HIER UND NICHT IM RENDERER. Der zettel braucht drei dinge, die
-allesamt in ui/ liegen und nicht in rendering.py: die hausschrift
+allesamt in ui/ liegen und nicht im renderer: die hausschrift
 (ui-text.ttf ueber die rolle 'tip_*'), den SDF-shader fuer seine flaeche
 und die maus. Der renderer legt darum nur die schirmpositionen seiner
 marker in `renderer.apsis_marker_hits` ab; getroffen wird hier.
@@ -202,8 +202,8 @@ class ApsisTooltip(Widget):
         fade = max(0.0, min(1.0, self._t))
 
         width, height = self._measure(ctx, rows)
-        # UNTER der raute, wie gefordert -- und um die halbe breite nach
-        # links, damit er auf ihr zentriert steht.
+        # UNTER der raute -- und um die halbe breite nach links, damit er auf
+        # ihr zentriert steht.
         #
         # Der abstand ist NICHT nur der zettel-spalt: direkt unter der raute
         # steht bereits die abstands-fahne des renderers ("Ap 16.37Mm", bei
@@ -227,9 +227,9 @@ class ApsisTooltip(Widget):
         # einfach, und das liest sich als bildfehler statt als antwort.
         top += (1.0 - fade) * ctx.px(4.0)
 
-        # SEHR SCHWACH GEFUELLT, ABER MIT SCHATTEN. Die vorgabe ist eine
-        # geringe deckkraft -- ueber der hell gezeichneten bahnlinie waere
-        # eine nur getoente flaeche aber unlesbar. Der schlagschatten
+        # SEHR SCHWACH GEFUELLT, ABER MIT SCHATTEN. Der zettel soll kaum
+        # decken -- ueber der hell gezeichneten bahnlinie waere eine nur
+        # getoente flaeche aber unlesbar. Der schlagschatten
         # darunter dunkelt die linie ab, ohne dass der zettel selbst deckend
         # werden muss.
         cut = -ctx.px(5.0)

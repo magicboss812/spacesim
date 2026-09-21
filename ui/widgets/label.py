@@ -60,13 +60,12 @@ class Readout(Widget):
     ganze panel.
     """
 
-    def __init__(self, label='', value='', value_color=None,
+    def __init__(self, label='', value='',
                  label_role='label', value_role='mono_readout',
                  size=(None, None), **kwargs):
         super().__init__(size=size, **kwargs)
         self.label = label
         self.value = value
-        self.value_color = value_color
         self.label_role = label_role
         self.value_role = value_role
 
@@ -89,6 +88,6 @@ class Readout(Widget):
         )
         ctx.text.draw(
             self.resolve_value(), self.rect.right, middle, role=self.value_role,
-            color=self.value_color if self.value_color is not None else palette.text,
+            color=palette.text,
             align='right', valign='middle',
         )

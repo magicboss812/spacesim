@@ -1,9 +1,6 @@
 """Aufbau des kompletten HUDs und die verankerung seiner gruppen.
 
-VIER BLOECKE, VIER ECKEN -- und die mitte bleibt frei. Das ist die
-eigentliche aenderung gegenueber der ersten fassung, in der acht einzelne
-elemente ueber den schirm verteilt lagen und die untere bildmitte so hoch
-baute, dass sie auf der bahn sass:
+VIER BLOECKE, VIER ECKEN -- und die mitte bleibt frei fuer die bahn:
 
     oben links   schiffs-plakette, koerperwaehler, ziel-block
     oben rechts  zeitraffer mit missionsuhr, darunter die system-karte
@@ -53,14 +50,10 @@ from . import chrome
 # Die erste stufe entspricht genau min_sim_dt bei 60 fps und ist damit immer
 # erreichbar; _set_warp klemmt zusaetzlich auf die kamera-grenzen.
 #
-# Die oberen drei stufen (30d/s, 100d/s, 1y/s) kamen 2026-08-18 dazu. Ohne sie
-# ist das eigentliche thema der arbeit nicht spielbar: ein Hohmann-transfer zu
-# Pluto dauert ~45 jahre, bei 7 d/s also 75 minuten echtzeit. Bei 1 y/s sind es
-# 45 sekunden.
-#
-# Bezahlt wurden sie NICHT mit bildrate, sondern mit der schrittweiten-decke --
-# siehe world.set_warp_step_ceiling(). Gemessen bei 365 d/s, 28 koerper,
-# 180 fps: welt+predictor 172.9 ms -> 4.3 ms.
+# Die oberen drei stufen (30d/s, 100d/s, 1y/s) machen lange transfers
+# spielbar: ein Hohmann-transfer zu Pluto dauert ~45 jahre, bei 7 d/s also
+# 75 minuten echtzeit, bei 1 y/s 45 sekunden. Bezahlbar sind sie ueber die
+# schrittweiten-decke, siehe world.set_warp_step_ceiling().
 WARP_STEPS = (
     (60.0, '1m/s'),
     (600.0, '10m/s'),
@@ -133,7 +126,7 @@ class Hud:
         # Schwelle, ab der der schub gesperrt ist -- der schubbogen im
         # navball-block zeigt das an.
         self.telemetry.realtime_warp_max = float(realtime_warp_max)
-        # Dieselbe zahl wie der riegel in test.py -- sonst blendet das HUD
+        # Dieselbe zahl wie der riegel der hauptschleife -- sonst blendet das HUD
         # andere stufen ab als die hauptschleife zulaesst.
         self.telemetry.warp_timescale_divisor = float(warp_timescale_divisor)
         self._horizon_mult_get = horizon_mult_get
@@ -158,10 +151,9 @@ class Hud:
         # Die koerperliste sitzt direkt unter der plakette, weil dort auch
         # der aktive bezugskoerper steht -- knopf und angezeigter wert
         # gehoeren zusammen. Sie ist in JEDER fenstergroesse erreichbar:
-        # ohne sie liesse sich der bezugskoerper ueberhaupt nur noch mit
-        # der taste R wechseln.
+        # sonst liesse sich der bezugskoerper nur mit der taste R wechseln.
         self.body_browser = root.add(BodyBrowser(
-            telemetry, self.ui_state, side='left',
+            telemetry, self.ui_state,
             anchor=TOP_LEFT, offset=(MARGIN, MARGIN + 40),
         ))
         self.target = root.add(build_target_panel(
@@ -274,8 +266,7 @@ class Hud:
         # Der vorhersage-horizont: ein mittenzentrierter raten-regler. Nach
         # rechts ziehen verlaengert die gezeichnete linie, nach links
         # verkuerzt sie -- die auslenkung ist die geschwindigkeit. Er
-        # aendert NUR predictor.set_display_length (O(1), kein neuaufbau);
-        # siehe plans/predictor_horizon_slider_design.md.
+        # aendert NUR predictor.set_display_length (O(1), kein neuaufbau).
         if self._horizon_mult_get is not None and self._horizon_mult_set is not None:
             self.horizon = self.left_stack.add(HorizonSlider(
                 value=self._horizon_mult_get,
@@ -318,7 +309,7 @@ class Hud:
         self.snaps_compact.visible = not wide
         self.zoom_compact.visible = not wide
 
-        # Unter dem umbruch fallen alle drei manoever-plaetten weg -- sie
+        # Unter dem umbruch fallen alle manoever-plaettchen weg -- sie
         # sind ein PLANUNGSwerkzeug, kein fluginstrument, und in einem
         # schmalen fenster nehmen sie den platz weg, den die bahn braucht.
         # Die tasten N / Shift+N / X bleiben in jeder groesse erreichbar,

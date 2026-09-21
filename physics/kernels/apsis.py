@@ -13,7 +13,6 @@ import math
 import numpy as np
 from numba import njit
 
-from physics.kernels import BODY_MEMO_COLUMNS
 from physics.kernels.kepler import _body_position_at_time_numba
 
 
@@ -21,14 +20,9 @@ from physics.kernels.kepler import _body_position_at_time_numba
 def _refine_apsis_numba(pts, d2_arr, idx, use_tangents):
     # parabolische verfeinerung des diskreten extremums bei `idx`: die
     # rohe "nächster punkt"-wahl hat einen quantisierungsfehler von der
-    # größenordnung (punktabstand)^2 / (2*krümmungsradius) — der bei
-    # jedem predictor-neuaufbau anders ausfällt, weil das arc-length-
-    # sampling-raster jedes mal neu am schiff verankert wird (anderer
-    # phasenversatz zur wahren apsis). das lässt den angezeigten
-    # Pe/Ap-abstand bei UNVERÄNDERTER bahn zwischen neuberechnungen
-    # spürbar schwanken (stärker an einer scharfen periapsis, schwächer
-    # an einer flachen apoapsis). fit einer parabel durch die drei
-    # punkte um idx liefert den echten scheitel und eliminiert das.
+    # größenordnung (punktabstand)^2 / (2*krümmungsradius), der mit dem
+    # phasenversatz des abtastrasters zur wahren apsis schwankt. fit einer
+    # parabel auf d^2 durch die drei punkte um idx liefert den scheitel.
     n = pts.shape[0]
     x = pts[idx, 0]
     y = pts[idx, 1]
@@ -61,24 +55,9 @@ def _refine_apsis_numba(pts, d2_arr, idx, use_tangents):
     r = math.sqrt(refined_d2)
 
     # POSITION AUF DERSELBEN KUBIK, DIE DER RENDERER ZEICHNET -- nicht auf
-    # ihrer SEHNE.
-    #
-    # Hier stand eine lineare interpolation entlang des nachbar-segments,
-    # mit der begruendung, der marker liege damit "exakt auf der
-    # gezeichneten linie". Gezeichnet wird die linie aber als kubisches
-    # Hermite-polynom durch dieselben punkte (`_hermite_refine_world`),
-    # und das weicht von der sehne um die pfeilhoehe ab. Solange der
-    # punktabstand klein gegen den kruemmungsradius ist, sind das
-    # bruchteile eines pixels; auf einem langen horizont ist es das nicht
-    # mehr: bei punktabstand 1.125e8 m und einer periapsis bei 1.69e8 m
-    # (Erde -> Neptun, siehe .claude/rules/predictor.md) betraegt die
-    # pfeilhoehe R*(1-cos(c/2R)) = 9.4e6 m -- rund 10 px im bild. Der
-    # marker sass damit sichtbar NEBEN der linie, mal darueber, mal
-    # darunter, je nachdem wie das abtastraster gerade zur wahren apsis
-    # stand. Auf der kubik ausgewertet liegt er dort per konstruktion.
-    #
-    # Bezier-form des Hermite-polynoms, wortgleich zu
-    # rendering._hermite_refine_world:
+    # ihrer SEHNE, die auf einem langen horizont um die pfeilhoehe (viele
+    # pixel) daneben liegt. Bezier-form des Hermite-polynoms, wortgleich zu
+    # `_hermite_refine_world` im renderer:
     #   b0 = p0, b1 = p0 + v0*dt/3, b2 = p1 - v1*dt/3, b3 = p1
     if k >= 0.0:
         i0 = idx
@@ -101,16 +80,10 @@ def _refine_apsis_numba(pts, d2_arr, idx, use_tangents):
     # und ihre punkte werden auch gezeichnet wie eine gerade. Dann bleibt
     # es bei der linearen form oben, und das ist wieder genau richtig.
     #
-    # OB DAS SO IST, WIRD DRAUSSEN ENTSCHIEDEN UND HEREINGEREICHT -- hier
-    # laesst es sich nicht pruefen. Dieser kernel ist `fastmath=True`,
-    # also verspricht er LLVM, dass keine NaN auftreten (`nnan`), und
-    # dann darf jede NaN-abfrage wegoptimiert werden. Gemessen mit
-    # numba auf dieser maschine: unter fastmath liefert BEIDES
-    #     math.isfinite(nan) -> True        nan == nan -> True
-    # Ein guard an dieser stelle haette also nichts abgefangen und die
-    # kubik mit NaN gerechnet -- der marker waere verschwunden. Es ist
-    # dieselbe falle, die weiter oben schon die `valid`-spalte des
-    # body_memo erzwungen hat.
+    # OB DAS SO IST, WIRD DRAUSSEN ENTSCHIEDEN UND ALS `use_tangents`
+    # HEREINGEREICHT -- hier laesst es sich nicht pruefen: unter
+    # `fastmath=True` (LLVM `nnan`) liefern `math.isfinite(nan)` und
+    # `nan == nan` beide True, ein NaN-guard hier waere wirkungslos.
     if use_tangents != 0 and pts.shape[1] >= 5 and dt > 0.0:
         third = dt / 3.0
         b0x = pts[i0, 0]
@@ -153,12 +126,9 @@ def _find_apsis_markers_numba(
     use_tangents,
 ):
     # sucht lokale extrema des abstands schiff<->referenzkörper entlang der
-    # predictor-punkte (pts: (n,3) mit x, y, absoluter sim-zeit). der
+    # predictor-punkte (pts: x, y, absolute sim-zeit[, vx, vy]). der
     # diskrete extrempunkt wird per parabel-fit über seine nachbarn zum
-    # wahren scheitel verfeinert (_refine_apsis_numba) — sonst hängt der
-    # angezeigte Pe/Ap-abstand vom zufälligen phasenversatz des arc-
-    # length-samplings ab (das raster wird bei jedem predictor-neuaufbau
-    # neu am schiff verankert) und schwankt bei unveränderter bahn.
+    # wahren scheitel verfeinert (_refine_apsis_numba).
     # rückgabe: (out, count); out-zeilen: x, y, t_abs, kind, r wobei
     # kind 0.0 = periapsis (lokales minimum), 1.0 = apoapsis (maximum).
     out = np.empty((max_markers, 5), dtype=np.float64)
@@ -174,10 +144,7 @@ def _find_apsis_markers_numba(
     # punktabstand und der integrator-toleranz — die extremum-wahl
     # zwischen nachbarpunkten bleibt davon unberührt.
     d2_arr = np.empty(n, dtype=np.float64)
-    # Lokal angelegt, NICHT als modul-konstante: numba typisiert ein
-    # globales array `readonly`, und dann scheitert schon die
-    # uebersetzung von _body_position_at_time_numba an dessen (hier nie
-    # erreichten) schreibzugriffen -- siehe _no_body_memo().
+    # Lokal angelegt, NICHT als modul-konstante: siehe _no_body_memo().
     empty_memo = np.zeros((0, 10), dtype=np.float64)
     if use_time_dependent_bodies != 0:
         stride_max = 64
@@ -229,16 +196,11 @@ def _find_apsis_markers_numba(
     # pass 2: trend-scan über den abstandsverlauf
     #
     # `skip_head` sagt, ab welchem index die punkte einer GEMEINSAMEN
-    # rechnung entstammen. Im zeitraffer-halt stellt `_hold_advance` der
-    # gehaltenen kurve die tatsächliche schiffsposition als kopf voran --
-    # die stammt aus der WELT, nicht aus dieser kurve, und weicht deshalb
-    # um ein vielfaches eines normalen punktschritts von ihr ab (gemessen
-    # 37 km gegen 1.3 km reguläre schrittweite in einer erdumlaufbahn).
-    # Als startwert des trends gelesen kippt dieser sprung die richtung
-    # und der scan meldet ein extremum bei index 1 -- ein Ap/Pe-marker
-    # DIREKT AUF DEM SCHIFF, der von frame zu frame an- und ausgeht, weil
-    # der sprung die hysterese mal reisst und mal nicht. Der kopf wird
-    # deshalb gar nicht erst gelesen; `best_idx > skip_head` unterdrückt
+    # rechnung entstammen. `_hold_advance` stellt der kurve die
+    # schiffsposition aus der WELT als kopf voran; sie weicht um ein
+    # vielfaches eines punktschritts von der kurve ab und wuerde als
+    # startwert des trends ein schein-extremum auf dem schiff erzeugen.
+    # Der kopf wird deshalb nicht gelesen; `best_idx > start` unterdrückt
     # zusätzlich ein extremum unmittelbar dahinter.
     start = skip_head
     if start < 0:

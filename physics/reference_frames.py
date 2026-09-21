@@ -32,39 +32,6 @@ class PlottingFrameParameters:
     secondary_index: int | None = None
 
 
-@dataclass(frozen=True)
-class KeplerScriptedOrbit:
-    """Hilfs-Kepler-Orbit, nur für die Visualisierungs-Frame-Logik."""
-
-    semi_major_axis_m: float
-    eccentricity: float
-    argument_of_periapsis_rad: float
-
-    def radius_m(self, true_anomaly_rad: float) -> float:
-        a = float(self.semi_major_axis_m)
-        e = float(self.eccentricity)
-        nu = float(true_anomaly_rad)
-        denom = 1.0 + e * math.cos(nu)
-        if abs(denom) < 1e-12:
-            denom = 1e-12 if denom >= 0.0 else -1e-12
-        return a * (1.0 - e * e) / denom
-
-    def perifocal_xy(self, true_anomaly_rad: float) -> tuple[float, float]:
-        nu = float(true_anomaly_rad)
-        r = self.radius_m(nu)
-        return r * math.cos(nu), r * math.sin(nu)
-
-    def inertial_xy(self, true_anomaly_rad: float) -> tuple[float, float]:
-        x_p, y_p = self.perifocal_xy(true_anomaly_rad)
-        return _rotate_xy(x_p, y_p, -float(self.argument_of_periapsis_rad))
-
-
-def _rotate_xy(x_m: float, y_m: float, angle_rad: float) -> tuple[float, float]:
-    c = math.cos(angle_rad)
-    s = math.sin(angle_rad)
-    return c * x_m + s * y_m, -s * x_m + c * y_m
-
-
 def _unit_or_none(x: float, y: float):
     mag = math.hypot(x, y)
     if mag <= 1e-12:
@@ -94,17 +61,9 @@ def _tangent_from_stored_velocity(frame, points, limit):
     Warum das die sehne schlaegt. Die sehne misst kopf -> naechste stuetzstelle
     und setzt damit voraus, dass das schiff AUF der kurve liegt. Es liegt aber
     nie ganz darauf: welt und predictor propagieren die planeten leicht
-    verschieden, es bleibt ein versatz -- und der ist nicht nur quer, sondern
-    auch LAENGS der bahn. Faellt die restzeit bis zur naechsten stuetzstelle
-    unter die zeit, die dieser laengsversatz ausmacht, liegt die stuetzstelle
-    raeumlich HINTER dem schiff und die sehne zeigt rueckwaerts.
-
-    Gemessen auf einer kreisbahn, deren umfang 1/16 des horizonts ist
-    (16 umlaeufe in der linie), 400 frames bei 1h/s: 3 frames mit einem
-    fehler von -177.8 Grad. Der ausloeser ist jedesmal derselbe -- eine
-    stuetzstelle nur 0.17 s voraus, 2.5e5 m dahinter, und eine sehne, die die
-    mindestlaenge um 0.2 % ueberschreitet und deshalb angenommen wird. Die
-    gespeicherte tangente war in genau diesen frames auf 0.001 Grad richtig.
+    verschieden, es bleibt ein versatz -- auch LAENGS der bahn. Liegt die
+    naechste stuetzstelle zeitlich knapp voraus, kann sie deshalb raeumlich
+    HINTER dem schiff liegen, und die sehne zeigt rueckwaerts.
 
     Die umrechnung in den rahmen laeuft ueber eine kurze geradlinige
     fortsetzung (position jetzt gegen position gleich darauf) -- dieselbe
@@ -170,26 +129,12 @@ def _prograde_from_line(frame, points):
     ``None`` when unavailable/degenerate.
 
     **Die sehne muss eine MINDESTLAENGE haben, nicht nur ungleich null sein.**
-    Das ist der ganze punkt dieser funktion und war ein echter fehler
-    (behoben 2026-08-17). Im zeitraffer-halt ist ``points[0]`` die exakte
-    schiffsposition, die davor haengende stuetzstelle ``points[1]`` bleibt
-    stehen -- die kopfsehne ``c`` laeuft also zwischen zwei verbrauchten
-    stuetzstellen stetig von einer vollen punktweite auf NULL.
-
-    Gleichzeitig liegt das schiff nie exakt auf der gehaltenen kurve: welt und
-    predictor propagieren die planeten leicht unterschiedlich, es bleibt ein
-    seitlicher versatz ``d`` von einigen metern. Der winkelfehler der tangente
-    ist ``~ d/c`` -- und mit ``c -> 0`` waechst er unbegrenzt. Gemessen ueber
-    3000 frames bei 1h/s: der fehler folgt ``d/c`` punktgenau, und JEDER
-    grosse ausschlag faellt mit der kleinsten kopfsehne zusammen. Sichtbar
-    wird das als navball und prograde/normal-vektoren, die nach einigen
-    sekunden zeitraffer in beliebige richtungen springen; ein zoom hat es
-    "behoben", weil er eine vollberechnung ausloest und den versatz auf null
-    setzt.
-
-    Die alte schranke (1e-12 m) konnte das nicht abfangen: eine sehne von
-    1000 m ist voellig gesund -- sie ist nur zu kurz GEGEN das rauschen. Die
-    schranke muss deshalb relativ zur echten stuetzweite sein.
+    ``points[0]`` ist die schiffsposition, die kopfsehne ``c`` zur naechsten
+    stuetzstelle schrumpft also stetig bis auf null, waehrend die kurve
+    verbraucht wird. Das schiff liegt aber nie exakt auf der kurve (seitlicher
+    versatz ``d``), und der winkelfehler der tangente ist ``~ d/c``. Die
+    schranke ist deshalb relativ zur echten stuetzweite
+    (``_MIN_TANGENT_CHORD_FRACTION``), nicht absolut.
     """
     if points is None:
         return None
@@ -204,8 +149,8 @@ def _prograde_from_line(frame, points):
 
     # ZUERST die gespeicherte tangente -- sie ist exakt und haengt weder an
     # der stuetzweite noch daran, ob das schiff genau auf der kurve liegt.
-    # Die sehnen-suche darunter bleibt als rueckfall fuer kernels, die keine
-    # tangente schreiben (NaN), und ist dort unveraendert.
+    # Die sehnen-suche darunter ist der rueckfall fuer kernels, die keine
+    # tangente schreiben (NaN).
     stored = _tangent_from_stored_velocity(frame, points, limit)
     if stored is not None:
         return stored
@@ -247,8 +192,7 @@ def _prograde_from_line(frame, points):
     min_chord = max(1e-12, _MIN_TANGENT_CHORD_FRACTION * spacing)
 
     # Vorwaerts suchen, bis die sehne lang genug ist. Bei gleichmaessigen
-    # stuetzweiten -- also immer ausserhalb des halts -- greift schon i = 1,
-    # das verhalten ist dort unveraendert.
+    # stuetzweiten greift schon i = 1.
     best = None
     for i in range(1, limit):
         value = frame_xy(i)
@@ -442,22 +386,6 @@ def _build_kepler_elements(body, mu: float) -> dict | None:
         return None
 
 
-def _orbit_model_from_body(body) -> KeplerScriptedOrbit | None:
-    try:
-        a = float(getattr(body, "semi_major_axis", 0.0) or 0.0)
-        e = float(getattr(body, "eccentricity", 0.0) or 0.0)
-        arg = _body_arg_periapsis(body)
-    except Exception:
-        return None
-    if a <= 0.0 or e < 0.0 or e >= 1.0:
-        return None
-    return KeplerScriptedOrbit(
-        semi_major_axis_m=a,
-        eccentricity=e,
-        argument_of_periapsis_rad=arg,
-    )
-
-
 class ReferenceFrame:
     label = "Barycentric"
 
@@ -476,11 +404,11 @@ class ReferenceFrame:
     def to_this_frame_xy_arrays(self, times, xs, ys):
         """Stapelfassung von to_this_frame_xy. None = nicht moeglich.
 
-        Der renderer projiziert je frame tausende predictor-punkte. Einzeln
-        aufgerufen ist das fast reiner Python-aufruf-overhead (gemessen 5.6 ms
-        je frame allein fuer diese schleife). Wer das hier ueberschreibt, MUSS
-        rechnerisch identisch zur skalaren fassung bleiben -- die gezeichnete
-        linie wird gegen eine referenzausgabe geprueft.
+        Der renderer projiziert je frame tausende predictor-punkte; einzeln
+        aufgerufen ist das fast reiner Python-aufruf-overhead. Wer das hier
+        ueberschreibt, MUSS rechnerisch identisch zur skalaren fassung
+        bleiben -- die gezeichnete linie wird gegen eine referenzausgabe
+        geprueft.
 
         Rueckgabe None heisst 'kann ich nicht', der aufrufer nimmt dann den
         skalaren weg. Der STANDARD ist bewusst None und nicht etwa die
@@ -490,10 +418,6 @@ class ReferenceFrame:
         falsch rechnen nicht.
         """
         return None
-
-    def to_this_frame_at_time(self, time_s: float, position: Vec2) -> Vec2:
-        px, py = self.to_this_frame_xy(time_s, position.x, position.y)
-        return Vec2(px, py)
 
     def to_this_frame_vector_xy(self, time_s: float, vx: float, vy: float) -> tuple[float, float]:
         return float(vx), float(vy)
@@ -529,17 +453,17 @@ class _BodyEphemerisMixin:
     frame_time_quantization_s = 0
 
     # Max. anzahl exakter origin-stützstellen (knots) pro render, zwischen denen
-    # die origin-position linear interpoliert wird. Begrenzt teure propagations-
+    # die origin-position kubisch interpoliert wird. Begrenzt teure propagations-
     # aufrufe bei bewegten origin-körpern (z.B. Erde) auf O(knots) statt
     # O(predictor-punkte). Nur aktiv, wenn der renderer ein zeitfenster mit mehr
-    # punkten als knots setzt — sonst exakt → nie langsamer als zuvor.
+    # punkten als knots setzt — sonst exakt.
     frame_origin_interp_max_knots = 256
 
     # Mindestzahl knoten je UMLAUF des ursprungskoerpers. Reicht
     # `frame_origin_interp_max_knots` dafuer nicht, wird gar nicht mehr
-    # interpoliert, sondern im stapel exakt gerechnet -- siehe die messwerte
-    # in `set_origin_interp_window`. 16 knoten je umlauf halten die kubik
-    # weit unter einem pixel; darunter beginnt sie zu raten.
+    # interpoliert, sondern im stapel exakt gerechnet (siehe
+    # `set_origin_interp_window`). 16 knoten je umlauf halten die kubik
+    # weit unter einem pixel.
     frame_origin_interp_min_knots_per_period = 16.0
 
     def _init_ephemeris(self) -> None:
@@ -548,7 +472,6 @@ class _BodyEphemerisMixin:
         self._position_cache = {}
         self._relative_state_cache = {}
         self._angle_cache = {}
-        self._virtual_pos_cache = {}
         self.debug_ephemeris = False
         self._debug_ephemeris_counter = 0
         # origin-interpolation: q<=0 bedeutet "exakt" (deaktiviert).
@@ -573,7 +496,6 @@ class _BodyEphemerisMixin:
         self._position_cache = {}
         self._relative_state_cache = {}
         self._angle_cache = {}
-        self._virtual_pos_cache = {}
 
     @staticmethod
     def _chain_fastest_period(body, max_depth: int = 8):
@@ -625,37 +547,18 @@ class _BodyEphemerisMixin:
             return
 
         # EIN GITTER, DAS DIE BAHN DES URSPRUNGS NICHT AUFLOEST, IST KEIN
-        # GITTER. `q = span/256` haengt allein am horizont des praediktors und
-        # weiss nichts von dem koerper, der hier im ursprung steht. Fuer einen
-        # planeten ist das harmlos (Neptun laeuft in 42 tagen um 0.0044 rad
-        # weiter — gemessene abweichung 0.0 px). Fuer einen MOND ist es das
-        # nicht: bei 3650 tagen horizont ist q = 14 tage gegen eine
-        # umlaufzeit von 8.7 tagen, die kubik raet also. Gemessen als
-        # verschiebung der gezeichneten linie gegen den exakten wert — und
-        # damit gegen die Ap/Pe-marker, die nach dem loeschen des fensters
-        # gezeichnet werden und deshalb exakt sind:
-        #
-        #   ursprung   horizont   q/periode   linie<->marker   je frame
-        #   Neptun       3650 d       0.00         0.0 px        0.0 px
-        #   Mond         3650 d       0.52       452.2 px      451.7 px
-        #   Triton       3650 d       2.43       636.0 px      247.8 px
-        #   Titania      3650 d       1.64       767.2 px      194.0 px
-        #
-        # Die spalte "je frame" ist der punkt: das fenster beginnt bei der
-        # KOPFZEIT der punkteliste, und die rueckt im zeitraffer jeden frame
-        # vor. Also verschiebt sich das knotengitter, und mit ihm die ganze
-        # linie — an derselben absoluten zeit, auf einer bit-identischen
-        # kurve. Das ist das "wackeln wie ein schwingendes seil".
-        #
-        # Mehr knoten helfen hier nicht: Titania ueber 3650 tage bei 16
-        # knoten je umlauf braucht 6704 stuetzstellen, mehr als die ~4000
-        # punkte, die ueberhaupt projiziert werden. Dann ist EXAKT das
-        # billigere und zugleich richtige — und zwar im stapel, nicht in der
-        # skalaren schleife.
+        # GITTER. `q = span/knots` haengt allein am horizont des praediktors
+        # und weiss nichts von dem koerper im ursprung. Fuer einen planeten
+        # ist das harmlos, fuer einen MOND bei langem horizont kann q groesser
+        # sein als seine umlaufzeit -- die kubik raet dann, und weil das
+        # fenster mit der kopfzeit der linie wandert, wackelt die ganze linie
+        # von frame zu frame. Mehr knoten helfen nicht (es braeuchte mehr, als
+        # punkte projiziert werden); dann ist EXAKT im stapel das billigere
+        # und richtige.
         # Derselbe ursprungs-koerper, den `orbit_lines.frame_origin_body`
         # bestimmt -- TargetBodyDirection nennt ihn `target_body`.
         origin_body = None
-        for _attr in ("primary_body", "target_body", "child_body"):
+        for _attr in ("primary_body", "target_body"):
             origin_body = getattr(self, _attr, None)
             if origin_body is not None:
                 break
@@ -694,23 +597,12 @@ class _BodyEphemerisMixin:
         exakt (0, 0, 1, 0); die knotenwerte selbst werden also nicht
         verschoben, auch nicht um ein bit.
 
-        NICHT Catmull-Rom, und der unterschied ist gemessen. CR schaetzt die
-        steigung als `(p2 - p0) / 2`; auf einem kreis ist diese sehne um
-        `sin(t)/t` zu kurz, der ansatz also nur 3. ordnung. Die Lagrange-form
-        gibt jede kubik exakt wieder und ist damit 4. ordnung. Auf der
-        erdbahn, groesster fehler im mittleren intervall:
-
-        | theta | linear | Catmull-Rom | Lagrange |
-        |---|---|---|---|
-        | 0.033 | 2.0e7 m | 8.4e4 m | 4.0e3 m |
-        | 0.131 | 3.2e8 m | 5.4e6 m | 1.0e6 m |
-
+        NICHT Catmull-Rom: dessen steigung `(p2 - p0) / 2` ist auf einem
+        kreis um `sin(t)/t` zu kurz, der ansatz also nur 3. ordnung. Die
+        Lagrange-form gibt jede kubik exakt wieder und ist 4. ordnung.
         Erkauft wird das mit C0 statt C1 an den knoten -- ein knick bleibt
-        also grundsaetzlich moeglich. Er ist nur eben 4. ordnung klein
-        (0.14 px gegen 42 px vorher), waehrend CRs glatter bogen 5x weiter
-        neben der bahn liegt. Sichtbarkeit schlaegt stetigkeit.
+        moeglich, ist aber 4. ordnung klein.
         """
-        s2 = s * s
         return (p0 * (-(s * (s - 1.0) * (s - 2.0)) / 6.0)
                 + p1 * (((s + 1.0) * (s - 1.0) * (s - 2.0)) / 2.0)
                 + p2 * (-((s + 1.0) * s * (s - 2.0)) / 2.0)
@@ -720,36 +612,13 @@ class _BodyEphemerisMixin:
         # Interpolierender wrapper: bei aktivem zeitfenster (q>0) wird die
         # origin-position zwischen exakten knots interpoliert statt je punkt
         # propagiert. stack gesetzt => rekursiver elternaufruf, der exakt
-        # bleiben muss. q<=0 => exakt (identisch wie zuvor, nie langsamer).
+        # bleiben muss. q<=0 => exakt.
         #
-        # KUBISCH, NICHT LINEAR -- und das ist bug 4.
-        #
-        # Gezeichnet wird `schiff(t) - origin(t)`. War `origin` die SEHNE
-        # zwischen zwei knoten, dann steckt in der linie die woelbung, die der
-        # bahn des BEZUGSKOERPERS fehlt: null auf jedem knoten, maximal
-        # dazwischen. Das ergibt genau das bild aus dem fehlerbericht --
-        # gleichfoermige baeuche mit harten ECKEN auf den knoten, und zwar
-        # ohne dass die vorhergesagten punkte selbst falsch waeren.
-        #
-        # Die groesse folgt der sehnenformel `R*theta^2/8` mit
-        # `theta = 2*pi*q / T_bezug`; das fenster ist die zeitspanne der
-        # vorhersage, also waechst q mit jedem '+'-druck. Fuer die Erde
-        # (R = 1.496e11 m, T = 1 jahr) bei 256 knoten, gemessen gegen eine
-        # praktisch exakte interpolation:
-        #
-        # | horizont | fenster | analytisch | gemessen |
-        # |---|---|---|---|
-        # | 1x   | 3.8 d  | 0.00 px  | 0.00 px  |
-        # | 32x  | 0.33 j | 0.17 px  | 0.19 px  |
-        # | 128x | 1.33 j | 2.66 px  | 6.13 px  |
-        # | 512x | 5.33 j | 42.51 px | **40.68 px** |
-        #
-        # Deshalb half weder ein groesseres zeichenbudget noch eine feinere
-        # unterteilung: beide zeichnen dieselbe verbogene kurve nur glatter.
-        # Kubisch ueber DIESELBEN knoten faellt der fehler auf
-        # `R*theta^4/384`, bei 512x also 42.5 px -> 0.015 px -- ohne eine
-        # einzige zusaetzliche Kepler-loesung, weil nur zwei knoten mehr
-        # gelesen werden und die ohnehin im positions-cache stehen.
+        # KUBISCH, NICHT LINEAR: gezeichnet wird `schiff(t) - origin(t)`.
+        # Waere `origin` die SEHNE zwischen zwei knoten, truege die linie die
+        # fehlende woelbung der bahn des BEZUGSKOERPERS (`R*theta^2/8`,
+        # waechst mit dem horizont) als baeuche mit ecken auf den knoten.
+        # Kubisch ueber dieselben knoten ist der fehler 4. ordnung.
         q = self._origin_interp_q
         if q <= 0.0 or body is None or stack is not None:
             return self._body_world_position_exact(body, time_s, stack)
@@ -769,14 +638,13 @@ class _BodyEphemerisMixin:
         """Stapelfassung von _body_world_position_at_time. None = nicht moeglich.
 
         Nutzt genau dieselbe knoten-interpolation wie die skalare fassung:
-        die stuetzstellen liegen gleichmaessig auf [t0, t1] mit abstand q, und
-        zwischen zwei knoten wird linear interpoliert. Weil die knoten ein
-        REGELMAESSIGES gitter bilden, ist das eine reine np.take-plus-lerp-
-        rechnung -- mit denselben operationen in derselben reihenfolge wie
-        `xlo + (xhi - xlo) * frac`, also bis aufs letzte bit gleich.
+        die stuetzstellen liegen gleichmaessig mit abstand q ab t0, und
+        dazwischen wird mit `_cubic_4pt` interpoliert -- derselbe ausdruck
+        wie im skalaren weg, also bis aufs letzte bit gleich.
 
         Ohne aktives zeitfenster (q <= 0) gibt es kein gitter; dann None, und
-        der aufrufer bleibt skalar.
+        der aufrufer bleibt skalar -- ausser `_origin_exact_batch` ist
+        gesetzt, dann wird im stapel exakt gerechnet.
         """
         if _np is None or body is None:
             return None
@@ -791,18 +659,11 @@ class _BodyEphemerisMixin:
         if q <= 0.0:
             # EXAKT, ABER IM STAPEL. Das knotengitter kann die bahn dieses
             # ursprungs nicht darstellen (mond-frames bei langem horizont),
-            # also wird gar nicht erst interpoliert. Die skalare schleife
-            # waere hier die falsche antwort: sie rechnet dasselbe, nur je
-            # punkt in Python. `_knot_positions_batch` ist derselbe
-            # rechenweg wie fuer die knoten, nur ueber die punktzeiten.
-            #
-            # OHNE cache-abgleich (`reconcile=False`), und das ist absicht:
-            # diese zeiten kommen genau einmal vor, ein eintrag dafuer wird
-            # nie wieder gelesen. Der abgleich kostete gemessen 2.4 der
-            # 3.3 ms und haette `_position_cache` je frame um 12 000
-            # eintraege wachsen lassen. Gerechnet wird davon unabhaengig
-            # dasselbe -- der abgleich entscheidet nur, WELCHER von zwei
-            # bit-gleichen wegen den wert zuerst geschrieben hat.
+            # also wird gar nicht erst interpoliert. `_knot_positions_batch`
+            # ist derselbe rechenweg wie fuer die knoten, nur ueber die
+            # punktzeiten -- und OHNE cache-abgleich (`reconcile=False`):
+            # diese zeiten kommen genau einmal vor, ein eintrag dafuer
+            # wuerde nie wieder gelesen.
             quantum = float(getattr(self, "frame_time_quantization_s", 0.0) or 0.0)
             qt = _np.round(t / quantum) * quantum if quantum > 0.0 else t
             return self._knot_positions_batch(
@@ -813,10 +674,9 @@ class _BodyEphemerisMixin:
         if not _np.all(_np.isfinite(n)):
             return None
         n_int = n.astype(_np.int64)
-        # Je auswertung werden VIER knoten gebraucht (k-1 .. k+2), nicht zwei
-        # -- siehe `_body_world_position_at_time`. Das gitter reicht deshalb
-        # eine stelle weiter nach beiden seiten; zusaetzliche kosten sind zwei
-        # knoten je frame, nicht zwei je punkt.
+        # Je auswertung werden VIER knoten gebraucht (k-1 .. k+2) -- siehe
+        # `_body_world_position_at_time`. Das gitter reicht deshalb eine
+        # stelle weiter nach beiden seiten.
         k_lo = int(n_int.min()) - 1
         k_hi = int(n_int.max()) + 2
         span = k_hi - k_lo + 1
@@ -831,12 +691,11 @@ class _BodyEphemerisMixin:
         quantum = float(getattr(self, "frame_time_quantization_s", 0.0) or 0.0)
         knot_qt = _np.round(knot_t / quantum) * quantum if quantum > 0.0 else knot_t
 
-        # Stapelweg: die ganze eltern-kette vektorisiert statt ~2 Kepler-
-        # loesungen in reinem Python PRO KNOT UND FRAME (gemessen ~260 knots
-        # und ~590 exakt-aufrufe je frame bei einem koerperzentrierten
-        # rahmen). Der stapel gleicht sich mit dem positions-cache ab, den
-        # auch die skalare fassung benutzt -- beide wege lesen also
-        # garantiert dieselben zahlen. None => skalare schleife wie zuvor.
+        # Stapelweg: die ganze eltern-kette vektorisiert statt Kepler-
+        # loesungen in reinem Python pro knot. Der stapel gleicht sich mit
+        # dem positions-cache ab, den auch die skalare fassung benutzt --
+        # beide wege lesen also garantiert dieselben zahlen.
+        # None => skalare schleife.
         batch = self._knot_positions_batch(body, knot_qt)
         if batch is not None:
             knot_x, knot_y = batch
@@ -848,7 +707,7 @@ class _BodyEphemerisMixin:
                 knot_x[j] = kx
                 knot_y[j] = ky
 
-        # `i` zeigt jetzt auf den knoten VOR dem intervall (k-1), weil das
+        # `i` zeigt auf den knoten VOR dem intervall (k-1), weil das
         # gitter eine stelle frueher beginnt. p1 ist damit knot[i+1].
         i = n_int - k_lo - 1
         frac = (t - (t0 + n * q)) / q
@@ -929,26 +788,19 @@ class _BodyEphemerisMixin:
 
         if not reconcile:
             # EINMALIGE ZEITEN GEHOEREN NICHT IN DEN CACHE. Der abgleich
-            # unten existiert fuer das KNOTENGITTER: dieselben ~260 zeiten
-            # werden von beiden wegen und ueber viele frames wieder
-            # abgefragt, und dort ist bit-gleichheit zwischen skalar und
-            # stapel die zusicherung. Der exakt-stapel dagegen wertet die
-            # PUNKTzeiten der linie aus -- 4000 stueck, in jedem frame
-            # andere. Gemessen frisst der abgleich dort 90 % der zeit
-            # (2.4 ms von 3.3 ms bei 4000 punkten und einer zweigliedrigen
-            # kette, 240 000 dict-zugriffe), und er wuerde `_position_cache`
-            # um 12 000 eintraege JE FRAME aufblaehen, die nie wieder jemand
-            # liest. Gerechnet wird oben ohnehin dasselbe.
+            # unten existiert fuer das KNOTENGITTER, dessen zeiten von beiden
+            # wegen und ueber viele frames wieder abgefragt werden. Die
+            # PUNKTzeiten des exakt-stapels sind in jedem frame andere; der
+            # abgleich kostete dort fast die ganze zeit und blaehte den cache
+            # auf. Gerechnet wird oben ohnehin dasselbe.
             return wx, wy
 
         cache = self._position_cache
         bid = id(body)
         # Der abgleich laeuft ueber PYTHON-listen, nicht ueber die arrays:
-        # `qt[j]` und `wx[j] = ...` auf einem numpy-array kosten je rund
-        # eine groessenordnung mehr als der zugriff auf eine liste, und die
-        # schleife laeuft ueber alle knoten (~260) je koerper der
-        # eltern-kette und frame. Gerechnet wird dabei nichts anderes:
-        # dieselben werte, dieselbe reihenfolge, dieselben cache-eintraege.
+        # elementzugriffe auf ein numpy-array kosten rund eine
+        # groessenordnung mehr, und die schleife laeuft ueber alle knoten je
+        # koerper der eltern-kette und frame.
         qt_list = qt.tolist()
         wx_list = wx.tolist()
         wy_list = wy.tolist()
@@ -1355,57 +1207,6 @@ class BodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
                 _np.asarray(ys, dtype=_np.float64) - origin[1])
 
 
-class VirtualBodyCentredNonRotatingReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
-    """Ein nicht-rotierender Rahmen, dessen Primärposition virtuell
-    aus einem scripted child (Mond) berechnet wird. Dies implementiert
-    einen rein visuellen "orbit-swap", bei dem ein oberer fixer Körper
-    so dargestellt wird, als würde er seinen scripted-Mond umkreisen,
-    ohne den Physikzustand zu verändern.
-    """
-
-    def __init__(self, primary_body, child_body):
-        self._init_ephemeris()
-        self.primary_body = primary_body
-        self.child_body = child_body
-        self.label = f"Virtual-swap ({getattr(primary_body, 'name', '?')} <- {getattr(child_body, 'name', '?')})"
-
-    def _virtual_primary_pos(self, time_s: float):
-        t = float(time_s)
-        cached = self._virtual_pos_cache.get(t)
-        if cached is not None:
-            return cached
-
-        orbit = _orbit_model_from_body(self.child_body)
-        if orbit is None:
-            p_x, p_y = self._body_world_position_at_time(self.primary_body, time_s)
-            vp = Vec2(float(p_x), float(p_y))
-            self._virtual_pos_cache[t] = vp
-            return vp
-
-        theta_child = _body_true_anomaly(self.child_body)
-        try:
-            parent = getattr(self.child_body, "is_moon_of", None)
-            if parent is not None:
-                child_x, child_y = self._body_world_position_at_time(self.child_body, time_s)
-                parent_x, parent_y = self._body_world_position_at_time(parent, time_s)
-                rel_x = child_x - parent_x
-                rel_y = child_y - parent_y
-                arg = _body_arg_periapsis(self.child_body)
-                theta_child = math.atan2(rel_y, rel_x) - arg
-        except Exception:
-            pass
-
-        rel_x, rel_y = orbit.inertial_xy(theta_child + math.pi)
-        child_x, child_y = self._body_world_position_at_time(self.child_body, time_s)
-        vp = Vec2(float(child_x) + rel_x, float(child_y) + rel_y)
-        self._virtual_pos_cache[t] = vp
-        return vp
-
-    def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
-        vp = self._virtual_primary_pos(time_s)
-        return float(x) - float(vp.x), float(y) - float(vp.y)
-
-
 class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
     def __init__(self, primary_body, secondary_body):
         self._init_ephemeris()
@@ -1428,7 +1229,6 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
         entry = self._angle_cache.get(cache_time)
         if entry is not None:
             self._cache_cos, self._cache_sin, self._cache_origin_x, self._cache_origin_y = entry
-            self._cache_time = cache_time
             return
         angle = self._x_axis_angle(cache_time)
         origin_x, origin_y = self._body_world_position_at_time(self.primary_body, cache_time)
@@ -1436,7 +1236,6 @@ class BodyCentredBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame
         self._cache_sin = math.sin(angle)
         self._cache_origin_x = origin_x
         self._cache_origin_y = origin_y
-        self._cache_time = cache_time
         self._angle_cache[cache_time] = (self._cache_cos, self._cache_sin, origin_x, origin_y)
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
@@ -1519,7 +1318,6 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         entry = self._angle_cache.get(cache_time)
         if entry is not None:
             self._cache_cos, self._cache_sin, self._cache_origin_x, self._cache_origin_y = entry
-            self._cache_time = cache_time
             return
         angle = self._x_axis_angle(cache_time)
         origin_x, origin_y = self._body_world_position_at_time(self.target_body, cache_time)
@@ -1527,7 +1325,6 @@ class TargetBodyDirectionReferenceFrame(_BodyEphemerisMixin, ReferenceFrame):
         self._cache_sin = math.sin(angle)
         self._cache_origin_x = origin_x
         self._cache_origin_y = origin_y
-        self._cache_time = cache_time
         self._angle_cache[cache_time] = (self._cache_cos, self._cache_sin, origin_x, origin_y)
 
     def to_this_frame_xy(self, time_s: float, x: float, y: float) -> tuple[float, float]:
@@ -1608,12 +1405,6 @@ def _fallback_secondary_index(primary_index: int, bodies: Sequence[object]) -> i
     return int(primary_index)
 
 
-def resolve_plotting_camera_target_index(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> int:
-    """Bestimmt, welchem körper die kamera für den ausgewählten plotting-frame folgen soll."""
-    primary_index = int(frame_parameters.primary_index)
-    return primary_index
-
-
 def new_plotting_frame(frame_parameters: PlottingFrameParameters, bodies: Sequence[object]) -> ReferenceFrame:
     extension = int(frame_parameters.extension)
     primary = _resolve_body(frame_parameters.primary_index, bodies)
@@ -1663,12 +1454,6 @@ class ReferenceFrameSelector:
         )
         self._target_body_index: int | None = None
         self._target_reference_index: int | None = None
-
-    def set_frame_parameters(self, frame_parameters: PlottingFrameParameters) -> None:
-        self._frame_parameters = frame_parameters
-
-    def frame_parameters(self) -> PlottingFrameParameters:
-        return self._frame_parameters
 
     def set_to_body_non_rotating(self, primary_index: int) -> None:
         self._target_body_index = None

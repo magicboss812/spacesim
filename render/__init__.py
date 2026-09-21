@@ -17,10 +17,8 @@ ABSICHTLICH IMPORT-ARM: dieses `__init__` zieht KEIN moderngl herein, damit
 """
 import os
 
-# Der EINE ort, an dem der pfad zu den GLSL-quellen steht. Vorher rechneten
-# ihn drei module unabhaengig voneinander aus (rendering.py, ui/draw.py,
-# ui/text.py) -- beim verschieben der shader war das drei mal dieselbe
-# aenderung, und eine davon wurde erfahrungsgemaess vergessen.
+# Der einzige ort, an dem der pfad zu den GLSL-quellen steht; renderer,
+# ui/draw.py und ui/text.py lesen ihn alle von hier.
 GL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gl')
 
 __all__ = ['GL_DIR']

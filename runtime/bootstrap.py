@@ -1,7 +1,6 @@
 """Den ganzen apparat zusammenbauen: welt, kamera, predictor, renderer, UI.
 
-Das war der mittelteil von `main()` in `test.py`. DIE REIHENFOLGE HIER IST
-TRAGEND, an drei stellen sogar begruendet:
+DIE REIHENFOLGE HIER IST TRAGEND, an drei stellen sogar begruendet:
 
   * `camera.follow(ship)` muss VOR dem ersten `apply_frame_selection()` stehen,
     sonst meldet dessen ausgabe `camera_follow=frei`;
@@ -105,15 +104,11 @@ class FrameController:
         except Exception:
             pass
 
-        # DIE KAMERA WIRD HIER NICHT ANGEFASST. Frueher stand hier
-        # bedingungslos `camera.follow(ship)`, damit ein rahmenwechsel die
-        # ansicht nicht springen laesst -- das ist aber gar nicht noetig:
-        # bildmitte ist `frame(camera.position)`, und kamera wie inhalt gehen
-        # durch dieselbe starre transformation, ein rahmenwechsel verschiebt
-        # also beide gleich. Wer die kamera bewegt, ist ausschliesslich der
-        # spieler: klick auf einen koerper, Home, WASD/ziehen. Sonst haette
-        # jede taste R oder 1/2 einen angeflogenen planeten wieder verlassen
-        # oder einen freien schwenk zurueckgerissen.
+        # DIE KAMERA WIRD HIER NICHT ANGEFASST: bildmitte ist
+        # `frame(camera.position)`, kamera und inhalt gehen durch dieselbe
+        # starre transformation, ein rahmenwechsel verschiebt also beide
+        # gleich. Die kamera bewegt ausschliesslich der spieler (klick auf
+        # einen koerper, Home, WASD/ziehen).
         camera_follow_name = getattr(self.camera.target, 'name', 'frei')
 
         if state.target_overlay_enabled and state.ship_index is not None:
@@ -343,11 +338,8 @@ def build_app(config):
     # -- ansichts-zustand und rahmen-pipeline -------------------------------
     # principia-aehnliche pipeline:
     # selector (eingabe) -> adapter (factory/dispatch) -> renderer (projektion).
-    #
-    # Lag frueher als LOKALE VARIABLEN in main() -- kein objekt kam daran, ein
-    # HUD-bedienelement haette sie nicht lesen und nicht setzen koennen. Jetzt
-    # in ui/state.py, mit aenderungs-benachrichtigung: tastatur und HUD
-    # schreiben denselben zustand und koennen nicht auseinanderlaufen.
+    # Der zustand liegt in ui/state.py, mit aenderungs-benachrichtigung:
+    # tastatur und HUD schreiben denselben zustand.
     app.ui_state = UIState(
         w.body,
         initial_reference_index=(w.body.index(earth) if earth is not None else None),

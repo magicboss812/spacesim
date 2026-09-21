@@ -246,49 +246,30 @@ class PredictionDrawMixin:
     def _refocus_scan_indices(self, indices, coords, raw_count, margin_px, stats):
         """Das ROH-scan-budget dorthin legen, wo die linie im BILD liegt.
 
-        `_prediction_scan_indices` verteilt seine 3000 stichproben
-        GLEICHMAESSIG ueber die ganze punkteliste. Solange der horizont kurz
-        ist, faellt das nicht auf; sobald er es nicht mehr ist, ist es der
-        ganze fehler. Gemessen auf einem transfer Erde -> Neptun (horizont
-        4.5e12 m, 40000 gespeicherte punkte, punktabstand 1.125e8 m):
+        `_prediction_scan_indices` verteilt seine stichproben GLEICHMAESSIG
+        ueber die ganze punkteliste. Bei langem horizont ist der gezeichnete
+        punktabstand dann viel groesser als der gespeicherte, mit zwei folgen:
 
-            stride 13.3  ->  GEZEICHNETER punktabstand 1.5e9 m
-
-        Bei dem massstab des screenshots (1.06e-6 px/m) sind das 1590 px je
-        stuetzstelle. Die ganze begegnung mit Neptun -- bogen ~6.8e8 m, also
-        6 GESPEICHERTE punkte -- bekommt damit **0.45 gezeichnete** und wird
-        zu einer einzigen sehne, die am planeten vorbeischiesst. Genau das
-        sind die langen geraden im bild.
-
-        Zwei folgen, und beide stehen im bericht:
-
-        1. Die kubische Hermite-verfeinerung (`_hermite_refine_world`)
-           ueberbrueckt dann eine sehne von 8.9 rad bahnwinkel. Innerhalb
-           eines bogens von ~0.7 rad liegt ihr fehler bei 0.09 px, darueber
-           ist sie schlicht eine andere kurve.
+        1. Eine nahe begegnung faellt zwischen zwei stuetzstellen, und die
+           kubische verfeinerung (`_hermite_refine_world`) ueberbrueckt eine
+           sehne ueber mehrere radianten bahnwinkel -- eine andere kurve.
         2. Die auswahl WANDERT. `count` faellt im zeitraffer jeden frame um
            die vorn verbrauchten punkte (`Predictor._hold_advance`), und
-           `step = (count-1)/(max_scan-1)` haengt daran -- gemessen springen
-           die gewaehlten absoluten indizes bis zu einen ganzen punkt weit,
-           also 119 px, von frame zu frame. Die stuetzstellen der
-           gezeichneten linie huepfen damit seitlich hin und her, waehrend
-           die gespeicherten punkte bit-identisch stehen: das ist das
-           "schwingende seil" an jeder kurve und jedem vorbeiflug.
+           `step = (count-1)/(max_scan-1)` haengt daran: die stuetzstellen
+           der gezeichneten linie huepfen seitlich, waehrend die
+           gespeicherten punkte stillstehen.
 
-        Der ausweg ist nicht mehr budget, sondern ein besser verteiltes:
-        was im bild liegt, wird MIT STRIDE 1 abgetastet -- dann gibt es gar
-        keine phase mehr, die wandern koennte --, und der rest behaelt die
-        grobe gleichverteilung. Ist das sichtbare stueck zu gross fuer das
-        budget (herausgezoomt, die ganze bahn im bild), faellt es stetig auf
-        einen groesseren stride zurueck; dann ist ein gespeicherter punkt
-        ohnehin unter einem pixel breit.
+        Deshalb wird dasselbe budget besser verteilt: was im bild liegt,
+        wird MIT STRIDE 1 abgetastet -- dann gibt es keine phase, die wandern
+        koennte --, und der rest behaelt die grobe gleichverteilung. Ist das
+        sichtbare stueck zu gross fuer das budget (herausgezoomt, die ganze
+        bahn im bild), faellt es stetig auf einen groesseren stride zurueck;
+        dann ist ein gespeicherter punkt ohnehin unter einem pixel breit.
 
-        Rueckgabe: neues index-array, oder ``None`` -- dann bleibt alles wie
-        bisher (kurze linien, in denen ohnehin jeder punkt abgetastet wird,
-        kommen hier gar nicht erst an).
+        Rueckgabe: neues index-array, oder ``None`` -- dann bleibt die
+        gleichverteilung stehen (kurze linien, in denen ohnehin jeder punkt
+        abgetastet wird, kommen hier gar nicht erst an).
         """
-        if np is None:
-            return None
         idx = np.asarray(indices, dtype=np.int64)
         n = int(idx.size)
         raw_count = int(raw_count)
@@ -312,12 +293,10 @@ class PredictionDrawMixin:
         x_lo, x_hi = -margin, float(self.width) + margin
         y_lo, y_hi = -margin, float(self.height) + margin
 
-        # SEGMENT gegen das sichtfeld, nicht punkt. Bei stride 13 ist eine
-        # sehne 1590 px lang und der schirm 1280 -- die sehne, die ueber die
-        # begegnung laeuft, hat oft KEINEN eigenen endpunkt im bild. Ein
-        # reiner punkttest fände dort nichts und liesse alles beim alten.
-        # Der huellkoerper-test ist bewusst konservativ: er nimmt zu viel
-        # mit, nie zu wenig.
+        # SEGMENT gegen das sichtfeld, nicht punkt: eine grobe sehne kann
+        # laenger als der schirm sein, und die sehne ueber eine begegnung hat
+        # dann oft KEINEN eigenen endpunkt im bild. Der huellkoerper-test ist
+        # bewusst konservativ: er nimmt zu viel mit, nie zu wenig.
         ax, bx = sx[:-1], sx[1:]
         ay, by = sy[:-1], sy[1:]
         finite = (np.isfinite(ax) & np.isfinite(bx)
@@ -372,8 +351,9 @@ class PredictionDrawMixin:
 
         stride = 1 if fine_total <= fine_budget else int(
             math.ceil(fine_total / float(fine_budget)))
-        # Der grobe stride, den wir ersetzen wollen. Bringt der feine nichts,
-        # bleibt es beim alten -- eine zweite stapel-projektion umsonst.
+        # Der grobe stride, der ersetzt werden soll. Bringt der feine nichts,
+        # bleibt die gleichverteilung -- eine zweite stapel-projektion
+        # waere umsonst.
         coarse_stride = raw_count / float(n)
         if stride >= coarse_stride:
             return None
@@ -428,28 +408,16 @@ class PredictionDrawMixin:
 
         step = (count - 1) / float(max_scan - 1)
 
-        if np is not None:
-            # np.rint rundet wie Pythons round() zur GERADEN zahl hin, die
-            # stichprobe ist damit dieselbe wie in der schleife unten.
-            idx = np.rint(np.arange(max_scan, dtype=np.float64) * step)
-            idx = idx.astype(np.int64)
-            np.clip(idx, 0, count - 1, out=idx)
-            # Nur AUFEINANDERFOLGENDE wiederholungen fallen weg -- genau das
-            # tut die schleife mit ihrem `last`.
-            keep = np.empty(idx.shape, dtype=bool)
-            keep[0] = True
-            np.not_equal(idx[1:], idx[:-1], out=keep[1:])
-            return idx[keep]
-
-        indices = []
-        last = -1
-        for i in range(max_scan):
-            idx = int(round(i * step))
-            idx = max(0, min(count - 1, idx))
-            if idx != last:
-                indices.append(idx)
-                last = idx
-        return indices
+        # np.rint rundet wie Pythons round() zur GERADEN zahl hin -- dieselbe
+        # stichprobe wie `int(round(i * step))`.
+        idx = np.rint(np.arange(max_scan, dtype=np.float64) * step)
+        idx = idx.astype(np.int64)
+        np.clip(idx, 0, count - 1, out=idx)
+        # Nur AUFEINANDERFOLGENDE wiederholungen fallen weg.
+        keep = np.empty(idx.shape, dtype=bool)
+        keep[0] = True
+        np.not_equal(idx[1:], idx[:-1], out=keep[1:])
+        return idx[keep]
 
     def _cap_runs_by_screen_length(self, runs, max_screen_length_px, stats):
         if max_screen_length_px is None:
@@ -542,7 +510,7 @@ class PredictionDrawMixin:
             if len(run) <= budget:
                 limited.append(run)
                 points_left -= len(run)
-            elif np is not None and isinstance(run, np.ndarray):
+            elif isinstance(run, np.ndarray):
                 # Gleiche stichprobe wie unten, nur als index-rechnung.
                 # np.round rundet -- wie Pythons round() -- die haelfte zur
                 # geraden zahl, die gewaehlten indizes sind also dieselben.
@@ -599,8 +567,7 @@ class PredictionDrawMixin:
             self._last_prediction_render_stats = stats
             return
 
-        # Blending ist global aktiv (ctx.enable in _init_opengl); die alten
-        # textur-/blend-state-resets der fixed-function-pipeline entfallen.
+        # Blending ist global aktiv (ctx.enable in _init_opengl).
         prepare_t0 = time.perf_counter()
         half_w = self.width * 0.5
         half_h = self.height * 0.5
@@ -623,12 +590,10 @@ class PredictionDrawMixin:
 
         # EIN BUDGET FUER DIE GANZE KETTE. Der zeichenweg hat drei stellen, an
         # denen er punkte wegwirft (min-schritt-verdichtung, RDP, run-kappung)
-        # und eine, an der er welche setzt (kubische unterteilung). Solange die
-        # wegwerfenden ihre eigene, aelteren zoom-heuristik folgende toleranz
-        # benutzen, macht die eine haelfte zunichte, was die andere aufbaut:
-        # gemessen 1990 m abweichung bei einer zusage von 1000 m, weil die
-        # RDP-toleranz bis 0.25 px gehen darf -- bei 4.4e-5 px/m sind das
-        # 5700 m. Also bekommen alle stufen ihren anteil an DERSELBEN zusage.
+        # und eine, an der er welche setzt (kubische unterteilung). Mit
+        # getrennten toleranzen machte die eine haelfte zunichte, was die
+        # andere aufbaut (die RDP-toleranz allein darf bis 0.25 px gehen).
+        # Also bekommen alle stufen ihren anteil an DERSELBEN zusage.
         self._prediction_detail_budget = None
         if self.prediction_hermite_enabled:
             budget = self._prediction_error_budget(camera)
@@ -637,8 +602,7 @@ class PredictionDrawMixin:
                 eps_px = budget[1]
                 # Die anteile addieren sich im schlimmsten fall, also muessen
                 # sie zusammen unter 1 bleiben: 0.5 unterteilung + 0.25 RDP +
-                # 0.1 verdichtung = 0.85. Mit 0.5/0.5/0.25 (summe 1.25) lag die
-                # gemessene abweichung bei 1.12 der zusage -- knapp darueber.
+                # 0.1 verdichtung = 0.85.
                 effective_tolerance = max(1e-3, min(effective_tolerance, eps_px * 0.25))
                 effective_min_step = max(1e-3, min(effective_min_step, eps_px * 0.1))
 
@@ -794,10 +758,9 @@ class PredictionDrawMixin:
         # gross die bahn am schirm ist. Wird sie klein, ruecken Pe/Ap an die
         # schiffs- und die Erde-marke heran; das smoothstep zwischen
         # `fade_min_px` und `fade_full_px` blendet sie dann sauber weg, statt
-        # sie uebereinanderzustapeln. Damit ist die alte "ein draw je farbe"-
-        # buendelung hin (jeder marker hat jetzt seine eigene deckkraft) --
-        # bei real 1 Pe + 1 Ap, selten je zwei, ist das ein draw je marker
-        # und faellt nicht ins gewicht.
+        # sie uebereinanderzustapeln. Jeder marker hat damit seine eigene
+        # deckkraft und einen eigenen draw -- bei real 1 Pe + 1 Ap faellt das
+        # nicht ins gewicht.
         scale = abs(float(getattr(camera, 'scale', 0.0)))
         fade_min = float(self.apsis_marker_fade_min_px)
         fade_full = float(self.apsis_marker_fade_full_px)
@@ -958,17 +921,14 @@ class PredictionDrawMixin:
 
         if batch is not None:
             # `screen_points` ist auf diesem weg IMMER None: die spalten in
-            # `coords` sind die punkte. Die tupel-liste, die hier frueher
-            # entstand, wurde weiter unten ohnehin wieder in arrays
-            # zurueckverwandelt (gemessen 4000 tupel je frame, nur um sie
-            # danach wegzuwerfen).
+            # `coords` sind die punkte.
             screen_points, visible_count, coords = batch
 
             # ERST DAS ROH-BUDGET UMVERTEILEN, DANN VERFEINERN. Die kubische
             # nachverdichtung unten kann nur so gut sein wie die stuetzstellen,
             # zwischen denen sie interpoliert; ueber eine sehne von mehreren
             # radianten bahnwinkel ist sie eine andere kurve. Siehe
-            # _refocus_scan_indices -- dort stehen die messwerte.
+            # _refocus_scan_indices.
             focused = self._refocus_scan_indices(
                 indices, coords, raw_count, margin_px, stats)
             if focused is not None:
@@ -981,8 +941,7 @@ class PredictionDrawMixin:
             # ZWISCHEN den groben stuetzstellen kubisch nachlegen -- so fein,
             # wie der bildschirm es zeigt, und nur dort, wo etwas zu sehen
             # ist. Schlaegt das fehl (kein tangenten-paar, kein stapel-
-            # rahmen, kein budget), bleibt es bei den groben punkten und die
-            # linie sieht aus wie vorher.
+            # rahmen, kein budget), bleibt es bei den groben punkten.
             budget = getattr(self, '_prediction_detail_budget', None)
             if budget is not None:
                 eps_m, eps_px, rung = budget
@@ -1086,17 +1045,12 @@ class PredictionDrawMixin:
         transformation, derselbe massstab, dieselbe y-spiegelung.
 
         Der erste eintrag ist bewusst None: die punkte leben ab hier nur
-        noch in den spalten (sx, sy). Die frueher hier gebaute liste aus
-        (x, y)-tupeln kostete bei 4000 punkten je frame mehr als die
-        projektion selbst und wurde vom zeichenweg sofort wieder in arrays
-        zurueckverwandelt.
+        noch in den spalten (sx, sy), ohne tupel-liste.
 
-        Motivation: gemessen lag die punktweise projektion bei 5.6 ms je
-        frame, praktisch alles davon Python-aufruf-overhead ueber 3000
-        punkte, von denen am ende 196 gezeichnet werden.
+        Punktweise projiziert waere das praktisch nur Python-aufruf-overhead
+        ueber tausende punkte, von denen am ende wenige hundert gezeichnet
+        werden.
         """
-        if np is None:
-            return None
         if not isinstance(path_points, np.ndarray):
             return None
         if path_points.ndim != 2 or path_points.shape[1] < 3:
@@ -1203,9 +1157,10 @@ class PredictionDrawMixin:
         die gezeichneten punkte selbst werden einzeln zu ihrer eigenen zeit
         projiziert und sind damit exakt.
 
-        Rueckgabe: ``(m, 3)``-array oder ``None`` (dann bleibt alles wie bisher).
+        Rueckgabe: ``(m, 3)``-array oder ``None`` (dann bleibt es bei den
+        groben punkten).
         """
-        if np is None or not self.prediction_hermite_enabled:
+        if not self.prediction_hermite_enabled:
             return None
         if not isinstance(path_points, np.ndarray) or path_points.ndim != 2:
             return None
@@ -1245,12 +1200,9 @@ class PredictionDrawMixin:
         if not np.any(usable):
             return None
 
-        # SICHTBARKEIT ZUERST, DANN RECHNEN. Die flachheits-schaetzung kostet
-        # zwei zusaetzliche rahmen-transformationen je segment -- bei 3000
-        # segmenten gemessen 2.3 ms je frame, waehrend am ende fuenf punkte
-        # dazukamen, weil nur ~200 segmente ueberhaupt im bild lagen. Die
-        # vorauswahl laeuft deshalb allein auf den schon vorhandenen
-        # bildschirm-endpunkten.
+        # SICHTBARKEIT ZUERST, DANN RECHNEN: meist liegt nur ein kleiner teil
+        # der segmente im bild. Die vorauswahl laeuft allein auf den schon
+        # vorhandenen bildschirm-endpunkten.
         #
         # Als grosszuegige schranke fuer die auslenkung dient die sehnenlaenge
         # selbst: eine kubische kurve liegt in der konvexen huelle ihrer
@@ -1276,10 +1228,9 @@ class PredictionDrawMixin:
         #
         # Das darf man, weil alle plot-rahmen STARR sind (verschiebung plus
         # drehung): beides laesst laengen unveraendert, und eine zweite
-        # differenz ist eine laenge. Gemessen kostete die eigene projektion
-        # zwei zusaetzliche rahmen-transformationen ueber ~3000 segmente und
-        # damit 1.9 ms je frame -- fuer eine ZAHL, die ohnehin nur die
-        # unterteilungsstufe waehlt.
+        # differenz ist eine laenge. Das spart zwei rahmen-transformationen
+        # je segment fuer eine ZAHL, die ohnehin nur die unterteilungsstufe
+        # waehlt.
         #
         # Nicht erfasst wird die zusaetzliche kruemmung, die ein ROTIERENDER
         # rahmen ueber die dauer eines segments selbst erzeugt. Fuer den
@@ -1300,10 +1251,9 @@ class PredictionDrawMixin:
         #   d <= max|B''| / (8 n^2)     und     max|B''| <= 6 M
         #   =>  d <= 0.75 M / n^2       =>  n = ceil(sqrt(0.75 M / tol))
         #
-        # Der faktor ist nachgerechnet, nicht geraten: mit dem in vielen
-        # rasterisierern kursierenden sqrt(3)/8 statt 3/4 wird um 1.86 zu
-        # grob unterteilt (n = 4 statt 8), und genau das war messbar -- 1122 m
-        # abweichung bei einer zusage von 1000 m, exakt sehne/n^2.
+        # Der faktor ist nachgerechnet: mit dem in vielen rasterisierern
+        # kursierenden sqrt(3)/8 statt 3/4 wird um 1.86 zu grob unterteilt
+        # und die zusage gebrochen.
         tol = max(1e-4, float(eps_px))
         n_seg = np.ceil(np.sqrt(0.75 * second / tol))
         n_seg = np.where(np.isfinite(n_seg), n_seg, 1.0)
@@ -1383,10 +1333,7 @@ class PredictionDrawMixin:
 
         # ARRAYS STATT TUPEL-LISTEN. Verdichtung, RDP, luecken-auffuellung
         # und verdichtung-nach-innen sind alle indexoperationen auf denselben
-        # zwei koordinaten-spalten. Frueher wanderte die spur nach jeder
-        # stufe durch `list(zip(...tolist()))` und zurueck durch
-        # `np.asarray` -- bei 4000 punkten je frame gemessen der zweit-
-        # groesste einzelposten des zeichenwegs nach dem klippen selbst.
+        # zwei koordinaten-spalten.
         if coords is not None:
             origin_x = float(coords[0][0])
             origin_y = float(coords[1][0])
@@ -1440,8 +1387,7 @@ class PredictionDrawMixin:
                     # sortiert und doppelfrei. Damit ist das ergebnis genau
                     # "0..preserve-1, dahinter alle keeps >= preserve" --
                     # eine suche plus ein anhaengen, ohne die hash-tabelle,
-                    # die np.union1d aufbaut (gemessen 0.44 ms je aufruf,
-                    # zwei aufrufe je frame).
+                    # die np.union1d aufbaut.
                     cut = int(np.searchsorted(keep_indices, preserve_count,
                                               side='left'))
                     tail = keep_indices[cut:]
@@ -1470,10 +1416,9 @@ class PredictionDrawMixin:
                 sampled_x = cx
                 sampled_y = cy
 
-            # Densify only the RDP-kept points, not the raw scan.
-            # Pre-RDP densification of sparse predictors could expand 3000 samples
-            # to 75 000+ linearly-interpolated dummies that RDP discards anyway,
-            # making _rdp_indices O(N²) on a huge but information-free array.
+            # Densify only the RDP-kept points, not the raw scan: densifying
+            # first would feed RDP a huge array of linearly-interpolated
+            # dummies it discards anyway.
             sampled = self._densify_screen_columns(
                 sampled_x, sampled_y, max_segment_px)
 

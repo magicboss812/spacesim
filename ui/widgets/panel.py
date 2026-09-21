@@ -46,23 +46,11 @@ class Panel(Widget):
         )
 
 
-class Group(Widget):
-    """Unsichtbarer container. Nur zum verankern -- verbraucht keine maus."""
-
-    def __init__(self, padding=0.0, **kwargs):
-        super().__init__(**kwargs)
-        self.padding = padding
-
-    def content_rect(self, ctx):
-        return self.rect.inset(ctx.px(self.padding))
-
-
 class Stack(Widget):
     """Unsichtbarer container, der seine kinder aneinanderreiht.
 
     Die verankerung aus ui/core.py setzt EIN widget an EINE ecke -- fuer
-    gruppen, die zusammen an einer ecke sitzen (zeitraffer + palette,
-    rahmenwahl + ring, snaps + zoom), braucht es eine reihung. Die groesse
+    gruppen, die zusammen an einer ecke sitzen, braucht es eine reihung. Die groesse
     folgt den kindern, damit die gruppe als ganzes verankert werden kann.
 
     align steuert die QUERachse: bei einer senkrechten reihung also die

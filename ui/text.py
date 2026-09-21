@@ -15,16 +15,13 @@ aber mit drei unterschieden:
    mauskoordinaten. Die umrechnung in die ortho-konvention passiert HIER,
    an der grenze, und nirgends sonst (siehe CLAUDE.md).
 
-Zwei fallen aus Phase 0-2 sind hier fest eingebaut und duerfen nicht
-aufgeweicht werden:
+Zwei regeln halten den text scharf:
 
 - **Auf das pixelraster rasten.** Subpixel-positionen verteilen bei
   LINEAR-filterung jede glyphenzeile auf zwei pixelzeilen: der text wird
-  weich und bekommt eine geisterkopie. Gemessen fiel der anteil voll
-  deckender pixel von 19.5 % auf 9 %.
-- **Nicht durch FXAA.** Ein kantenfilter ueber glyphen schmiert sie ueber
-  55 % mehr pixel (34.7 % -> 5.3 % voll deckend). Text gehoert IMMER hinter
-  den FXAA-resolve; defer()/flush() ist der mechanismus dafuer.
+  weich und bekommt eine geisterkopie.
+- **Nicht durch FXAA.** Ein kantenfilter ueber glyphen schmiert sie breit;
+  text gehoert IMMER hinter den FXAA-resolve.
 """
 
 import math
@@ -60,7 +57,6 @@ class TextRenderer:
         # LRU, NICHT FIFO -- die reihenfolge ist die des letzten ZUGRIFFS,
         # nicht die des einfuegens (siehe _texture_for).
         self._cache = OrderedDict()  # (text, font_key) -> (texture, w, h)
-        self._deferred = []
         self._font_paths = None
         self._digit_widths = {}
         # Freigegebene texturen nach groesse, siehe _acquire_texture.
@@ -151,8 +147,8 @@ class TextRenderer:
             role = self.theme.type_scale.body
         return role
 
-    #: Rasterstufe der pixelschrift und ihre kleinste brauchbare groesse.
-    #: Beides gemessen, siehe _role_pixel_size.
+    #: Rasterstufe der pixelschrift und ihre kleinste brauchbare groesse,
+    #: siehe _role_pixel_size.
     _PIXEL_STEP = 5
     _PIXEL_MIN = 10
 
@@ -160,12 +156,11 @@ class TextRenderer:
         """Rollengroesse -> pixelgroesse, fuer die pixelschrift GERASTET.
 
         SB Liquid ist auf einem pixelraster gezeichnet. Bei einer beliebigen
-        pixelgroesse fallen ihre stege unterschiedlich breit aus -- gemessen
-        an 'HHIHIH1111' liefern die groessen 11 bis 13 stege von 1 UND 2 px
-        nebeneinander, was die schrift trotz harter kanten unruhig macht.
-        Auf vielfachen von fuenf (10/15/20/25/30/35/40/45/50) ist die
-        stegbreite dagegen durchgaengig gleich. Darunter, bei 9 px, bleiben
-        von einer versalie nur noch 6 px ink -- deshalb der boden bei 10.
+        pixelgroesse fallen ihre stege unterschiedlich breit aus (1 UND 2 px
+        nebeneinander), was die schrift trotz harter kanten unruhig macht.
+        Auf vielfachen von fuenf ist die stegbreite durchgaengig gleich.
+        Unter 10 px bleibt von einer versalie zu wenig ink -- deshalb der
+        boden bei 10.
 
         Die leseschrift wird NICHT gerastet: sie hat keine rasterbindung,
         und ein sprung von 5 px waere dort nur ein grober typo-sprung.
@@ -180,9 +175,8 @@ class TextRenderer:
     def _role_antialias(self, name):
         """Die pixelschrift wird OHNE kantenglaettung gerastert.
 
-        Gemessen ueber 'ABCDEFG0123456789': mit glaettung traegt SB Liquid
-        bei jeder groesse einen halbdeckenden saum (6-22 % der pixel),
-        ohne sie genau ZWEI alphawerte -- 0 und 255. Genau das ist der
+        Mit glaettung traegt SB Liquid bei jeder groesse einen halbdeckenden
+        saum, ohne sie genau ZWEI alphawerte -- 0 und 255. Genau das ist der
         unterschied zwischen "pixelig" und "unscharf pixelig".
         """
         return self._role(name).family != 'display'
@@ -190,15 +184,13 @@ class TextRenderer:
     def _role_tabular(self, name):
         """Die instrumentenschrift setzt ZIFFERN AUF FESTER BREITE.
 
-        SB Liquid ist nicht dicktengleich: gemessen bei 15 px ist die '1'
-        neun pixel breit, jede andere ziffer zehn. Bei einem rechtsbuendigen
-        zaehler wandert damit die LINKE kante jedes mal, wenn eine '1' in
-        die anzeige laeuft oder sie verlaesst -- der AP/PE-countdown zuckte
-        so im sekundentakt.
+        SB Liquid ist nicht dicktengleich: die '1' ist schmaler als die
+        anderen ziffern. Bei einem rechtsbuendigen zaehler wanderte damit die
+        LINKE kante jedes mal, wenn eine '1' in die anzeige laeuft oder sie
+        verlaesst.
 
-        Behoben wird das wie in jeder echten schrift mit tabellenziffern:
-        jede ziffer bekommt die breite der breitesten und wird darin
-        zentriert. Nur ziffern -- die uebrigen zeichen behalten ihre
+        Deshalb tabellenziffern: jede ziffer bekommt die breite der
+        breitesten und wird darin zentriert. Nur ziffern -- die uebrigen zeichen behalten ihre
         natuerliche breite, denn sie stehen in einem festen format ohnehin
         immer an derselben stelle.
         """
@@ -264,10 +256,6 @@ class TextRenderer:
             font = self._fonts.get('body')
         return font
 
-    def line_height(self, role='body'):
-        font = self.font(role)
-        return float(font.get_height()) if font else float(self._role_pixel_size(role))
-
     def tracking_px(self, role='body'):
         """Laufweite dieser rolle in pixeln (em-wert * schriftgroesse)."""
         return self._role(role).tracking * self._role_pixel_size(role)
@@ -275,18 +263,17 @@ class TextRenderer:
     # --------------------------------------------------------------- cache
 
     # Wie viele freigegebene texturen hoechstens vorgehalten werden. Der
-    # deckel ist grosszuegig gegenueber dem, was ein frame umschlaegt
-    # (gemessen ~5 neue texte je frame), und klein gegenueber dem
-    # texturspeicher: eine zeile HUD-text ist ein paar kB.
+    # deckel ist grosszuegig gegenueber dem, was ein frame umschlaegt (eine
+    # handvoll neuer texte), und klein gegenueber dem texturspeicher: eine
+    # zeile HUD-text ist ein paar kB.
     _TEXTURE_POOL_MAX = 96
 
     def _acquire_texture(self, size, data, antialias):
         """Textur dieser groesse besorgen -- moeglichst eine wiederverwendete.
 
         Der teure teil einer NEUEN beschriftung ist nicht das rastern,
-        sondern die GL-allokation: gemessen ~0.3 ms je `ctx.texture(...)`,
-        bei rund fuenf wechselnden texten (geschwindigkeit, hoehe, timer)
-        also ein spuerbarer posten JEDES frames. Die verdraengten texturen
+        sondern die GL-allokation (`ctx.texture(...)`), und wechselnde texte
+        (geschwindigkeit, hoehe, timer) fallen JEDES frame an. Die verdraengten texturen
         haben fast immer wieder eine passende groesse -- eine ziffer mehr
         oder weniger aendert die zeilenhoehe nicht -- also werden sie
         eingesammelt und mit `write()` neu befuellt statt freigegeben.
@@ -349,9 +336,7 @@ class TextRenderer:
         key = (text, role, font.get_height())
         entry = self._cache.get(key)
         if entry is not None:
-            # DER TREFFER MACHT DEN EINTRAG JUNG. Ohne das ist die
-            # reihenfolge die des EINFUEGENS, und der deckel unten wirft
-            # dann genau die falschen weg -- siehe dort.
+            # DER TREFFER MACHT DEN EINTRAG JUNG (LRU, siehe deckel unten).
             self._cache.move_to_end(key)
             return entry
         antialias = self._role_antialias(role)
@@ -375,17 +360,10 @@ class TextRenderer:
         # LRU-deckel: staendig wechselnde texte (geschwindigkeits-anzeige,
         # timer) wuerden sonst unbegrenzt GL-texturen anhaeufen.
         #
-        # DIE REIHENFOLGE MUSS DIE DES ZUGRIFFS SEIN, nicht die des
-        # einfuegens. Als reines dict war sie letzteres, und ein TREFFER hat
-        # nichts umsortiert -- also standen die STATISCHEN beschriftungen
-        # ('DIST', 'CLOSEST', 'SATURNV', ...), einmal im ersten bild
-        # eingetragen und danach nur noch getroffen, fuer immer ganz vorn und
-        # wurden als erste verworfen. Verdraengt wurden sie von den
-        # wechselnden zahlen, die den deckel ueberhaupt erst reissen -- und
-        # die ueberlebten hinten. Gemessen ueber 300 bilder: 2237 fehlgriffe,
-        # davon 843 (38 %) an texten, die schon einmal da waren; die
-        # statischen labels wurden je 9 mal neu gerastert. Mit move_to_end()
-        # im trefferfall sind sie immer unter den juengsten und bleiben.
+        # DIE REIHENFOLGE IST DIE DES ZUGRIFFS, nicht die des einfuegens:
+        # statische beschriftungen ('DIST', 'CLOSEST', ...) werden jedes
+        # frame getroffen, stehen dadurch immer unter den juengsten und
+        # bleiben; verworfen werden die wechselnden zahlen.
         if len(self._cache) >= self.cache_max:
             for old_key in list(self._cache.keys())[: max(1, self.cache_max // 4)]:
                 try:
@@ -509,25 +487,6 @@ class TextRenderer:
 
         self._blit(texture, left, top, w, h, color)
         return (left, top, float(w), float(h))
-
-    def defer(self, text, x, y, role='body', color=(1.0, 1.0, 1.0, 1.0),
-              align='left', valign='top'):
-        """Wie draw(), aber erst beim naechsten flush() ausgefuehrt.
-
-        Der einzige zweck: alles, was WAEHREND des FXAA-passes anfaellt (etwa
-        weltverankerte marker), darf nicht in das FXAA-FBO gezeichnet werden.
-        flush() laeuft nach dem resolve.
-        """
-        self._deferred.append((text, x, y, role, color, align, valign))
-
-    def flush(self):
-        """Zeichnet und leert die aufgeschobene warteschlange."""
-        if not self._deferred:
-            return
-        queued = self._deferred
-        self._deferred = []
-        for text, x, y, role, color, align, valign in queued:
-            self.draw(text, x, y, role=role, color=color, align=align, valign=valign)
 
     def _blit(self, texture, left, top, w, h, color):
         """Top-down -> ortho und auf das pixelraster rasten."""

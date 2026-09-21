@@ -1,6 +1,5 @@
 import math
 from physics.vec import Vec2
-from bodies.body import body
 
 try:
     import numpy as _np
@@ -21,20 +20,15 @@ class world:
         self.time = 0.0
         self.integrator_max_step = 30.0
         self.integrator_min_step = 0.01
-        # Zeitraffer-decke fuer die schrittweite. `integrator_max_step` ist die
-        # UNTERGRENZE dieser decke -- in echtzeit bleibt sie exakt 30 s, der
-        # integrator rechnet dort also dieselben floats wie bisher. Erst wenn
-        # set_warp_step_ceiling() eine hoehere decke setzt, darf der schritt
-        # groesser werden. Siehe dort fuer die messung, die das rechtfertigt.
+        # Zeitraffer-decke fuer die schrittweite (set_warp_step_ceiling).
+        # `integrator_max_step` ist ihre untergrenze: in echtzeit gilt genau
+        # die konfigurierte decke.
         self.integrator_max_step_effective = 0.0
         self.integrator_warp_substep_target = 40.0
         self.integrator_max_step_ceiling = 1.0e6
-        # Zuletzt angenommene schrittweite. Ohne dieses gedaechtnis faengt
-        # jeder aufruf wieder bei der decke an und arbeitet sich per ablehnung
-        # herunter -- mit angehobener decke ist das der groesste einzelposten
-        # (gemessen 2000-km-orbit bei 1 y/s: 19810 ablehnungen, 629 ms/frame).
-        # Nur aktiv, wenn die decke ueber der konfigurierten liegt, damit der
-        # standardfall bit-identisch bleibt.
+        # Zuletzt angenommene schrittweite, damit der naechste aufruf nicht
+        # wieder bei der decke anfaengt. Nur aktiv, wenn die decke ueber der
+        # konfigurierten liegt, damit der standardfall bit-identisch bleibt.
         self._integrator_h_hint = 0.0
         self.integrator_position_tolerance = 1.0
         self.integrator_velocity_tolerance = 0.001
@@ -45,11 +39,8 @@ class world:
         self.integrator_last_min_step_forced = 0
         self.integrator_last_worst_pos_error = 0.0
         self.integrator_last_worst_vel_error = 0.0
-        # Numba-fassung des integrators benutzen, wenn verfuegbar. Gleiche
-        # formeln, gleiche toleranzen, gleiche reihenfolge -- nur ohne
-        # Python-objekte (siehe world_kernels.py). Zum vergleichen der
-        # beiden pfade auf False setzen; die energiedrift muss identisch
-        # bleiben.
+        # Numba-fassung des integrators benutzen, wenn verfuegbar
+        # (world_kernels.py, bit-identisch). Auf False fuer A/B-vergleiche.
         self.use_fast_integrator = True
         # Epicycle (Ptolemaic) mode state. When enabled, top-level bodies
         # (those with no parent) will be reparented to the chosen center
@@ -69,45 +60,18 @@ class world:
         obergrenze fuer einen zeitraffer-schritt: rueckt ein frame um mehr als
         einen bruchteil davon vor, ist die bahn nicht mehr aufgeloest, ganz
         gleich wie fein der integrator rechnet. Genommen wird das MINIMUM ueber
-        alle koerper -- der straffste zuegel gewinnt.
+        alle koerper -- der straffste zuegel gewinnt. Als minimum stetiger
+        funktionen springt der wert nicht, wenn ein anderer koerper die
+        staerkste anziehung uebernimmt (etwa jenseits von ~2.6e8 m von der
+        Erde, wo die Sonne staerker zieht, das schiff aber noch die Erde
+        umlaeuft).
 
-        Warum nicht die umlaufzeit aus dem HUD? Weil die gegen den vom SPIELER
-        gewaehlten bezugskoerper gerechnet wird. Wer im erdorbit die Sonne als
-        bezug einstellt, bekaeme dort ein jahr statt zwei stunden -- die grenze
-        haenge dann an einer anzeigeeinstellung statt an der physik.
+        Nicht die umlaufzeit aus dem HUD: die ist gegen den vom SPIELER
+        gewaehlten bezugskoerper gerechnet, die grenze hinge dann an einer
+        anzeigeeinstellung statt an der physik.
 
-        > **NICHT den koerper mit dem groessten g nehmen.** Das stand hier bis
-        > 2026-08-27, und es ist auf jeder mond-transferbahn falsch. Jenseits
-        > von r ~ 2.6e8 m ist Erdbeschleunigung < sonnenbeschleunigung
-        > (4.4e-3 gegen 6.1e-3 m/s^2) -- das schiff ist dort aber laengst nicht
-        > frei, die Erd-SOI reicht bis 9.2e8 m und der Mond steht bei 3.8e8 m
-        > mittendrin. Die auswahl kippte also auf die SONNE und meldete deren
-        > zeitskala: gemessen auf einer bahn rp 7e6 / ra 4.05e8 m sprang der
-        > wert bei r = 2.6e8 m von 1.4e5 auf 3.4e6 s (25x), fiel am Mond auf
-        > 1.9e4 s zurueck und stieg dahinter wieder -- ueber einen
-        > 2-%-radiusschritt gemessen ein sprung um das **97-fache**.
-        >
-        > Beide verbraucher haengen daran, und beide brachen mit:
-        >
-        > 1. **Die raffungsgrenze** (`test.py::clamp_warp_to_orbit`,
-        >    `Telemetry.warp_step_allowed`, `Hud._set_warp`) erlaubte damit
-        >    `t_char/3` = 1.18e6 s je frame auf einer bahn mit T = 9.3e5 s --
-        >    **1.57 umlaufzeiten in EINEM frame**. Der integrator rechnet das
-        >    brav durch und liefert eine andere bahn: derselbe start, 25 tage,
-        >    perigaeum **1.107e7 m in echtzeit gegen 6.76e6 m im zeitraffer**.
-        > 2. **Die schrittweiten-decke des predictors** (`_make_snapshot`,
-        >    `rkn_max_dt_timescale_divisor`) wird als `t_char/30` gedeckelt.
-        >    Mit dem sprung ging sie im zeitraffer von 1500 auf 17254 s hoch
-        >    und beim naechsten kippen wieder zurueck -- die gezeichnete linie
-        >    zeigte bei jedem wechsel eine andere bahn (gemessen: dichteste
-        >    mond-annaeherung 1.156e7 gegen 1.134e7 m, bahnabweichung 6e6 m
-        >    ueber 60 tage).
-        >
-        > Das minimum je koerper hat den sprung nicht, weil es ein minimum
-        > STETIGER funktionen ist: derselbe schritt misst jetzt hoechstens
-        > 1.03x. Und es ist nicht bloss glatter, sondern richtiger -- in LEO
-        > und bei 1 AU liefert es T/2pi exakt, wo die alte fassung durch das
-        > `total_g` im nenner 0.03 % bzw. 0.5 % daneben lag.
+        Verbraucher: die raffungsgrenze (`runtime/loop.py`, Telemetry, Hud)
+        und die schrittweiten-decke des predictors.
 
         Rueckgabe None, wenn kein koerper eine zeitskala liefert.
         """
@@ -139,27 +103,16 @@ class world:
     def set_warp_step_ceiling(self, sim_seconds_per_frame):
         """Decke fuer die integrator-schrittweite aus der raffung ableiten.
 
-        Die kosten von update_dynamics sind LINEAR in der zahl der teilschritte,
-        und die ist sim-sekunden-pro-frame / schrittweite. Eine feste decke von
-        30 s heisst deshalb: bei 365 d/s 5984 teilschritte je frame, gemessen
-        168.7 ms -- das 30-fache des frame-budgets.
+        Die kosten von update_dynamics sind linear in der zahl der
+        teilschritte (sim-sekunden-pro-frame / schrittweite). Deshalb wird
+        direkt eine ZAHL VON TEILSCHRITTEN je frame angepeilt
+        (`integrator_warp_substep_target`), nie weniger als die konfigurierte
+        decke und nie mehr als `integrator_max_step_ceiling`.
 
-        Statt die decke an der geometrie auszurichten (wie es der predictor mit
-        rkn_adaptive_far_maxdt tut) wird hier direkt eine ZAHL VON TEILSCHRITTEN
-        angepeilt. Das ist zulaessig, weil die schrittweite ohnehin nicht von der
-        decke bestimmt wird, sondern von der fehlerkontrolle: gemessen in einem
-        400-km-orbit aendert eine anhebung der decke von 30 s auf 100 000 s die
-        TATSAECHLICHE schrittweite nur von 27.7 s auf 34.7 s (hoehendrift ueber
-        5 umlaeufe: +0.374 km gegen +0.411 km). Nahe an einem koerper haelt also
-        die toleranz die zuegel, die decke greift nur im fernfeld -- und dort
-        kostet sie das 500-fache.
-
-        Die decke ist damit eine UNTERGRENZE der schrittweite, keine obergrenze
-        der genauigkeit: reicht sie nicht, lehnt die fehlerkontrolle ab und
-        halbiert, es entstehen also mehr teilschritte als angepeilt. Genau so
-        soll es sein.
-
-        Gemessen bei 365 d/s (28 koerper, 180 fps): 168.7 ms -> 0.31 ms.
+        Das ist zulaessig, weil nahe an einem koerper die fehlerkontrolle die
+        schrittweite bestimmt, nicht die decke: reicht sie nicht, lehnt die
+        fehlerkontrolle ab und halbiert, es entstehen also mehr teilschritte
+        als angepeilt. Die decke greift nur im fernfeld.
         """
         base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
         span = abs(float(sim_seconds_per_frame))
@@ -176,26 +129,15 @@ class world:
     def step(self, sim_seconds, max_substep):
         """Rueckt die welt um `sim_seconds` vor, aufgeteilt in stuecke.
 
-        Stand frueher als `step_simulation()` in `test.py` -- also ausserhalb
-        der welt, obwohl es ihre eigene schrittregel ist.
+        Die stueckgroesse ist `max(max_substep, integrator-decke)`: jedes
+        stueck kostet mindestens einen teilschritt, im zeitraffer muessen also
+        stueck UND decke mitwachsen, sonst begrenzt das stueck die decke.
 
-        Die stueckgroesse ist `max_substep` -- ausser im zeitraffer, wo die
-        integrator-decke darueber liegt. Das ist kein detail: solange die
-        stuecke 1000 s bleiben, kostet JEDES stueck mindestens einen
-        teilschritt, und die decke aus set_warp_step_ceiling() kann gar nicht
-        wirken. Gemessen bei 365 d/s: die teilschritt-zahl bleibt bei 176
-        (= 175200/1000) egal wie hoch die decke gesetzt wird. Es sind also
-        ZWEI decken, und beide muessen steigen, sonst bringt keine etwas.
-
-        Die reihenfolge dynamik-dann-planeten ist die des predictors und wird
-        von `tests/warp_predictor_test.py` §18 und §22 geprueft -- letzterer
-        stellt sicher, dass der weltzustand nicht davon abhaengt, wie ein
-        frame in stuecke zerlegt wurde.
+        Die reihenfolge dynamik-dann-planeten ist die des predictors
+        (geprueft in `tests/warp_predictor_test.py` §18 und §22).
         """
         if sim_seconds <= 0.0:
             return
-        # Decke aus der raffung ableiten (in echtzeit bleibt sie bei 30 s, der
-        # integrator rechnet dann bit-identisch wie bisher).
         ceiling = self.set_warp_step_ceiling(sim_seconds)
         chunk = max(max_substep, ceiling)
         if sim_seconds <= chunk:
@@ -218,50 +160,19 @@ class world:
             parent_pos = body.is_moon_of.position if body.is_moon_of else None
             mu = self.G * body.is_moon_of.mass if body.is_moon_of else None
 
-            # DIE EPOCHE GEHOERT ZUR REIHENFOLGE, UND DIE IST
-            # `update_dynamics(dt)` DANN `update_planets(dt)`
-            # (test.py::update). In dieser reihenfolge hat `self.time` bereits
-            # das ende des chunks erreicht, wenn hier `body.theta` um genau
-            # diesen chunk vorgeschrieben wird -- bookmark und winkel gehoeren
-            # also zusammen, und der naechste `update_dynamics`-aufruf liest
-            # sie richtig.
-            #
-            # DREHT MAN DIE REIHENFOLGE UM, IST ES FALSCH, und zwar
-            # erster ordnung im chunk: `position_at_time(tau)` liefert dann
-            # systematisch die position bei `tau + dt`, jeder geskriptete
-            # koerper steht fuer die kraftrechnung des schiffs einen chunk in
-            # der zukunft. Gemessen (erdumlaufbahn rp 2e7 m, e = 0.3, abstand
-            # der welt von der analytisch propagierten predictor-linie nach
-            # 4800 s):
-            #
-            #   chunk                       1000 s    300 s     5 s
-            #   dynamics, planets (spiel)   5.2e1 m   5.2e1 m   5.2e1 m
-            #   planets, dynamics           9.4e6 m   3.9e6 m   7.4e4 m
-            #
-            # Wer die aufrufe also vertauscht, verschiebt die bahn um
-            # kilometer -- und weil der fehler mit dem chunk waechst, um so
-            # mehr, je hoeher die raffung. `tests/warp_predictor_test.py`
-            # tut genau das in seinem `advance()`-helfer; §18 misst es.
+            # Die epoche (theta, time) muss zusammenpassen. Das setzt die
+            # reihenfolge `update_dynamics(dt)` DANN `update_planets(dt)`
+            # voraus: `self.time` steht dann schon am ende des chunks, um den
+            # `body.theta` hier vorgeschrieben wird. Umgekehrt stuende jeder
+            # geskriptete koerper fuer die kraftrechnung einen chunk in der
+            # zukunft (geprueft in `tests/warp_predictor_test.py` §18).
             body.position = body.orbit_position(dt, parent_pos, mu)
             body._kepler_ref_theta = body.theta
             body._kepler_ref_time = self.time
 
-            # DANN prüfen ob Release nötig
-
-        # Hinweis: Der Epizykel-Modus wird durch Umparenting der Top-Level-
-        # Körper zum gewählten Zentrum via `enable_epicycles()` aktiviert; 
-        # update_planets folgt einfach den aktuell gesetzten Elternbeziehungen.
-
     def _body_position_at_time(self, body, time_s):
-        """
-        Return the body's world position at a given simulation time.
-
-        For now:
-        - if the body has a time-aware orbit method later, use it here
-        - otherwise fall back to current body.position
-
-        This keeps the integrator ready for scripted moving planets at intermediate stages.
-        """
+        """Weltposition des koerpers zur simulationszeit `time_s`
+        (`body.position_at_time`, sonst die aktuelle position)."""
         try:
             if hasattr(body, "position_at_time"):
                 return body.position_at_time(time_s)
@@ -549,12 +460,10 @@ class world:
         count = len(bodies)
 
         # Struktur-cache: massen, bahnelemente und eltern-verknuepfungen
-        # aendern sich nur, wenn die KOERPERLISTE selbst umgebaut wird
-        # (release_body, epizykel an/aus) -- und jede dieser aenderungen
-        # aendert die id-tupel unten. Positionen und der Kepler-epoch-
-        # bookmark wandern dagegen mit jedem weltschritt und werden pro
-        # aufruf neu eingetragen. Vorher wurden ALLE elf arrays bei jedem
-        # teilschritt neu gebaut (5-6x pro frame bei hohem zeitraffer).
+        # aendern sich nur, wenn die koerperliste oder eine is_moon_of-
+        # verknuepfung umgebaut wird (epizykel an/aus) -- das aendert die
+        # id-tupel unten. Positionen und die Kepler-epoche wandern mit jedem
+        # weltschritt und werden pro aufruf neu eingetragen.
         structure_key = (
             tuple(id(b) for b in bodies),
             tuple(id(getattr(b, "is_moon_of", None)) for b in bodies),
@@ -630,10 +539,8 @@ class world:
         """Startweite fuer den naechsten aufruf -- 0 heisst 'bei der decke'.
 
         Das gedaechtnis wird NUR benutzt, wenn die decke ueber der
-        konfigurierten liegt, also ausschliesslich im zeitraffer. Im standard-
-        fall gibt es nichts zu gewinnen (dort wurden 0 ablehnungen gemessen),
-        und so bleibt die schrittfolge dort garantiert bit-identisch --
-        tests/energy_test.py muss weiter auf 6.4718e-04 landen.
+        konfigurierten liegt, also ausschliesslich im zeitraffer; im
+        standardfall bleibt die schrittfolge so garantiert unveraendert.
         """
         base = max(float(getattr(self, "integrator_max_step", 30.0)), 1e-9)
         if max_step <= base * (1.0 + 1e-12):
@@ -741,35 +648,34 @@ class world:
             # dynamic bodies.
             if orig_parent is None and saved[b]['scripted_orbit']:
                 # Berechne relatives r/v zum Zentrum und leite neue orbitale Elemente ab
-                
-                    rel_r = b.position - center.position
-                    # If center has velocity attribute, use relative velocity, else assume 0
-                    center_v = getattr(center, 'velocity', Vec2(0.0, 0.0))
-                    rel_v = b.velocity - center_v if hasattr(b, 'velocity') else Vec2(0.0, 0.0)
-                    mu = self.G * getattr(center, 'mass', 0.0)
-                    elems = self._rv_to_orbital(rel_r, rel_v, mu)
-                    if elems is not None:
-                        a, e, theta_rel, arg_peri = elems
-                        b.is_moon_of = center
-                        b.semi_major_axis = float(max(0.0, a))
-                        b.eccentricity = float(max(0.0, min(0.999999, e)))
-                        b.theta = float(theta_rel)
-                        b.arg_periapsis = float(arg_peri)
-                        b.scripted_orbit = True
-                        b.released = False
-                    else:
-                        # Fallback: setze kreisförmige Bahn mit dem aktuellen Abstand
-                        try:
-                            r = (b.position - center.position).magnitude()
-                        except Exception:
-                            r = float(getattr(b, 'semi_major_axis', 0.0) or 0.0)
-                        b.is_moon_of = center
-                        b.semi_major_axis = float(max(0.0, r))
-                        b.eccentricity = 0.0
-                        b.theta = math.atan2((b.position - center.position).y, (b.position - center.position).x)
-                        b.arg_periapsis = 0.0
-                        b.scripted_orbit = True
-                        b.released = False
+                rel_r = b.position - center.position
+                # If center has velocity attribute, use relative velocity, else assume 0
+                center_v = getattr(center, 'velocity', Vec2(0.0, 0.0))
+                rel_v = b.velocity - center_v if hasattr(b, 'velocity') else Vec2(0.0, 0.0)
+                mu = self.G * getattr(center, 'mass', 0.0)
+                elems = self._rv_to_orbital(rel_r, rel_v, mu)
+                if elems is not None:
+                    a, e, theta_rel, arg_peri = elems
+                    b.is_moon_of = center
+                    b.semi_major_axis = float(max(0.0, a))
+                    b.eccentricity = float(max(0.0, min(0.999999, e)))
+                    b.theta = float(theta_rel)
+                    b.arg_periapsis = float(arg_peri)
+                    b.scripted_orbit = True
+                    b.released = False
+                else:
+                    # Fallback: setze kreisförmige Bahn mit dem aktuellen Abstand
+                    try:
+                        r = (b.position - center.position).magnitude()
+                    except Exception:
+                        r = float(getattr(b, 'semi_major_axis', 0.0) or 0.0)
+                    b.is_moon_of = center
+                    b.semi_major_axis = float(max(0.0, r))
+                    b.eccentricity = 0.0
+                    b.theta = math.atan2((b.position - center.position).y, (b.position - center.position).x)
+                    b.arg_periapsis = 0.0
+                    b.scripted_orbit = True
+                    b.released = False
             else:
                 # preserve moons' parent relationships and dynamic bodies; ensure
                 # scripted bodies stay scripted if they were originally.

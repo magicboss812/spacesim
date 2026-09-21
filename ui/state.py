@@ -1,11 +1,7 @@
 """Beobachtbarer ansichts-zustand, den HUD und tastatur gemeinsam bedienen.
 
-Warum es dieses modul gibt: bezugsrahmen, referenzkoerper und das
-ziel-overlay lagen bisher als LOKALE VARIABLEN in test.py::main(). Kein
-objekt kam an sie heran -- ein HUD-bedienelement haette sie nicht lesen und
-erst recht nicht setzen koennen, ohne die hauptschleife umzubauen.
-
-Hier liegen sie an einer stelle, mit einer aenderungs-benachrichtigung.
+Bezugsrahmen, referenzkoerper, ziel-overlay und auswahl liegen hier an
+einer stelle, mit einer aenderungs-benachrichtigung.
 Tastatur (R / 1 / 2 / T) und HUD-bedienelemente schreiben denselben zustand
 und koennen deshalb nicht auseinanderlaufen.
 
@@ -78,12 +74,6 @@ class UIState:
             return None
         return self.bodies[self.selected_index]
 
-    @property
-    def frame_mode_label(self):
-        if self.frame_extension == BODY_CENTRED_BODY_DIRECTION:
-            return 'body-direction'
-        return 'non-rotating'
-
     def secondary_index(self):
         """Zweiter koerper fuer den body-direction-rahmen.
 
@@ -128,12 +118,11 @@ class UIState:
     def select_body(self, index):
         """Setzt die auswahl. Gibt True zurueck, wenn sie sich geaendert hat.
 
-        LOEST BEWUSST KEIN on_change AUS. Die benachrichtigung baut in
-        test.py den plotting-frame neu auf und macht die gehaltene vorhersage
-        ungueltig (`predictor.invalidate_hold`) -- ein voller
-        neuaufbau der trajektorie, pro mausklick, fuer eine reine
-        darstellungs-markierung. Der renderer liest `selected_index`
-        stattdessen je frame direkt.
+        LOEST BEWUSST KEIN on_change AUS. Die benachrichtigung baut den
+        plotting-frame neu auf und macht die gehaltene vorhersage ungueltig
+        (`predictor.invalidate_hold`) -- ein voller neuaufbau der trajektorie,
+        zu teuer fuer eine reine darstellungs-markierung. Der renderer liest
+        `selected_index` je frame direkt.
         """
         if index is not None:
             index = int(index)
@@ -160,15 +149,6 @@ class UIState:
         self._changed()
         return True
 
-    def set_target_overlay(self, enabled):
-        """Overlay direkt setzen (HUD-knopf), statt zu kippen (taste T)."""
-        enabled = bool(enabled) and self.ship_index is not None
-        if enabled == self.target_overlay_enabled:
-            return False
-        self.target_overlay_enabled = enabled
-        self._changed()
-        return True
-
     def apply_view_mode(self, mode):
         """Die drei modi der HUD-rahmenwahl in einem schritt.
 
@@ -181,10 +161,6 @@ class UIState:
         damit einen frame-neuaufbau -- zwei aufrufe wuerden den bezugsrahmen
         kurzzeitig in einen zwischenzustand versetzen.
         """
-        from physics.reference_frames import (
-            BODY_CENTRED_BODY_DIRECTION,
-            BODY_CENTRED_NON_ROTATING,
-        )
         extension = (BODY_CENTRED_BODY_DIRECTION if mode == 'surface'
                      else BODY_CENTRED_NON_ROTATING)
         overlay = (mode == 'target') and self.ship_index is not None
@@ -196,7 +172,6 @@ class UIState:
 
     def view_mode(self):
         """Aktueller modus als index fuer die HUD-rahmenwahl."""
-        from physics.reference_frames import BODY_CENTRED_BODY_DIRECTION
         if self.target_overlay_enabled:
             return 2
         return 0 if self.frame_extension == BODY_CENTRED_BODY_DIRECTION else 1

@@ -60,7 +60,7 @@ kartendurchmesser, nicht der breite des zeitraffers darueber.
 DIE AUSWAHL IST DIESELBE WIE IM SPIEL
 
 Ein klick auf einen koerper waehlt ihn aus, ein zweiter fliegt ihn an --
-wortgleich zu `test.py::handle_world_click`. Die karte ist damit ein
+wortgleich zu `runtime/input.py::InputRouter.handle_world_click`. Die karte ist damit ein
 zweiter weg zu derselben handlung, kein eigener zustand: was hier
 angeklickt wird, traegt in der welt sofort die vier auswahl-pfeile.
 """
@@ -79,11 +79,9 @@ from . import chrome
 #:
 #: BEIDE MASSE FOLGEN DEM KREIS, nicht umgekehrt. Der plotradius ist
 #: ``min(breite, hoehe)/2 - _PAD`` -- jedes pixel, um das die kachel breiter
-#: als hoch ist, ist deshalb leerer rand und sonst nichts. Bei 196x150 waren
-#: das 46 px auf jeder flanke, mehr als der halbe kartenradius; die kachel
-#: las sich als grosses bauteil mit einer kleinen zeichnung darin. Die
-#: breite liegt jetzt nur noch so weit ueber der rahmenhoehe, wie das
-#: notch-tab ueber der kante braucht.
+#: als hoch ist, ist deshalb leerer rand und sonst nichts. Die breite liegt
+#: deshalb nur so weit ueber der rahmenhoehe, wie das notch-tab ueber der
+#: kante braucht.
 _COLLAPSED = (134.0, 138.0)
 _EXPANDED = (292.0, 300.0)
 
@@ -125,11 +123,10 @@ _DIMMED = 0.22
 #: und Pluto fast null, und ein mondsystem von drei pixeln waere unlesbar.
 #:
 #: Boden und decke sind bewusst gross: die mond-ansicht ist der einzige
-#: zweck, fuer den die karte ueberhaupt ausfaehrt, und bei 0.15/0.26 des
-#: kartenradius war das Jupiter-system 21 bis 37 pixel breit -- vier ringe
-#: und vier punkte darin sind auf einem laptop nicht mehr auseinander zu
-#: halten. Der ganze rest der karte steht waehrenddessen ohnehin auf
-#: `_DIMMED`, das mondsystem darf also ueber die nachbarbahnen laufen.
+#: zweck, fuer den die karte ueberhaupt ausfaehrt, und vier ringe mit vier
+#: punkten darin muessen auch auf einem laptop auseinanderzuhalten sein.
+#: Der ganze rest der karte steht waehrenddessen ohnehin auf `_DIMMED`, das
+#: mondsystem darf also ueber die nachbarbahnen laufen.
 _MOON_SPAN = 1.5
 _MOON_SPAN_MIN = 0.54
 _MOON_SPAN_MAX = 0.82
@@ -209,8 +206,8 @@ def _true_angle(body, parent):
     Aus den momentanen positionen, nicht aus ``body.theta``: theta ist die
     wahre anomalie ab dem periapsis und haette gegenueber der gezeichneten
     lage noch die drehung ``arg_periapsis`` offen. Die differenz der
-    positionen hat sie bereits drin und gilt ausserdem fuer freigelassene
-    koerper weiter, die gar keine kepler-elemente mehr fortschreiben.
+    positionen hat sie bereits drin und gilt ausserdem fuer koerper ohne
+    kepler-elemente.
 
     Vorzeichen wie in der welt: der renderer zeichnet top-down (line.vert
     kippt y), ein positives welt-y erscheint also UNTEN. Die karte
@@ -402,7 +399,8 @@ class SystemMap(Widget):
     def _activate(self, index):
         """Auswahl, anflug und mond-ansicht -- die drei folgen eines klicks.
 
-        Die ersten beiden sind WORTGLEICH zu `test.py::handle_world_click`:
+        Die ersten beiden sind WORTGLEICH zu
+        `runtime/input.py::InputRouter.handle_world_click`:
         erster klick waehlt aus, ein zweiter auf denselben koerper fliegt
         ihn an. Die karte ist ein zweiter weg zu derselben handlung, kein
         zweiter zustand.
@@ -530,7 +528,7 @@ class SystemMap(Widget):
                 span = min(max((radii[slot] - inner) * _MOON_SPAN,
                                radius * _MOON_SPAN_MIN),
                            radius * _MOON_SPAN_MAX)
-                self._draw_moons(ctx, index, body, px, py, span,
+                self._draw_moons(ctx, body, px, py, span,
                                  moons.get(index, ()))
 
         # --- name unter dem zeiger ------------------------------------------
@@ -566,7 +564,7 @@ class SystemMap(Widget):
         ctx.draw.ring(x, y, dot_radius + ctx.px(4.0), max(1.0, ctx.px(1.4)),
                       with_alpha(color, 0.95 * alpha))
 
-    def _draw_moons(self, ctx, planet_index, planet, px, py, span, moons):
+    def _draw_moons(self, ctx, planet, px, py, span, moons):
         """Das mondsystem eines planeten, aufgefaltet um seinen punkt.
 
         Der platz dafuer ist der abstand zur NAECHST INNEREN bahn, nicht ein

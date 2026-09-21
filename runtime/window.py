@@ -1,8 +1,6 @@
 """Fenster, GL-context und der frame-takt.
 
-Stand als erste 70 zeilen von `main()` in `test.py`. Alles hier ist einmalige
-einrichtung, die mit der simulation nichts zu tun hat -- deshalb liegt sie
-jetzt vor der tuer statt im startskript.
+Einmalige einrichtung, die mit der simulation nichts zu tun hat.
 """
 import os
 
@@ -46,13 +44,8 @@ class Window:
         # Starte Pygame mit OpenGL.
         #
         # NUR display und font -- NICHT pygame.init(). pygame.init() faehrt
-        # JEDES untermodul hoch, auch mixer und joystick, und beide zaehlen
-        # dabei die geraete des rechners auf. Auf diesem system kostet das
-        # gemessen 25.2 s (mixer) + 20.1 s (joystick) = 45.3 s, in denen das
-        # fenster noch gar nicht existiert -- der start wirkt schlicht wie ein
-        # absturz. Die dauer haengt an audio-/HID-treibern, nicht am spiel: sie
-        # kann sich jederzeit wieder aendern. Deshalb wird hier gar nicht erst
-        # geraten, sondern nur initialisiert, was das spiel wirklich benutzt.
+        # auch mixer und joystick hoch, die beim start die audio-/HID-geraete
+        # aufzaehlen und den start um viele sekunden blockieren koennen.
         # Verwendet werden ausschliesslich display, event, font, image, key,
         # mouse und time; von denen brauchen nur display und font ein init.
         pygame.display.init()

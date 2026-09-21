@@ -43,18 +43,15 @@ class BodyDrawMixin:
         atmos_alpha = 0.0
         atmos_radius = radius_px
         if atmos_density > 0.0:
-            # Enger als frueher (war 2.0): mit der neuen kugelschattierung ist
-            # der koerper selbst dunkel, und ein halo von zwei radien breite
-            # ueberstrahlte dann die halbe bildflaeche.
+            # Eng gehalten: mit der kugelschattierung ist der koerper selbst
+            # dunkel, und ein breiterer halo ueberstrahlte ihn.
             atmos_radius = radius_px * 1.22
             outer_radius = max(outer_radius, atmos_radius)
             atmos_alpha = min(float(atmos_density) / 100.0, 1.0) * min(radius_scale, 1.0)
 
         glow_alpha = 0.0
         if light_intensity > 0.0:
-            # Stern: grosser halo. Die alte formel teilte durch 1000 und kam
-            # damit auf alpha 4e-4 -- der glow war rechnerisch da und optisch
-            # nie zu sehen.
+            # Stern: grosser halo.
             glow_radius = radius_px * 3.0
             outer_radius = max(outer_radius, glow_radius)
             glow_alpha = min(1.0, 0.22 + float(light_intensity) * 0.30) * radius_scale
@@ -128,7 +125,7 @@ class BodyDrawMixin:
         koerper; `fade` blendet die marke über dem echten körper aus, siehe
         `_body_icon_fade`.
 
-        Zwei wege. `body_icon_style = "disc"` zeichnet die alte flache scheibe
+        Zwei wege. `body_icon_style = "disc"` zeichnet eine flache scheibe
         über denselben GLSL-körper-shader wie der volle körper: der
         vertex-shader (body.vert) erwartet top-down-screen-koordinaten und
         spiegelt y intern (`ndc.y = 1 - 2*y/h`) — dieselbe konvention wie die
@@ -235,18 +232,11 @@ class BodyDrawMixin:
         """Der GEZEICHNETE radius der marke -- ein je koerper KONSTANTER wert
         aus seinem PHYSISCHEN radius, unabhaengig vom zoom.
 
-        > **Bewusst nicht aus dem aktuellen bildschirmradius abgeleitet --
-        > das war die erste, falsche fassung.** `true_radius_px` schrumpft mit
-        > jedem herauszoomen gegen null, und genau dort, wo ein koerper zur
-        > marke wird, liegt er fast immer weit unter `body_icon_min_radius_px`
-        > -- eine mischung `min + (true - min) * einfluss` klemmte deshalb bei
-        > JEDEM einfluss-wert exakt auf `min` zurueck, weil `true - min`
-        > negativ blieb. Der regler hatte dadurch im spiel keine sichtbare
-        > wirkung, obwohl er in einem test mit handgesetzten grossen radien
-        > (bewusst weit ueber `min`) korrekt aussah. Die groesse haengt jetzt
-        > an `body.radius` selbst -- der bleibt bei jedem zoom derselbe, ein
-        > Jupiter-aehnlicher koerper ist also IMMER sichtbar groesser als ein
-        > kleiner mond, nicht nur kurz waehrend der ueberblendung.
+        Bewusst NICHT aus dem aktuellen bildschirmradius abgeleitet: wo ein
+        koerper zur marke wird, liegt der fast immer unter
+        `body_icon_min_radius_px`, und eine mischung damit klemmte immer auf
+        `min`. `body.radius` bleibt bei jedem zoom derselbe, ein grosser
+        koerper ist also IMMER sichtbar groesser als ein kleiner mond.
 
         `body_icon_size_influence` (0..1) mischt zwischen "immer
         `body_icon_min_radius_px`" (0 -- jede marke gleich gross) und "voll
@@ -533,17 +523,15 @@ class BodyDrawMixin:
             except Exception:
                 pass
             self._draw_ship_sprite(body, x, y, r, g, b, theta_override=theta_frame)
-            # Das Schiff traegt KEINEN schwebenden text mehr -- name und
-            # geschwindigkeit standen frueher fest ueber/unter der silhouette.
-            # Beide leben im spieler-HUD (navball-cluster); der name erscheint
-            # ueber das auswahl-label, wenn das schiff angeklickt wird.
+            # Das Schiff traegt keinen schwebenden text: name und
+            # geschwindigkeit stehen im spieler-HUD (navball-cluster); der
+            # name erscheint ueber das auswahl-label, wenn das schiff
+            # angeklickt wird.
             return
 
         # --- Nicht-Schiff-Körper: off-screen-cull + größen-schwelle (icon-swap) ---
-        # Echter, UNgeklemmter bildschirmradius. Statt den körper (alt) auf
-        # min. 3px zu klemmen und dauerhaft als winzige scheibe zu zeichnen,
-        # lassen wir ihn unter die schwelle schrumpfen und tauschen ihn dann
-        # nahtlos gegen ein positions-icon konstanter größe.
+        # Echter, UNgeklemmter bildschirmradius. Unter der schwelle wird der
+        # körper gegen ein positions-icon konstanter größe getauscht.
         icon_min_radius_px = float(self.body_icon_min_radius_px)
         true_radius_px = float(body.radius) * float(camera.scale)
         as_icon = true_radius_px < icon_min_radius_px
@@ -574,10 +562,10 @@ class BodyDrawMixin:
             return
 
         # --- Voller körper (disc + glow + atmosphäre) bei echter größe ---
-        # Gleitkomma-Radius für Label-Anker beibehalten, um 1-Pixel-Flackern beim
-        # Zoomen zu vermeiden. radius_px >= icon_radius_px ist hier garantiert.
+        # Gleitkomma-Radius (auch fuer den label-anker), damit nichts beim
+        # zoomen um einen pixel flackert. radius_px >= icon_min_radius_px ist
+        # hier garantiert.
         radius_px = true_radius_px
-        radius = max(3, int(round(radius_px)))  # integer radius for geometry
 
         if hasattr(body, 'atmosphere_color'):
             r1, g1, b1 = body.atmosphere_color[0] / 255.0, body.atmosphere_color[1] / 255.0, body.atmosphere_color[2] / 255.0
@@ -600,7 +588,7 @@ class BodyDrawMixin:
                 if entry is not None:
                     style_layers.append((entry, weight))
         if not style_layers:
-            # Noch nicht gebaut (budget) oder abgeschaltet: die alte flache
+            # Noch nicht gebaut (budget) oder abgeschaltet: die flache
             # scheibe bleibt stehen, statt einen leeren dunklen kreis zu zeigen.
             fade = 0.0
         else:
@@ -613,8 +601,8 @@ class BodyDrawMixin:
                                 for entry, weight in style_layers]
 
         # GLSL-Shader zeichnet Scheibe + Glow + Atmosphäre in einem Quad.
-        # (Kein immediate-mode-fallback mehr: ohne body-shader wird der körper
-        # nicht gezeichnet, der fehler steht in debug_info['shader_error'].)
+        # Ohne body-shader wird der körper nicht gezeichnet; der fehler steht
+        # in debug_info['shader_error'].
         self._draw_body_glsl(
             x,
             y,
@@ -657,8 +645,8 @@ class BodyDrawMixin:
         """Ob der name dieses koerpers gerade angeschrieben wird.
 
         `body_label_mode` entscheidet, WAS die beschriftung ausloest --
-        `"selected"` die auswahl, `"zoom"` der bildschirmradius (das alte
-        verhalten), `"both"` beides. Der auswahl-fall haengt bewusst NICHT
+        `"selected"` die auswahl, `"zoom"` der bildschirmradius, `"both"`
+        beides. Der auswahl-fall haengt bewusst NICHT
         an der groesse: sonst haette gerade der weit entfernte koerper, den
         man anklickt, um ihn zu finden, keinen namen.
         """
@@ -677,12 +665,9 @@ class BodyDrawMixin:
     def _body_label_style(self, name):
         """(text, font, kantenglaettung, laufweite) fuer einen koerpernamen.
 
-        VERSAL UND IN DER HAUSSCHRIFT. Der name des ausgewaehlten koerpers
-        ist die einzige beschriftung mitten im bild; in der system-groteske
-        gesetzt las er sich als etwas, das nicht zu dieser oberflaeche
-        gehoert. Jetzt traegt er dieselbe form wie jede display-beschriftung
-        des HUDs -- versal, gesperrt, hart gerastert (siehe
-        _build_body_label_font und .claude/rules/ui-hud.md).
+        VERSAL UND IN DER HAUSSCHRIFT: dieselbe form wie jede
+        display-beschriftung des HUDs -- versal, gesperrt, hart gerastert
+        (siehe _build_body_label_font).
 
         Faellt die schriftdatei aus, bleibt es bei der systemschrift -- und
         dann auch bei ihrer kantenglaettung und ohne sperrung, denn beides
@@ -699,12 +684,10 @@ class BodyDrawMixin:
                           size_radius_px=None):
         """Den namen eines koerpers fuer die zeichnung NACH dem FXAA vormerken.
 
-        NICHT sofort zeichnen: koerper laufen in den FXAA-FBO, und FXAA ist
-        ein kantenfilter -- ueber gerastertem text macht er aus 34.7 % voll
-        deckenden pixeln 5.3 % und verschmiert die glyphen ueber 55 % mehr
-        pixel. Die beschriftung wird deshalb gesammelt und in render() NACH
-        dem FXAA-resolve gezeichnet, so wie schiff und apsis-marker es schon
-        immer wurden.
+        NICHT sofort zeichnen: koerper laufen in den FXAA-FBO, und der
+        kantenfilter verschmiert gerasterten text. Die beschriftung wird
+        deshalb gesammelt und in render() NACH dem FXAA-resolve gezeichnet,
+        wie schiff und apsis-marker.
 
         `lx, ly` ist die FRAME-AWARE bildschirmposition aus
         `_world_to_screen_xy`, nicht `camera.world_to_screen`: in rotierenden
@@ -715,11 +698,9 @@ class BodyDrawMixin:
 
         `size_radius_px` ist davon getrennt: es ist die GROESSE, nach der
         `body_label_mode = "zoom"` entscheidet, und das ist immer der echte
-        bildschirmradius des koerpers. Beides zu vermengen war lange folgenlos,
-        weil die marke mit 4 px unter `body_label_min_radius_px` (5) lag --
-        mit 8 px lag sie darueber, und ploetzlich trug im zoom-modus jeder
-        winzige mond seinen namen. Der anker haengt an der ZEICHNUNG, die
-        entscheidung am KOERPER.
+        bildschirmradius des koerpers (sonst traegt im zoom-modus jeder
+        winzige mond ueber seine marke einen namen). Der anker haengt an der
+        ZEICHNUNG, die entscheidung am KOERPER.
         """
         if size_radius_px is None:
             size_radius_px = radius_px

@@ -4,23 +4,13 @@ Verwendet pygame für Fensterverwaltung und HUD, moderngl (OpenGL) für Renderin
 """
 
 import pygame
-from pygame.locals import *
 import moderngl
-import math
-import os
-import struct
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 import time
 
-import numpy as np
-
 from render import GL_DIR
-from physics.reference_frames import IdentityReferenceFrame, apparent_orbital_directions
-from render import background
+from physics.reference_frames import IdentityReferenceFrame
 from bodies import icon as body_icon
 from bodies import style as body_style
-from bodies import orbit_lines
 from ship import art as ship_art
 from render.background import BackgroundLayer
 
@@ -34,14 +24,6 @@ from render.ship import ShipDrawMixin
 from render.orbits import OrbitDrawMixin
 from render.prediction import PredictionDrawMixin
 from render.maneuver import ManeuverDrawMixin
-from render.line_kernels import (
-    _LINE_KERNELS_OK,
-    _clip_runs_numba,
-    _compact_min_step_numba,
-    _densify_numba,
-    _max_gap_refine_numba,
-    _rdp_keep_numba,
-)
 
 
 class Renderer(
@@ -58,17 +40,12 @@ class Renderer(
 ):
     """Der Renderer -- zusammengesetzt aus mixins, ein zustand.
 
-    Die klasse war 5900 zeilen in EINER datei. Sie ist jetzt ueber `render/`
-    verteilt, aber weiterhin EIN objekt: die mixins teilen sich `self` und die
-    dutzenden felder, die `__init__` unten anlegt. Das ist bewusst so und nicht
-    als komposition (`self.gl.line_program` statt `self._line_program`)
-    umgesetzt -- letzteres haette hunderte attributzugriffe quer durch die
-    groesste datei des projekts umgeschrieben, fuer eine rein strukturelle
-    aenderung ein schlechtes verhaeltnis von risiko zu ertrag.
+    Die klasse ist ueber `render/` verteilt, aber EIN objekt: die mixins
+    teilen sich `self` und die felder, die `__init__` unten anlegt. Das ist
+    bewusst keine komposition (`self.gl.line_program`).
 
-    Was hier BLEIBT, ist der kern, an dem alles haengt: der zustand
-    (`__init__`), der frame-durchlauf (`render`), die projektion in den aktiven
-    plot-rahmen und das HUD.
+    Hier liegt der kern: der zustand (`__init__`), der frame-durchlauf
+    (`render`), die projektion in den aktiven plot-rahmen und das debug-HUD.
     """
     def __init__(self, width, height, enable_fxaa=True, ctx=None):
 
@@ -77,7 +54,7 @@ class Renderer(
         self.enable_fxaa = enable_fxaa
 
         # moderngl-context: hängt sich an den von pygame/SDL erstellten
-        # GL-context. Aufrufer (test.py) können ihren bereits erstellten
+        # GL-context. Aufrufer (runtime/window.py) können ihren bereits erstellten
         # wrapper übergeben, damit nicht zwei moderngl-contexte denselben
         # GL-state verwalten.
         self.ctx = ctx if ctx is not None else moderngl.create_context()
@@ -140,11 +117,9 @@ class Renderer(
         self._icon_extent = None
         self._icon_radius = None
         self._icon_unit = None
-        # Gebaut wird NEBENLAEUFIG. Der bau ist reine rechnung (numpy, keine
-        # GL-aufrufe), nur das hochladen muss im hauptthread passieren --
-        # gemessen der billige teil. Synchron gebaut kostete der erste frame
-        # eines herangezoomten koerpers 18.5 ms; das ist genau der ruckler,
-        # den man beim heranzoomen sieht, also dort, wo er auffaellt.
+        # Gebaut wird NEBENLAEUFIG, damit das heranzoomen an einen koerper
+        # nicht ruckelt: der bau ist reine rechnung (numpy, keine GL-aufrufe),
+        # nur das (billige) hochladen passiert im hauptthread.
         self._body_style_jobs = {}
         self._body_style_executor = None
         # Gleichzeitige bauten. Einer reicht: mehr wuerden sich nur um die
@@ -167,15 +142,14 @@ class Renderer(
         # FXAA initialisieren wenn aktiviert
         if self.enable_fxaa:
             self._init_fxaa()
-        
+
         # UI-skalierung: die gesamte oberfläche wird in "design-einheiten" gegen
         # eine referenz-fensterhöhe angegeben und beim zeichnen mit ui_scale
         # multipliziert. Damit wächst das HUD auf großen/hochauflösenden
-        # displays mit, statt bei 16 px stehenzubleiben.
+        # displays mit.
         #
-        # Die untergrenze ist bewusst 1.0: bei der default-fenstergröße
-        # (kleiner als die referenz) bleibt die darstellung damit exakt so wie
-        # bisher; skaliert wird ausschließlich nach oben.
+        # Die untergrenze ist bewusst 1.0: unter der referenzhoehe schrumpft
+        # nichts, skaliert wird ausschließlich nach oben.
         self.ui_scale_reference_height = 1000.0
         self.ui_scale_min = 1.0
         self.ui_scale_max = 3.0
@@ -191,14 +165,10 @@ class Renderer(
         self.hud_font_size_medium = 20
         self.font_small = None
         self.font_medium = None
-        # DER KOERPERNAME LAEUFT UEBER DIE HAUSSCHRIFT, NICHT UEBER DIE
-        # SYSTEMSCHRIFT. Er ist die einzige beschriftung, die MITTEN im bild
-        # steht -- neben einem HUD, das durchgehend SB Liquid setzt, fiel
-        # ausgerechnet der name des ausgewaehlten koerpers als fremde
-        # groteske heraus. Gesetzt wird er wie jede display-beschriftung der
-        # oberflaeche: VERSAL, gesperrt, hart gerastert und auf ein
-        # vielfaches von fuenf pixel gerundet (siehe ui/theme.py, modulkopf
-        # und .claude/rules/ui-hud.md).
+        # Der koerpername laeuft ueber die hausschrift des HUD (SB Liquid),
+        # gesetzt wie jede display-beschriftung der oberflaeche: VERSAL,
+        # gesperrt, hart gerastert und auf ein vielfaches von fuenf pixel
+        # gerundet (siehe ui/theme.py, modulkopf).
         self.hud_font_size_body_label = 15
         self.body_label_uppercase = True
         self.body_label_tracking_em = 0.12
@@ -224,7 +194,7 @@ class Renderer(
         self._last_prediction_render_stats = {}
         # per-phase timings of the most recent render() call (frame_ms,
         # bodies_ms, swap_or_present_ms, ...). Read by the per-frame TIMING
-        # line in test.py to split render calc vs. present cost.
+        # line in runtime/loop.py to split render calc vs. present cost.
         self.last_frame_timings = {}
 
         # optionales predictor-debug: wenn True druckt kleine beispiele der predictor-
@@ -251,20 +221,15 @@ class Renderer(
 
         # ---- aufloesungsgetriebene verfeinerung der vorhersagelinie ----
         #
-        # Die punkteliste ist seit den geschwindigkeits-spalten (predictor.
-        # POINT_COLUMNS) eine stueckweise KUBISCHE kurve, keine folge von
-        # positionen. Zwischen zwei stuetzstellen wird deshalb zur zeichenzeit
-        # HERMITE ausgewertet statt linear verbunden -- und zwar nur so fein,
-        # wie es der bildschirm hergibt, und nur dort, wo etwas zu sehen ist.
-        #
-        # Warum das ueberhaupt noetig ist: der kernel setzt punkte in festem
-        # weltabstand (1000 km im auslieferungszustand). Eine sehne dieser
-        # laenge schneidet eine erdnahe bahn um c^2/8R = 17.8 km ab. Kubisch
-        # interpoliert sind es 7.6 m -- derselbe punktabstand, 2350-fach
-        # kleinerer fehler, ohne einen einzigen zusaetzlichen
-        # integrationsschritt.
+        # Die punkteliste traegt geschwindigkeits-spalten (predictor.
+        # POINT_COLUMNS) und ist damit eine stueckweise KUBISCHE kurve.
+        # Zwischen zwei stuetzstellen wird zur zeichenzeit HERMITE ausgewertet
+        # statt linear verbunden -- nur so fein, wie es der bildschirm
+        # hergibt, und nur dort, wo etwas zu sehen ist. Bei festem
+        # punktabstand (1000 km) schneidet eine sehne eine erdnahe bahn um
+        # c^2/8R = 17.8 km ab, kubisch interpoliert um 7.6 m.
         self.prediction_hermite_enabled = True
-        # Ziel-abweichung in geraete-pixeln. `test.py` setzt
+        # Ziel-abweichung in geraete-pixeln. `runtime/window.py` setzt
         # SDL_WINDOWS_DPI_AWARENESS=permonitorv2 vor dem display-init, also
         # sind self.width/height ECHTE geraetepixel -- ein pixel-budget ist
         # damit schon ein DPI-budget, ohne umrechnung.
@@ -275,15 +240,13 @@ class Renderer(
         #
         # Die quantisierung ist NICHT kosmetik: ohne sie aendert sich das ziel
         # bei jeder zoom-stufe und die verfeinerung wird jeden frame neu
-        # gerechnet -- derselbe fehler, den der predictor bei
-        # `snapshot_view_rel_tol` schon einmal hatte (37 neubauten je
-        # zoom-geste statt 1).
+        # gerechnet.
         self.prediction_error_ladder_m = [0.001, 0.01, 1.0, 100.0, 1000.0]
+        # Die debug-textwand (_render_hud). Standardmaessig aus -- das
+        # spieler-HUD (ui/hud/) traegt dieselben werte.
+        self.show_debug_hud = False
         # apoapsis/periapsis-marker auf der prädiktionslinie (vom predictor
         # geliefert, hier nur gezeichnet).
-        # Die alte debug-textwand. Standardmaessig aus -- das spieler-HUD
-        # (spacesim/ui/hud/) traegt ihre werte seit Phase 4.
-        self.show_debug_hud = False
         self.show_apsis_markers = True
         self.apsis_marker_radius_px = 5.0
         # Die marker blenden aus, wenn die bahn AM SCHIRM klein wird (nicht
@@ -332,10 +295,9 @@ class Renderer(
         self.maneuver_path_width = 1.8
         self.maneuver_path_alpha = 0.85
         #: Wieviele punkte der GEPLANTEN linie je frame projiziert werden.
-        #: Gemessen bei 1920x1080: 900 punkte kosten 3.2 ms je frame, 400
-        #: noch 2.0 -- und die kette ist ein kegelschnitt, der bei 480
-        #: punkten schon glatt aussieht (die vorhersagelinie selbst zeichnet
-        #: adaptiv rund 200). Ueberschreibbar aus maneuver.path_draw_points.
+        #: Die kette ist ein kegelschnitt, der bei 480 punkten glatt aussieht;
+        #: jeder punkt kostet einen frame-transform. Ueberschreibbar aus
+        #: maneuver.path_draw_points.
         self.maneuver_max_draw_points = 480
         #: Grobgitter VOR der verfeinerung. Es muss nur die form tragen --
         #: die glattheit kommt aus `_hermite_refine_world`, und je weniger
@@ -360,16 +322,13 @@ class Renderer(
         # bis zu dieser größe und das icon übernimmt nahtlos bei identischer größe
         # (kein leerer frame, keine doppelzeichnung). Beim weiteren herauszoomen
         # bleibt das icon konstant groß (skaliert nicht mehr mit der zoom-stufe).
-        # 8.0 statt der frueheren 4.0: die marke traegt ein zellmuster, und
-        # bei 4 px waere eine zelle rund 1.1 px breit -- das ist kein muster
-        # mehr, sondern Matsch. Bei 8 px sind es 3.2 px je zelle.
-        # Die MINDESTgroesse -- zugleich die schwelle, unter der ein koerper
-        # komplett gegen die marke getauscht wird (siehe body_icon_max_radius_px
-        # und body_icon_size_influence fuer die obere seite der skalierung).
+        # 8 px, damit das zellmuster der marke lesbar bleibt (~3 px je zelle).
+        # Siehe body_icon_max_radius_px und body_icon_size_influence fuer die
+        # obere seite der skalierung.
         self.body_icon_min_radius_px = 8.0
 
         # --- die positions-marke (body_icon.py) ---------------------------
-        # `"pixel"` = das gesaete zellmuster, `"disc"` = die alte flache
+        # `"pixel"` = das gesaete zellmuster, `"disc"` = eine flache
         # scheibe. Die variante waehlt zwischen den beiden entwuerfen.
         self.body_icon_style = "pixel"
         self.body_icon_variant = body_icon.DEFAULT_VARIANT
@@ -379,16 +338,11 @@ class Renderer(
         self.body_icon_seed_offset = 0
         # Der detailgrad. Groesser = mehr zellen, NICHT groessere marke.
         self.body_icon_grid = body_icon.DEFAULT_GRID
-        # Bis hierher wird die marke ueber den echten koerper geblendet.
-        # Ohne dieses band poppt der tausch: eine pixelmarke sieht nun einmal
-        # anders aus als eine schattierte scheibe mit limbus, auch bei genau
-        # gleichem radius.
         # Die HOECHSTgroesse, bis zu der die marke nach dem PHYSISCHEN
         # koerper-radius wachsen darf (siehe body_icon_size_influence).
         self.body_icon_max_radius_px = 48.0
         # Wie stark der physische koerper-radius die marken-groesse skaliert.
-        # 0 = jede marke bleibt bei body_icon_min_radius_px (heutiges
-        # verhalten), 1 = die marke folgt voll dem log-skalierten radius,
+        # 0 = jede marke bleibt bei body_icon_min_radius_px, 1 = die marke folgt voll dem log-skalierten radius,
         # geklemmt auf [min, max]. Dazwischen linear gemischt.
         self.body_icon_size_influence = 0.0
         # Spanne der PHYSISCHEN koerper-radien im geladenen system (m), fuer
@@ -397,12 +351,10 @@ class Renderer(
         # nur, solange noch kein frame gezeichnet wurde (z.b. in tests, die
         # `_body_icon_draw_radius_px` direkt aufrufen).
         self._icon_radius_range_m = (1.0, 1.0)
-        # Das ueberblend-band endet bei body_icon_min_radius_px * diesem
-        # FAKTOR (nicht bei einem absoluten pixelwert): eine absolute grenze
-        # verlor zweimal den anschluss, als der radius von hand verstellt
-        # wurde (min=32 mit dem alten fade=13 stand verkehrt herum; min=16
-        # brauchte manuell nachgerechnete 25.6). Ein faktor > 1 kann das nicht
-        # mehr, weil er sich am jeweils aktuellen minimum bemisst.
+        # Bis zu body_icon_min_radius_px * diesem FAKTOR wird die marke ueber
+        # den echten koerper geblendet, damit der tausch nicht poppt. Ein
+        # faktor statt eines absoluten pixelwerts, damit das band beim
+        # verstellen des minimums immer darueber liegt.
         self.body_icon_fade_factor = 1.6
         self.body_icon_halo_alpha = 0.30
         # Breite der umriss-glaettung in pixeln. 0 = harte kante (und damit
@@ -426,15 +378,15 @@ class Renderer(
         # --- wann ein koerper seinen namen zeigt --------------------------
         # `"selected"` (voreinstellung): nur der angewaehlte koerper wird
         # angeschrieben -- dafuer IMMER, auch wenn er weit herausgezoomt nur
-        # noch als icon gezeichnet wird. `"zoom"` ist das alte verhalten
-        # (jeder koerper ab `body_label_min_radius_px` bildschirmradius),
+        # noch als icon gezeichnet wird. `"zoom"` beschriftet jeden koerper
+        # ab `body_label_min_radius_px` bildschirmradius,
         # `"both"` beides zusammen.
         self.body_label_mode = "selected"
         self.body_label_min_radius_px = 5.0
 
         # --- schiffs-grafik (ship_art.py) ---------------------------------
-        # Die vektor-zeichnung aus dem design-mockup. Sie wird wie der alte
-        # pfeil in FESTEN bildschirm-pixeln gezeichnet: das schiff behaelt
+        # Die vektor-zeichnung aus dem design-mockup. Sie wird wie der
+        # fallback-pfeil in bildschirm-pixeln gezeichnet: das schiff behaelt
         # seine groesse ueber jede zoomstufe hinweg, es ist bewusst KEINE
         # welt-geometrie (bei realistischem massstab waere es bei jeder
         # spielbaren zoomstufe kleiner als ein pixel).
@@ -502,7 +454,7 @@ class Renderer(
         # --- schwellen und regler der koerper-optik ----------------------
         # Unterhalb von `body_vector_min_radius_px` sieht man von facetten
         # ohnehin nichts, also wird gar nichts gebaut und der koerper bleibt
-        # die alte flache scheibe. Dazwischen blendet `u_fade` linear ein --
+        # eine flache scheibe. Dazwischen blendet `u_fade` linear ein --
         # ein harter schnitt bei einer zoomstufe waere als aufblitzen sichtbar.
         self.body_vector_style = True
         self.body_vector_min_radius_px = 11.0
@@ -510,13 +462,10 @@ class Renderer(
         # Detailleiter. Die stufe wird NICHT fest gewaehlt, sondern so, dass
         # eine facette immer ungefaehr `body_vector_facet_px` pixel breit ist.
         #
-        # Das ist nicht bloss sparsamkeit. Fest auf 'fine' sieht ein koerper
-        # mit 40 px radius aus wie ein golfball: 26 facetten ueber den
-        # durchmesser sind dort 3 px breit und werden zu grauem rauschen.
-        # Fest auf 'coarse' fehlt beim heranzoomen genau die zeichnung, um
-        # derentwillen das ganze gebaut wurde. Gemessen kostet der bau
-        # 2.0 / 4.0 / 13.0 ms und belegt 0.12 / 0.32 / 1.13 MB je koerper --
-        # einmalig, danach ist es reine zeichenarbeit.
+        # Fest auf 'fine' werden die facetten eines kleinen koerpers zu
+        # grauem rauschen, fest auf 'coarse' fehlt beim heranzoomen die
+        # zeichnung. Gebaut wird je stufe einmal, danach ist es reine
+        # zeichenarbeit.
         #
         # Der uebergang wird UEBERBLENDET (`body_vector_detail_blend`), sonst
         # springt das muster mitten in einer zoom-geste um.
@@ -537,9 +486,8 @@ class Renderer(
         # 0.0 waere die physikalisch exakte phase fuer eine draufsicht auf die
         # bahnebene -- dann steht der subsolare punkt aber IMMER auf dem rand,
         # die scheibenmitte liegt genau auf dem terminator, und jeder planet
-        # ist auf ewig halb. Gemessen bleibt davon wenig uebrig: die hellste
-        # stelle ist die staerkste verkuerzung, der koerper liest sich als
-        # dunkler fleck. 0.55 ist der wert des mockups und kippt das bild in
+        # ist auf ewig halb und liest sich als dunkler fleck. 0.55 ist der
+        # wert des mockups und kippt das bild in
         # eine dreiviertel-beleuchtung -- eine seite klar heller als die
         # andere, was der eigentliche zweck ist.
         self.body_light_tilt = 0.55
@@ -565,9 +513,8 @@ class Renderer(
         self._frame_debug_counter = 0
         self._frame_debug_period = 30
 
-        # reference-frame trajectorien-spuren (historie im frame-raum).
-        # diese ersetzen statische scripted-orbit-ellipsen und zeigen relative
-        # epizykel-bewegung für alle körper im aktiven frame.
+        # reference-frame trajectorien-spuren (historie im frame-raum): zeigen
+        # relative epizykel-bewegung für alle körper im aktiven frame.
         self.reference_trajectories_enabled = True
         self.reference_trajectories_max_points = 2400
         self.reference_trajectories_sample_step_s = 1.0
@@ -648,17 +595,11 @@ class Renderer(
         # bleibt die persistente HUD-textur gültig und muss weder neu gerastert
         # (font.render/Surface/tostring) noch hochgeladen werden.
         self._hud_cache_key = None
-        # GPU-helpers initialisieren (VBOs, programme, VAOs). Kein blanket-
-        # try/except mehr: ohne diese pipelines gibt es keinen fixed-function-
-        # fallback, ein fehler hier soll sofort sichtbar sein. Einzelne
-        # pipelines degradieren weiterhin kontrolliert (programm = None).
+        # GPU-helpers initialisieren (VBOs, programme, VAOs). Bewusst ohne
+        # try/except: ohne diese pipelines gibt es keinen fallback, ein fehler
+        # hier soll sofort sichtbar sein. Einzelne pipelines degradieren
+        # kontrolliert (programm = None).
         self._init_gpu_helpers()
-    
-
-
-
-    
-
 
     def set_plotting_frame(self, frame, label=None):
         self._plotting_frame = frame if frame is not None else IdentityReferenceFrame()
@@ -802,53 +743,8 @@ class Renderer(
         except Exception:
             pass
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     #: Wie weit das marken-quad ueber den radius hinausreicht (fuer den halo).
     ICON_QUAD_EXTENT = 2.6
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     #: Rasterstufe der pixelschrift und ihre kleinste brauchbare groesse --
     #: dieselben zahlen wie in ui/text.py::_role_pixel_size, und aus demselben
@@ -857,27 +753,8 @@ class Renderer(
     _DISPLAY_PIXEL_STEP = 5
     _DISPLAY_PIXEL_MIN = 10
 
-
-
-
-
     # Deckel des texturen-recyclings, siehe _acquire_label_texture.
     _LABEL_TEXTURE_POOL_MAX = 64
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     def _emit_render_benchmark(self, timings):
         if not self.render_benchmark_debug:
@@ -937,7 +814,6 @@ class Renderer(
         # Fuer alles, was tief im zeichenweg ein echtes zeit-delta braucht
         # (die abgasfahne des schiffs) und keinen eigenen parameter hat.
         self._frame_real_dt = max(0.0, float(real_dt))
-        self._dbg_ship_control = ship_control
         try:
             self._current_body_index_by_id = {id(body): idx for idx, body in enumerate(bodies)}
         except Exception:
@@ -1002,7 +878,7 @@ class Renderer(
             'draw_ms': 0.0,
             'cache_hit': False,
         }
-        
+
         # falls FXAA aktiviert ist, rendern nicht-schiff-körper in das FBO und
         # FXAA anwenden. Schiffe werden danach direkt in den haupt-framebuffer
         # gerendert damit predictor (ebenfalls im hauptpuffer gerendert) und
@@ -1060,8 +936,7 @@ class Renderer(
 
         # Ab hier wird direkt in den haupt-framebuffer gezeichnet (predictor,
         # schiff, HUD). Blending ist global aktiv (ctx.enable in _init_opengl,
-        # von _apply_fxaa wiederhergestellt); die alten projektions-resets der
-        # fixed-function-pipeline entfallen.
+        # von _apply_fxaa wiederhergestellt).
         if prediction_has_points and not prediction_drawn:
             self.draw_prediction(prediction_points, camera, predictor=predictor)
 
@@ -1079,14 +954,14 @@ class Renderer(
             self._draw_body(ship_body, camera)
             timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
-        # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
-        # grund wie die beschriftungen -- und vor ihnen, damit ein label nicht
-        # unter einem pfeil verschwindet.
         # Die geplante bahn und ihre griffe NACH dem FXAA-resolve: es sind
         # duenne linien und kleine pfeilspitzen, und ein kantenfilter
         # verschmiert genau die.
         self.draw_maneuver(camera, bodies)
 
+        # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
+        # grund wie die beschriftungen -- und vor ihnen, damit ein label nicht
+        # unter einem pfeil verschwindet.
         self._draw_selection_marker(camera)
 
         # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,
@@ -1098,86 +973,24 @@ class Renderer(
         hud_t0 = time.perf_counter()
         self._render_hud(camera, predictor)
         timings['hud_ms'] += (time.perf_counter() - hud_t0) * 1000.0
-        # Der buffer-swap liegt NICHT mehr hier, sondern in der hauptschleife
-        # (test.py -> present()). Overlays, die zuletzt zeichnen muessen
-        # (ImGui-devtools, spaeter das custom-HUD), brauchen die luecke
-        # zwischen "welt fertig gezeichnet" und "swap".
+        # Der buffer-swap liegt nicht hier, sondern in present() (von
+        # runtime/loop.py gerufen): overlays, die zuletzt zeichnen muessen
+        # (spieler-HUD, ImGui-devtools), brauchen die luecke zwischen "welt
+        # fertig gezeichnet" und "swap".
         timings['swap_or_present_ms'] = 0.0
         timings['overlay_ms'] = 0.0
         timings['frame_ms'] = (time.perf_counter() - frame_t0) * 1000.0
-        self._render_t0 = frame_t0
         # Ende von render(). Bezugspunkt fuer `overlay_ms` -- siehe present().
         self._render_end = time.perf_counter()
         self.last_frame_timings = timings
         self._emit_render_benchmark(timings)
 
-
-
-
-
-
-
-
-
-
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-
-
     def _render_hud(self, camera, predictor=None):
-        """Die alte debug-textwand unten links.
+        """Die debug-textwand unten links -- ein schneller rohwert-blick.
 
-        Seit Phase 4 standardmaessig AUS: ihre werte stehen jetzt im
-        spieler-HUD (spacesim/ui/hud/) bzw. im ImGui-entwicklerpanel (F1).
-        Sie bleibt als schneller rohwert-blick erhalten und laesst sich ueber
-        renderer.show_debug_hud in config.json wieder einschalten.
+        Standardmaessig AUS: ihre werte stehen im spieler-HUD (ui/hud/) bzw.
+        im ImGui-entwicklerpanel (F1). Einschalten ueber
+        renderer.show_debug_hud in config.json.
         """
         if not getattr(self, 'show_debug_hud', False):
             return
@@ -1228,10 +1041,9 @@ class Renderer(
                 )
 
         texts.append("[WASD] Move | [F] Unfollow | [Scroll] Zoom | [R] Cycle ref | [1]/[2] Frame mode | [T] Target overlay")
-        
+
         # Pygame Surface für HUD erstellen. Alle maße sind design-einheiten und
-        # werden über ui_px() auf die aktuelle fenstergröße skaliert; bei
-        # ui_scale == 1.0 ergeben sich exakt die bisherigen festwerte.
+        # werden über ui_px() auf die aktuelle fenstergröße skaliert.
         line_height = max(1, int(round(self.ui_px(16))))
         hud_width = max(1, int(round(self.ui_px(560))))
         margin = int(round(self.ui_px(10)))
@@ -1268,5 +1080,3 @@ class Renderer(
         # HUD in OpenGL rendern
         self._blit_pygame_surface(hud_surface, origin_x, origin_y)
         self._hud_cache_key = cache_key
-    
-        # Der poly-VBO ist größen-unabhängig und bleibt (samt VAOs) bestehen.

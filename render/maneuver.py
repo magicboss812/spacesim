@@ -70,14 +70,10 @@ class ManeuverDrawMixin:
     def _maneuver_project(self, xs, ys, ts, camera, camera_frame_xy):
         """(x, y, t) in weltkoordinaten -> (sx, sy) in schirmpixeln.
 
-        IN EINEM RUTSCH, ueber `to_this_frame_xy_arrays`. Punktweise war
-        genau der fehler, den `render/prediction.py` fuer die
-        vorhersagelinie schon einmal behoben hat: dort lagen 3000 einzelne
-        aufrufe bei 5.6 ms je frame, praktisch alles davon
-        Python-aufruf-overhead. Hier waren es 900 punkte je frame -- plus
-        400 weitere, solange ein griff gezogen wurde -- und das war die
-        gemessene ursache dafuer, dass die bildrate beim verstellen eines
-        knotens von 100 auf 40 fiel.
+        IN EINEM RUTSCH, ueber `to_this_frame_xy_arrays`, wie die
+        vorhersagelinie in `render/prediction.py`: punktweise waere es
+        praktisch nur Python-aufruf-overhead, und das je frame fuer
+        hunderte punkte.
 
         JEDER punkt wird zu SEINER eigenen zeit abgebildet, auch die
         zwischenpunkte der verfeinerung: ein bewegter oder drehender
@@ -94,8 +90,8 @@ class ManeuverDrawMixin:
             if transformed is not None:
                 frame_x, frame_y = transformed
         if frame_x is None:
-            # Ein rahmen ohne array-weg: punktweise, wie frueher. Kein
-            # fehlerfall -- nur der langsame zweig.
+            # Ein rahmen ohne array-weg: punktweise. Kein fehlerfall --
+            # nur der langsame zweig.
             frame_x = np.empty(len(ts), dtype=np.float64)
             frame_y = np.empty(len(ts), dtype=np.float64)
             for i in range(len(ts)):
@@ -118,23 +114,20 @@ class ManeuverDrawMixin:
         und dieser abstand waechst mit der eingestellten reichweite
         (`length_mult`); ein fester stride darauf macht die linie mit jeder
         verlaengerung kantiger, bis sie sichtbar aus geraden stuecken
-        besteht. Gemessen war der knick zwischen zwei punkten bei x2
-        reichweite und nahem zoom mehrere hundert pixel von der wahren bahn
-        entfernt.
+        besteht.
 
-        Der ausweg ist derselbe, den die vorhersagelinie nimmt: grob
+        Deshalb wie bei der vorhersagelinie: grob
         abtasten und die segmente per KUBISCHER HERMITE so weit
         unterteilen, wie eine flachheitsschranke in PIXELN es verlangt
         (`_hermite_refine_world`, `_prediction_error_budget`). Die
         aufloesung haengt damit am bildschirm statt an der linienlaenge --
-        laenger heisst nicht mehr grober, und die kosten bleiben gedeckelt,
+        laenger heisst nicht grober, und die kosten bleiben gedeckelt,
         weil unsichtbare segmente gar nicht erst unterteilt werden und das
         budget (`max_points`) gleichmaessig gedrueckt statt abgeschnitten
         wird.
 
-        Rueckgabe: ein (n,3)-array `(sx, sy, t_abs)`. Ein array, keine
-        tupel-liste: der zeichenweg macht daraus sofort wieder ein array,
-        und der marker-zug sucht mit `argmin` darin statt in einer schleife.
+        Rueckgabe: ein (n,3)-array `(sx, sy, t_abs)` -- der zeichenweg
+        braucht ein array, und der marker-zug sucht mit `argmin` darin.
         """
         try:
             count = len(points)
@@ -227,11 +220,10 @@ class ManeuverDrawMixin:
         # -- waehrend eines MARKER-zugs: die BASISlinie in schirmkoordinaten,
         #    damit der marker an ihr entlang geschoben werden kann.
         #
-        #    NUR beim marker-zug, nicht bei jedem zug. Frueher hing das an
-        #    `maneuver_drag_active`, das auch ein GRIFF setzt -- und ein
-        #    griff verschiebt den knoten gar nicht, er aendert nur sein
-        #    delta-v. Die zusaetzlichen 400 projektionen je frame liefen
-        #    also genau waehrend der eingabe, bei der die bildrate einbrach.
+        #    NUR beim marker-zug (`maneuver_drag_curve`), nicht bei jedem
+        #    zug (`maneuver_drag_active`): ein griff verschiebt den knoten
+        #    nicht, er aendert nur sein delta-v, und braucht die zusaetzlichen
+        #    projektionen nicht.
         if getattr(self, 'maneuver_drag_curve', False):
             predictor = getattr(self, '_maneuver_predictor', None)
             base = None

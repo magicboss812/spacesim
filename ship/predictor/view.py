@@ -9,8 +9,7 @@ import time
 
 import numpy as np
 
-from physics.vec import Vec2
-from physics.kernels import POINT_COLUMNS, _empty_points, _widen_points
+from physics.kernels import _empty_points
 from physics.kernels.apsis import _find_apsis_markers_numba
 
 
@@ -63,13 +62,10 @@ class ViewMixin:
 
             # Neu rechnen lohnt nur, wenn der zoom die WIRKSAME punktdichte
             # veraendert. Mit angepinntem horizont (length = num_points *
-            # precision, siehe test.py) klemmt _horizon_spacing_floor() die
-            # zoom-verfeinerung bei JEDEM zoomwert auf exakt `precision` --
-            # der synchrone _compute_full lieferte dann eine bit-identische
-            # linie und kostete trotzdem die volle rechenzeit im hauptthread,
-            # einmal pro mausrad-raste. Das war der massive fps-einbruch beim
-            # zoomen. Aendert der zoom die dichte wirklich (nicht
-            # angepinnter horizont), bleibt das verhalten wie zuvor.
+            # precision, siehe ship/horizon.py) klemmt _horizon_spacing_floor()
+            # die zoom-verfeinerung bei JEDEM zoomwert auf exakt `precision`;
+            # ein synchroner _compute_full lieferte dann eine bit-identische
+            # linie zum vollen preis im hauptthread.
             try:
                 eff_old = float(self._effective_precision())
             except Exception:
@@ -182,13 +178,10 @@ class ViewMixin:
             zoom_precision = self.target_screen_step_px / max(self._view_scale, 1e-30)
             effective = min(effective, max(self.min_precision, zoom_precision))
 
-        # HORIZONT VOR PUNKTDICHTE. Ohne diese schranke frisst das zoom-
-        # abhaengige verfeinern den horizont auf: gemessen blieb bei
-        # view_scale 2e-5 noch 10 % der vorhersage uebrig, bei 2e-4 noch
-        # 1 %. Auf dem schirm sieht das aus, als wuerde die linie an der
-        # ersten bildkante abgeschnitten und komme nie zurueck -- samt
-        # verschwundener Ap/Pe-marker und leerem CLOSEST/T-CA, weil beide
-        # ueber dieselbe punkteliste laufen.
+        # HORIZONT VOR PUNKTDICHTE. Ohne diese schranke fraesse das zoom-
+        # abhaengige verfeinern den horizont auf: die linie endete an der
+        # ersten bildkante, samt verschwundener Ap/Pe-marker und leerem
+        # CLOSEST/T-CA, weil beide ueber dieselbe punkteliste laufen.
         #
         # Bei erreichtem budget wird also GROEBER gezeichnet statt KUERZER.
         # Das ist die richtige seite des tauschs: die groebere teilung fehlt
@@ -238,12 +231,9 @@ class ViewMixin:
         die kurve, die wirklich da liegt, statt die zuletzt ANGEFORDERTE
         laenge fuer sie zu halten. Beim zeitraffer-stufenwechsel fallen die
         beiden fuer ein paar frames auseinander: `set_length()` stellt schon
-        auf 4x, waehrend der halt noch die alte 1x-kurve zeigt (die neue
-        entsteht im hintergrund, siehe _request_hold_recompute). Mit
-        `self.length` als bezug waeren davon 1/4 gezeichnet worden -- die
-        linie waere auf 25 % zusammengefallen und beim einwechseln wieder
-        aufgesprungen. Gemessen: 25.0 % / 24.9 % / 24.8 % auf den drei
-        aufwaerts-wechseln.
+        auf 4x, waehrend der halt noch die alte 1x-kurve zeigt (siehe
+        _request_hold_recompute); mit `self.length` als bezug fiele die
+        linie so lange auf ein viertel zusammen.
 
         Gemessen wird in der MITTE der kurve: points[0] ist im halt das
         schiff selbst und traegt ein absichtlich verkuerztes erstes
@@ -265,21 +255,19 @@ class ViewMixin:
         if spacing > 0.0 and math.isfinite(spacing):
             q = max(1, int(getattr(self, '_display_quantum', 8)))
             # EIN QUANTUM SPIELRAUM, sonst kostet der dauerhaft gesetzte clip
-            # das kurvenende. test.apply_predictor_horizon() ruft
-            # set_display_length(drawn) inzwischen in JEDEM frame, auch wenn
-            # die kurve genau auf `drawn` gerechnet wurde; `spacing` ist aber
-            # eine EINZELNE sehne aus der kurvenmitte, also nur ein schaetzer
-            # fuer den mittleren abstand. Ohne spielraum kippt der vergleich
-            # bei der kleinsten abweichung nach unten, und die rundung auf das
-            # quantum schnitt dann bis zu q punkte ab -- bei 8 punkten x 1 Mm
-            # grundabstand acht sichtbar fehlende Mm am linienende.
+            # das kurvenende. HorizonPolicy.apply() ruft
+            # set_display_length(drawn) in JEDEM frame, auch wenn die kurve
+            # genau auf `drawn` gerechnet wurde; `spacing` ist aber eine
+            # EINZELNE sehne aus der kurvenmitte, also nur ein schaetzer. Ohne
+            # spielraum kippte der vergleich bei der kleinsten abweichung, und
+            # die rundung auf das quantum schnitte bis zu q punkte ab.
             if limit >= spacing * (n - 1 - q):
                 return None
             count = int(math.ceil(limit / spacing)) + 1
             count = int(round(count / q)) * q
             return max(2, min(n, count))
 
-        # Entartete kurve (stillstand, NaN) -- alter weg als rueckfall.
+        # Entartete kurve (stillstand, NaN) -- rueckfall ueber `length`.
         total = self.length
         if total is None or total <= 0.0:
             total = float(self.num_points) * float(self.precision)
@@ -419,28 +407,25 @@ class ViewMixin:
                 int(self.apsis_max_markers),
                 # Der selbst vorangestellte kopf ist die WELT-position des
                 # schiffs und gehoert nicht zu dieser kurve -- siehe den
-                # trend-scan im kernel. Das gilt jetzt in BEIDEN betriebsarten
-                # (echtzeit wie halt), weil beide dieselbe mechanik benutzen;
-                # ohne kopf steht das flag auf False und der aufruf ist
-                # bit-identisch zu vorher.
+                # trend-scan im kernel. Das gilt in BEIDEN betriebsarten
+                # (echtzeit wie halt), weil beide dieselbe mechanik benutzen.
                 1 if bool(getattr(self, '_synthetic_head', False)) else 0,
                 # OB DIE TANGENTEN-SPALTEN BRAUCHBAR SIND, WIRD HIER
                 # ENTSCHIEDEN, NICHT IM KERNEL. Der marker wird auf derselben
                 # kubik plaziert, die der renderer zeichnet -- die braucht die
                 # geschwindigkeits-spalten. Die sehnen-kernel (ASPI, blankes
                 # RK4) schreiben dort absichtlich NaN, und im kernel laesst
-                # sich das nicht abfragen: er ist `fastmath=True`, und
-                # gemessen liefern dort SOWOHL `math.isfinite(nan)` ALS AUCH
-                # `nan == nan` den wert True. Also numpy, ausserhalb.
+                # sich das nicht abfragen: er ist `fastmath=True`, dort
+                # liefern SOWOHL `math.isfinite(nan)` ALS AUCH `nan == nan`
+                # den wert True. Also numpy, ausserhalb.
                 1 if self._points_have_tangents(pts) else 0,
             )
             self._apsis_markers = markers[:int(count)].copy()
         except Exception as exc:
-            # Dieser fang hat schon einen uebersetzungsfehler des kernels
-            # verschluckt (readonly-notizblock, siehe _no_body_memo): die
-            # marker verschwanden im spiel ohne jede meldung. Ein leeres
-            # ergebnis ist ein voellig normaler zustand -- eine AUSNAHME ist
-            # es nicht, also wird sie einmal gemeldet.
+            # Hier landet auch ein uebersetzungsfehler des kernels (etwa ein
+            # readonly-notizblock, siehe _no_body_memo), der die marker sonst
+            # stumm verschwinden liesse. Ein leeres ergebnis ist normal --
+            # eine AUSNAHME nicht, also wird sie einmal gemeldet.
             if not getattr(self, "_apsis_scan_error_logged", False):
                 self._apsis_scan_error_logged = True
                 try:
@@ -492,7 +477,7 @@ class ViewMixin:
         # `linspace` ueber die liste tut genau das: die drei punkte eines
         # tripels liegen dann nicht mehr eine, sondern mehrere stuetzweiten
         # auseinander -- und weil der boden mit c^4 geht, kommt ein vielfaches
-        # heraus (gemessen 120 m statt 7.6 m auf derselben bahn). Gezogen
+        # heraus. Gezogen
         # werden deshalb ANFANGSINDIZES, und jedes tripel bleibt benachbart.
         triples = n - 2
         if triples < 1:
@@ -535,8 +520,7 @@ class ViewMixin:
     def get_display_length(self):
         # The true traced horizon: length pins it, but the num_points ceiling
         # can clip it when spacing is finer than length/num_points. Report what
-        # is actually integrated, not length * coarsen (which only held under
-        # the old precision<->horizon coupling).
+        # is actually integrated.
         if self.length is None:
             return None
         eff = self._effective_precision()
@@ -550,8 +534,7 @@ class ViewMixin:
             raise ValueError("precision must be > 0")
         self.precision = meters
         # Die gehaltene kurve traegt den ALTEN punktabstand. Ohne diesen
-        # vermerk schluckt der zeitraffer-halt die umstellung vollstaendig --
-        # gemessen: punktzahl und richtung aendern sich um exakt 0.
+        # vermerk schluckte der zeitraffer-halt die umstellung vollstaendig.
         #
         # WEICH: der abstand ist kosmetisch, die kurve bleibt bis zum
         # eintreffen der neuen richtig. Kein grund, den hauptthread
@@ -595,13 +578,12 @@ class ViewMixin:
         grund wechselt, der die kurve entwertet -- der `P`-umschalter etwa.
 
         WEICH ist er, wenn das budget nur MITWAECHST, weil der horizont sich
-        geaendert hat (siehe `apply_predictor_horizon` in test.py). Die kurve,
-        die dann dasteht, ist geometrisch weiterhin richtig; sie hat bloss zu
-        wenige oder zu viele punkte. Genau dieselbe lage wie bei
-        `set_length()` -- und dort hat der harte weg im zeitraffer 34-82 ms
-        im hauptthread gekostet, weil `update()` sofort synchron neu rechnete
-        (§17). Der zeitraffer-schritt verstellt den horizont bei JEDEM
-        stufenwechsel, das budget also mit.
+        geaendert hat (siehe `HorizonPolicy.apply` in ship/horizon.py). Die
+        kurve, die dann dasteht, ist geometrisch weiterhin richtig; sie hat
+        bloss zu wenige oder zu viele punkte -- dieselbe lage wie bei
+        `set_length()`. Ein harter reset liesse `update()` sofort synchron
+        neu rechnen, und der zeitraffer-schritt verstellt den horizont bei
+        JEDEM stufenwechsel, das budget also mit.
         """
         self.num_points = max(0, int(count))
         if not soft:

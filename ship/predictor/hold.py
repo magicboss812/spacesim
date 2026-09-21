@@ -9,8 +9,7 @@ import math
 
 import numpy as np
 
-from physics.vec import Vec2
-from physics.kernels import POINT_COLUMNS, _empty_points, _widen_points
+from physics.kernels import _empty_points
 from physics.kernels.propagate import _compute_distance_points_rkn_numba
 
 
@@ -95,36 +94,17 @@ class HoldMixin:
         # Die schwerkraft wird HERAUSGERECHNET, nicht mit einer schranke
         # ueberdeckt.
         #
-        # Frueher stand hier `allowed_speed = max(allowed, 4 * |g| * dt)`: der
-        # gesamte geschwindigkeitssprung wurde gegen eine schranke von der
-        # groesse des schwerkraft-anteils gehalten. Fern vom planeten geht das
-        # auf, NAHE DER PERIAPSIS nicht: dort ist |g| = 8.1 m/s^2, ueber einen
-        # 2-sekunden-schritt also 16 m/s schwerkraft gegen 6.7 m/s vollschub
-        # je bild -- die schranke lag bei 65 m/s und der schub verschwand
-        # vollstaendig darunter. Die vorhersagelinie wurde in genau dem
-        # moment nicht mehr angefordert, in dem sie sich am staerksten
-        # aendert, und sprang erst wieder an, wenn das schiff weit genug weg
-        # war. Das ist das ruckartige nachziehen nahe der periapsis.
-        #
-        # Richtig ist der REST: was bleibt von der geschwindigkeitsaenderung
-        # uebrig, wenn man abzieht, was die schwerkraft erklaert. Gemessen auf
-        # einer bahn mit e = 0.7 um die Erde, je bild:
-        #
-        #     periapsis   gleitflug 0.023 m/s   |   schub 6.69 m/s
-        #     apoapsis    gleitflug 0.000 m/s   |   schub 6.67 m/s
-        #
-        # Der schub steht damit ueberall gleich deutlich da (faktor ~290 ueber
-        # dem grundrauschen), und die feste toleranz von 1 m/s trennt beides
-        # sauber. Nebenbei faengt der test auch den fall, in dem schub der
-        # schwerkraft ENTGEGEN zeigt und die summe klein ist: bei nu = 90 Grad
-        # betraegt der gesamtsprung 0.98 m/s -- unter der toleranz -- der rest
-        # aber 6.66 m/s.
+        # Gemessen wird der REST: was von der geschwindigkeitsaenderung
+        # uebrig bleibt, wenn man abzieht, was die schwerkraft erklaert. Eine
+        # schranke von der groesse des schwerkraft-anteils verschluckte nahe
+        # der periapsis den schub vollstaendig. Der rest trennt gleitflug und
+        # schub ueberall mit der festen toleranz, auch wenn der schub der
+        # schwerkraft entgegen zeigt und die summe klein ist.
         #
         # Die restschranke muss mit der KRUEMMUNG von g mitwachsen, sonst
-        # feuert sie im zeitraffer: `g * dt` erklaert einen 28-stunden-schritt
-        # nicht mehr. `|g_jetzt - g_vorher| * dt` waechst genau mit diesem
-        # fehler mit -- gemessen im gleitflug von 0.5 s bis 100800 s (7 d/s)
-        # bleibt der rest bei jedem schritt unter der schranke.
+        # feuert sie im zeitraffer: `g * dt` erklaert einen langen schritt
+        # nicht mehr, `|g_jetzt - g_vorher| * dt` waechst genau mit diesem
+        # fehler mit.
         residual_speed = delta_speed
         if world is not None:
             try:
@@ -146,19 +126,15 @@ class HoldMixin:
                 # sind 28 stunden je bild, auf einer 2-stunden-bahn), dann
                 # sind anfangs- und endwert unkorreliert: sie koennen zufaellig
                 # dicht beieinander liegen, die schranke faellt zusammen und
-                # der ganz normale gleitflug reisst sie. Gemessen auf der
-                # e = 0.7-bahn bei 100800 s je schritt: rest 2.46e3 m/s gegen
-                # eine schranke von 1.20e3 m/s -- ein bild von sechs, ohne
-                # jeden schub.
+                # der ganz normale gleitflug reisst sie.
                 #
                 # Oberhalb der bahn-zeitskala (`sqrt(r/|g|)`, auf der
                 # kreisbahn T/2pi -- dieselbe groesse, die den zeitraffer
-                # deckelt) traegt der vergleich also nichts mehr, und es
-                # bleibt die alte, grosszuegige schranke. Das ist die
-                # richtige seite des irrtums: schub gibt es dort ohnehin
-                # nicht (`test.py` sperrt ihn oberhalb von
-                # `realtime_warp_max`), eine verpasste anforderung kostet
-                # nichts -- eine falsche zerreisst die gehaltene kurve.
+                # deckelt) bleibt deshalb die grosszuegige schranke
+                # `4 * |g| * dt`. Das ist die richtige seite des irrtums: schub
+                # gibt es dort ohnehin nicht (runtime/loop.py sperrt ihn
+                # oberhalb von `realtime_warp_max`), eine verpasste anforderung
+                # kostet nichts -- eine falsche zerreisst die gehaltene kurve.
                 resolves_orbit = True
                 try:
                     t_char = self._characteristic_timescale(world, ship)
@@ -188,11 +164,9 @@ class HoldMixin:
 
         # Schub ist KEIN bruch der bahn, sondern ihre stetige veraenderung: die
         # gezeichnete linie ist danach ein paar dutzend millisekunden alt, aber
-        # nicht falsch. Sie deshalb zu leeren und synchron neu zu rechnen kostet
-        # 59 ms pro frame (voller sonnensystem-satz) und verwarf zugleich jedes
-        # asynchrone ergebnis, weil die version im naechsten frame schon wieder
-        # weiter war. Ein echter POSITIONS-sprung (teleport, reparenting) ist
-        # dagegen ein bruch -- dort bleibt der harte weg unten.
+        # nicht falsch. Sie zu leeren und synchron neu zu rechnen waere teuer
+        # und verwuerfe jedes asynchrone ergebnis. Ein echter POSITIONS-sprung
+        # (teleport, reparenting) ist dagegen ein bruch -- dort bleibt der harte weg unten.
         if reason == "velocity" and self._request_thrust_recompute(ship, world):
             self._remember_ship_state(ship, world)
             if self.debug:
@@ -287,7 +261,7 @@ class HoldMixin:
 
         Rueckgabe: die zahl der vorn verbrauchten stuetzstellen, oder None,
         wenn es nicht geht (keine/zu kurze kurve, zeit abgelaufen) -- dann
-        muss der aufrufer den alten weg gehen.
+        muss der aufrufer starr verschieben oder neu rechnen.
 
         Die vorhersage ist eine eigenschaft der BAHN, nicht des augenblicks.
         Ohne schub bleibt sie stehen und das schiff rutscht an ihr entlang.
@@ -379,10 +353,9 @@ class HoldMixin:
         head[0, 1] = float(ship.position.y)
         head[0, 2] = now
         if points.shape[1] > 3:
-            # Der kopf IST das schiff -- also auch seine tangente. Frueher
-            # wurde die der naechsten stuetzstelle uebernommen; damit haette
-            # das erste (stetig kuerzer werdende) teilstueck eine tangente
-            # getragen, die zur falschen stelle der bahn gehoert.
+            # Der kopf IST das schiff -- also auch seine tangente; sonst
+            # truege das erste (stetig kuerzer werdende) teilstueck eine
+            # tangente, die zu einer anderen stelle der bahn gehoert.
             head[0, 3] = float(getattr(ship.velocity, 'x', 0.0))
             head[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
 
@@ -399,30 +372,22 @@ class HoldMixin:
         DER REGELFALL IST DAS VERBRAUCHEN, NICHT DAS VERSCHIEBEN. Erste wahl
         ist `_advance_points_along_curve` -- die kurve bleibt stehen und das
         schiff rutscht an ihr entlang. Die starre verschiebung unten ist nur
-        noch der fallback fuer den rolling-modus und fuer eine kurve, deren
+        der fallback fuer den rolling-modus und fuer eine kurve, deren
         zeit abgelaufen ist (dann steht ohnehin gleich eine neuberechnung an).
 
-        WARUM NICHT MEHR STARR. Die verschiebung zieht die GANZE kurve um den
-        kopfversatz mit, und der ist nicht der versatz je frame, sondern der
-        ueber das ganze alter des schnappschusses -- `max_async_wall_age`
-        laesst 1.5 s echtzeit zu, bei 60 s/s also bis zu 90 sim-sekunden
-        bahnbewegung. Der referenzkoerper wandert dabei NICHT mit. Was bleibt,
-        ist die RELATIVbewegung schiff<->referenzkoerper: die ganze kegel-
-        schnittbahn liegt um diesen betrag seitlich neben dem koerper, und
-        damit steht die periapsis-hoehe falsch. Weil das alter mit der
-        rechenlatenz schwankt, schwankt der angezeigte Pe/Ap-abstand mit --
-        das ist das hin- und herspringen der marker in echtzeit, und es
-        verschwand im zeitraffer nur deshalb, weil dort der halt schon
-        verbraucht statt verschoben hat.
+        WARUM NICHT STARR. Die verschiebung zoege die GANZE kurve um den
+        kopfversatz mit, und der ist der versatz ueber das ganze alter des
+        schnappschusses. Der referenzkoerper wandert dabei NICHT mit: die
+        kegelschnittbahn laege um die relativbewegung seitlich neben dem
+        koerper, und die angezeigte Pe/Ap-hoehe schwankte mit der
+        rechenlatenz.
 
         Wird doch starr verschoben, muss die ZEITSPALTE mitwandern. Sie ist
         bei der berechnung auf die damalige `world.time` bezogen worden
-        (_compute_from_snapshot). Ohne die zeit-korrektur faellt die zeitbasis
-        pro frame um ein sim_dt zurueck (gemessen 900-2700 s). Der renderer
-        waehlt daraus ueber _world_to_screen_xy_at_time die epoche des
-        plot-frames: bei einem bewegten frame-ursprung (body-centred
-        non-rotating) landet dieselbe weltposition dadurch neben dem schiff --
-        gemessen 54.5 px bei 2e-6 px/m, exakt der drift von Erde ueber 900 s.
+        (_compute_from_snapshot). Ohne die zeit-korrektur fiele die zeitbasis
+        pro frame um ein sim_dt zurueck, und der renderer (der daraus ueber
+        _world_to_screen_xy_at_time die epoche des plot-frames waehlt)
+        setzte die linie bei einem bewegten frame-ursprung neben das schiff.
         Der betrag wird in `_points_time_offset` mitgeschrieben, weil die
         punktzeiten damit nicht mehr zum schnappschuss passen und jeder, der
         aus ihnen eine lokale zeit zurueckrechnet, das wissen muss.
@@ -436,15 +401,11 @@ class HoldMixin:
         except Exception:
             st = None
 
-        # IM ZEITRAFFER NICHT STARR VERSCHIEBEN. Diese methode zieht sonst
-        # die ganze kurve um den kopfversatz mit. Bei gehaltener kurve ist
-        # dieser versatz gross (das gespeicherte ergebnis ist mehrere frames
-        # alt und das schiff je frame ~1e8 m weiter), die kurve wuerde also
-        # jeden frame quer durchs bild wandern -- und genau das macht sie
-        # anschliessend fuer den halt unbrauchbar, weil ihre zeitspalte dann
-        # nicht mehr zu ihrer geometrie passt (gemessen: kopfabstand 3.2e6 m
-        # statt der punktweite 1e6 m, obwohl die echte abweichung zwischen
-        # welt und predictor nur 37 m je frame betraegt).
+        # IM ZEITRAFFER NICHT STARR VERSCHIEBEN. Bei gehaltener kurve ist
+        # der kopfversatz gross (das ergebnis ist mehrere frames alt), die
+        # kurve wanderte jeden frame quer durchs bild, und ihre zeitspalte
+        # passte danach nicht mehr zu ihrer geometrie
+        # (der kopf wird stattdessen per taper angesetzt).
         if (self._hold_active() and np is not None
                 and isinstance(self.points, np.ndarray)
                 and self.points.ndim == 2 and self.points.shape[0] >= 2
@@ -461,7 +422,7 @@ class HoldMixin:
         #
         # Der rolling-modus fuehrt in `_roll_states` einen zweiten, parallel
         # gehaltenen zustand mit, der punktweise zu `points` passen muss --
-        # der bleibt beim alten weg. Alles andere verbraucht.
+        # der verschiebt weiterhin starr. Alles andere verbraucht.
         if not self.rolling_mode and st is not None:
             if self._advance_points_along_curve(ship, st) is not None:
                 return
@@ -502,7 +463,7 @@ class HoldMixin:
             except Exception:
                 t0 = 0.0
             # zeitbasis mitziehen (siehe docstring); ohne world.time bleibt sie
-            # wie bisher stehen.
+            # stehen.
             dt = (st - t0) if st is not None else 0.0
             if not math.isfinite(dt):
                 dt = 0.0
@@ -596,9 +557,9 @@ class HoldMixin:
 
         EINSCHALTEN dagegen uebernimmt eine kurve, die der asynchrone weg bis
         zum vorigen frame in jedem frame frisch gehalten hat -- sie ist also
-        genau so gut wie eine neu gerechnete. Hart zu entwerten kostete dort
-        gemessen 14.1 ms im hauptthread beim schritt 10m/s -> 1h/s (der
-        stufe, bei der der halt anspringt), gegen 0.2 ms in den nachbarn.
+        genau so gut wie eine neu gerechnete; hart zu entwerten waere ein
+        synchroner neuaufbau im hauptthread genau an der stufe, an der der
+        halt anspringt.
         Also weich: neu ANFORDERN und derweil weiterhalten, wie beim
         stufenwechsel (siehe _request_hold_recompute).
         """
@@ -658,17 +619,12 @@ class HoldMixin:
     def _hold_advance(self, ship, world):
         """Kurve VERBRAUCHEN statt neu rechnen. True = frame ist erledigt.
 
-        WARUM. Ohne halt ruft update() bei jedem frame eine neuberechnung an
-        und `_anchor_first_point` schiebt die gespeicherte kurve STARR so,
-        dass ihr kopf auf dem schiff sitzt. Bei 1m/s ist der versatz je frame
-        winzig. Bei 7d/s rueckt das schiff je frame um ~10 000 sim-sekunden
-        bahn weiter -- die ganze kurve wird also um diesen betrag quer
-        verschoben und springt zurueck, sobald ein frisch gerechnetes
-        ergebnis eintrifft. Genau dieser wechsel ist das "zittern" der linie
-        und der Ap/Pe-marker.
+        Die vorhersage ist eine eigenschaft der BAHN, nicht des
+        augenblicks. Im zeitraffer rueckt das schiff je frame weit vor; eine
+        je frame neu gerechnete und starr ans schiff geschobene kurve
+        zitterte quer zur bahn.
 
-        Richtig ist: die vorhersage ist eine eigenschaft der BAHN, nicht des
-        augenblicks. Ohne schub bleibt sie stehen und das schiff rutscht an
+        Ohne schub bleibt sie stehen und das schiff rutscht an
         ihr entlang. Also werden vorn die punkte weggeworfen, deren zeit
         bereits vergangen ist (die zeitspalte ist absolute sim-zeit, das ist
         exakt und per suchlauf billig), und der rest bleibt, wo er ist.
@@ -716,8 +672,7 @@ class HoldMixin:
         # abgebrochen wird: sonst rastet der halt ein. Bricht er ab, bevor der
         # schnitt steht, bleibt die kurve stehen, waehrend das schiff
         # weiterfliegt -- der kopfabstand waechst dann jeden frame weiter
-        # (gemessen 6.4e5 -> 3.2e6 m in fuenf frames) und die
-        # abbruchbedingung ist von da an dauerhaft erfuellt.
+        # und die abbruchbedingung ist von da an dauerhaft erfuellt.
         drop = self._advance_points_along_curve(ship, now)
         if drop is None:
             return False
@@ -734,14 +689,12 @@ class HoldMixin:
             missing = int(budget) - int(self.points.shape[0])
             # JE FRAME NUR EIN STUECK. Normal sind das die punkte, die vorn
             # gerade verbraucht wurden (bei 7d/s rund 170) -- die schranke
-            # merkt man dort nicht. Sie greift, wenn das BUDGET springt:
-            # `apply_predictor_horizon` zieht mit dem zeitraffer-schritt auch
-            # das punktbudget mit, beim wechsel 7d/s -> 30d/s von 10 000 auf
-            # 40 000. Die fehlenden 30 000 punkte in EINEM frame anzustueckeln
-            # kostete gemessen 40.3 ms im hauptthread (nachbarframes 0.3 ms) --
-            # genau der ruckler, den §17 fuer set_length schon beseitigt hat.
-            # Verteilt ueber ein paar frames faellt er nicht auf, und die
-            # bestellte neue kurve ist ohnehin schon unterwegs.
+            # merkt man dort nicht. Sie greift, wenn das BUDGET springt
+            # (der zeitraffer-schritt zieht in ship/horizon.py das
+            # punktbudget mit): zehntausende punkte in EINEM frame
+            # anzustueckeln waere ein ruckler im hauptthread. Verteilt ueber
+            # ein paar frames faellt es nicht auf, und die bestellte neue
+            # kurve ist ohnehin schon unterwegs.
             cap = int(getattr(self, 'hold_extend_max_points', 1000) or 0)
             if cap > 0 and missing > cap:
                 missing = cap
@@ -756,12 +709,9 @@ class HoldMixin:
         # LAEUFT SCHON EINE NEUE KURVE, IST DIE SCHWELLE EINE ANDERE.
         #
         # Sie misst den vorrat am ANGEPEILTEN budget. Waechst das budget
-        # sprunghaft -- der zeitraffer-schritt zieht ueber
-        # `apply_predictor_horizon` den horizont UND das punktbudget mit, beim
-        # wechsel 7d/s -> 30d/s von 10 000 auf 40 000 --, dann rutscht die
-        # noch vollstaendige kurve allein durch die neue bezugsgroesse unter
-        # die schwelle, und der halt rechnet SYNCHRON nach: gemessen 43.8 ms
-        # im hauptthread gegen 0.3 ms in den nachbarframes.
+        # sprunghaft (zeitraffer-schritt, ship/horizon.py), rutschte die noch
+        # vollstaendige kurve allein durch die neue bezugsgroesse unter die
+        # schwelle, und der halt rechnete SYNCHRON nach.
         #
         # Ist der ersatz bereits unterwegs (`_hold_pending_swap`), kann die
         # linie gar nicht auslaufen -- dann genuegt eine absolute
@@ -781,7 +731,7 @@ class HoldMixin:
         # stuetzstelle, denn die erste ist ja das schiff selbst. Regulaer
         # liegt es hoechstens eine punktweite davor; der spielraum darueber
         # faengt ab, dass welt und predictor die planeten nicht voellig
-        # gleich propagieren (gemessen ~37 m je frame).
+        # gleich propagieren (einige dutzend meter je frame).
         if points.shape[0] >= 3:
             span = math.hypot(float(points[2, 0]) - float(points[1, 0]),
                               float(points[2, 1]) - float(points[1, 1]))
@@ -795,21 +745,13 @@ class HoldMixin:
             #
             # Die pruefung darueber misst den abstand ENTLANG der bahn und
             # laesst vier punktweiten zu -- an einer seitlichen abweichung
-            # geht sie deshalb blind vorbei. Und der vorrat laeuft nie leer,
-            # weil `_hold_extend_tail` hinten nachlegt: gemessen 0 volle
-            # neuberechnungen in 3000 frames. Die gehaltene kurve wurde also
-            # EINMAL gerechnet und danach nie wieder mit der welt verglichen.
+            # geht sie blind vorbei. Und der vorrat laeuft nie leer, weil
+            # `_hold_extend_tail` hinten nachlegt; ohne diese pruefung wuerde
+            # die gehaltene kurve nie wieder mit der welt verglichen.
             #
-            # Welt und predictor rechnen aber nicht dasselbe (andere
-            # schrittweiten, und die welt setzt die planeten ueber
-            # `bodies.position_at_time` mit konstanter winkelrate, der
-            # predictor mit echtem Kepler-solve). Der unterschied summiert
-            # sich. Gemessen in einer erdumlaufbahn (rp 2e7 m, e = 0.3) bei
-            # 1 h/s ueber 2.5 umlaeufe: das schiff steht am ende **3.9e5 m
-            # = 1.96 % des bahnradius** neben der linie, und in einer
-            # sonnenumlaufbahn ueber 350 tage 4.2e5 m. Das ist genau das
-            # "schiff loest sich von der linie" -- und es verschwindet beim
-            # verlassen des zeitraffers, weil `set_hold(False)` hart entwertet.
+            # Welt und predictor rechnen nicht bitgleich (andere
+            # schrittweiten), der unterschied summiert sich ueber viele
+            # umlaeufe zu einem sichtbaren versatz zwischen schiff und linie.
             #
             # Gemessen wird SENKRECHT zur kurve (die laengsrichtung ist
             # bereits durch den kopf abgedeckt) an den beiden ersten echten
@@ -834,9 +776,7 @@ class HoldMixin:
             # `_hold_pending_swap`: solange ein auftrag laeuft, wird kein
             # zweiter gestellt. Damit stellt sich die auffrischrate von
             # selbst auf "eine je rechendauer" ein -- dieselbe selbstregelung
-            # wie beim schub. Eine feste echtzeit-sperre (0.25 s) war
-            # nachweislich zu grob: gemessen 4 auffrischungen ueber 1500
-            # frames, und der versatz lief zwischendurch wieder auf 4.4e5 m.
+            # wie beim schub; eine feste echtzeit-sperre waere zu grob.
             if (drift > self._hold_drift_limit_m()
                     and not getattr(self, '_hold_pending_swap', False)):
                 self._request_hold_recompute(ship, world)
@@ -851,8 +791,7 @@ class HoldMixin:
         """
         px = float(getattr(self, 'hold_drift_max_px', 0.5) or 0.0)
         # px <= 0 heisst AUS -- keine anforderung, egal wie weit es auseinander
-        # laeuft. (Das ist auch der schalter, mit dem die gegenprobe im test
-        # das alte verhalten wiederherstellt.)
+        # laeuft (auch der schalter fuer die gegenprobe im test).
         if px <= 0.0:
             return float('inf')
         scale = getattr(self, '_view_scale', None)

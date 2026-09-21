@@ -18,39 +18,39 @@
     "semantic_hash": ""
   },
   "bodies/body.py": {
-    "mtime": 1788466154.9010968,
-    "seen": 1788897742.3024998,
-    "ast_hash": "03693916d0cc8bc2c573f33ed01d2d25",
+    "mtime": 1789752247.6438916,
+    "seen": 1790017942.175339,
+    "ast_hash": "36c83b946659dc54eaf8c0801ce4f956",
     "semantic_hash": ""
   },
   "bodies/icon.py": {
-    "mtime": 1788466154.9010968,
-    "seen": 1788897742.3025012,
-    "ast_hash": "44dcc6fc55fa7bda63329713b8100e93",
+    "mtime": 1789752620.4625711,
+    "seen": 1790017942.1753402,
+    "ast_hash": "d082cecf5d46c8f7ac11c9dfc59c3196",
     "semantic_hash": ""
   },
   "bodies/orbit_lines.py": {
-    "mtime": 1788629578.3209126,
-    "seen": 1788897742.302502,
-    "ast_hash": "e900f22a54ecd17f29782179196eca0e",
+    "mtime": 1789752938.167985,
+    "seen": 1790017942.1753416,
+    "ast_hash": "88775318add6eb1a6df8dbc2a89e07c8",
     "semantic_hash": ""
   },
   "bodies/style.py": {
-    "mtime": 1788466154.9010968,
-    "seen": 1788897742.3025029,
-    "ast_hash": "33c1c0a9697035a99b85dbda10ce6b6c",
+    "mtime": 1789752632.4429862,
+    "seen": 1790017942.1753469,
+    "ast_hash": "d51a98b5f23fc57fb9072fe9cddeb7b8",
     "semantic_hash": ""
   },
   "config/config.json": {
-    "mtime": 1788900174.3009634,
-    "seen": 1788900203.5282462,
+    "mtime": 1789239706.7746503,
+    "seen": 1790017942.175348,
     "ast_hash": "1b158adce765e0e7ea34ba08ff3225e3",
     "semantic_hash": ""
   },
   "config/loader.py": {
-    "mtime": 1788811802.0367966,
-    "seen": 1788897742.3025048,
-    "ast_hash": "1cd64821fbfe93ca241657f382a73c89",
+    "mtime": 1789752202.5192351,
+    "seen": 1790017942.175349,
+    "ast_hash": "519324456d8b5f75b24831b08a4b34fa",
     "semantic_hash": ""
   },
   "config/solar_system.json": {
@@ -60,207 +60,207 @@
     "semantic_hash": ""
   },
   "main.py": {
-    "mtime": 1788466154.9010968,
-    "seen": 1788897742.3025064,
-    "ast_hash": "e64585917b51dbdfad7dceb0f173735c",
+    "mtime": 1789752095.7133524,
+    "seen": 1790017942.1753514,
+    "ast_hash": "42687134be8c55bc680b14fe454a7d3b",
     "semantic_hash": ""
   },
   "physics/kernels/__init__.py": {
-    "mtime": 1788635285.7536147,
-    "seen": 1788897742.3025079,
-    "ast_hash": "f9d74b08fc5e4223c845562cdc90d124",
+    "mtime": 1789752294.240631,
+    "seen": 1790017942.1753523,
+    "ast_hash": "59771e1a744c2acdeb043f3d1710d8aa",
     "semantic_hash": ""
   },
   "physics/kernels/apsis.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025088,
-    "ast_hash": "77dd8acdc184110fcec0d4f7f1e09a33",
+    "mtime": 1789752335.2067046,
+    "seen": 1790017942.1753535,
+    "ast_hash": "556b5a103a62a5fe18c75c80fed81a21",
     "semantic_hash": ""
   },
   "physics/kernels/burn.py": {
-    "mtime": 1788635544.905017,
-    "seen": 1788897742.3025098,
-    "ast_hash": "75b426b38fa25d61a8b09c95d905f9de",
+    "mtime": 1790017496.1610892,
+    "seen": 1790017942.1753545,
+    "ast_hash": "9f4f3af3865ba9f180e09b913fb7dfeb",
     "semantic_hash": ""
   },
   "physics/kernels/integrators.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025105,
-    "ast_hash": "5c1bd01e0623b3f46b0dcfcda451613b",
+    "mtime": 1789752386.4480202,
+    "seen": 1790017942.1753554,
+    "ast_hash": "3d3ac903b82dab0787545d79c557a5f2",
     "semantic_hash": ""
   },
   "physics/kernels/kepler.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025117,
-    "ast_hash": "524a3178e6cf5dce7ef5d9750a7ffcf8",
+    "mtime": 1789752334.9459407,
+    "seen": 1790017942.1753564,
+    "ast_hash": "a007e25a6cfe0397c6ea35f43630693c",
     "semantic_hash": ""
   },
   "physics/kernels/propagate.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025126,
-    "ast_hash": "f6d7394455edcdc15d0a878e683cb281",
+    "mtime": 1789752434.6808598,
+    "seen": 1790017942.175357,
+    "ast_hash": "410b6b6eb6a94599926f0bf379f6ac27",
     "semantic_hash": ""
   },
   "physics/reference_frames.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025136,
-    "ast_hash": "ded9d47de47c3e93152686bd9828cb02",
+    "mtime": 1789752600.458637,
+    "seen": 1790017942.1753583,
+    "ast_hash": "7b920a7552e4e4b621775a303a81254e",
     "semantic_hash": ""
   },
   "physics/vec.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025148,
-    "ast_hash": "97aa06a801c4e2ac8ef2a380eb730cc1",
+    "mtime": 1789752128.0149927,
+    "seen": 1790017942.1753592,
+    "ast_hash": "0363cca330bfb1fb8d02a0186f86c124",
     "semantic_hash": ""
   },
   "physics/world.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025155,
-    "ast_hash": "00c377beb1ecf777b9a5273310b84554",
+    "mtime": 1789752237.7447433,
+    "seen": 1790017942.1753602,
+    "ast_hash": "8d09c74783c76b997929fc3121f51ade",
     "semantic_hash": ""
   },
   "physics/world_kernels.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025165,
-    "ast_hash": "6e1b9b8b55b4f5e0e49dadc6889c1b7b",
+    "mtime": 1789752211.9179223,
+    "seen": 1790017942.1753614,
+    "ast_hash": "65e1a0e47c59ae70ada35b680b1e3a19",
     "semantic_hash": ""
   },
   "render/__init__.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.3025172,
-    "ast_hash": "4aee29ae3c479adc056ab8bbb28cbf6f",
+    "mtime": 1789752092.436136,
+    "seen": 1790017942.175362,
+    "ast_hash": "8af676538c0c7a848b9e9a7afdcbba4c",
     "semantic_hash": ""
   },
   "render/background.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.302519,
-    "ast_hash": "bde9f0e9ab1e736ab9952d0fc13fdd06",
+    "mtime": 1789752407.316305,
+    "seen": 1790017942.175363,
+    "ast_hash": "5680530595afbc2d7cc293dc1db1de56",
     "semantic_hash": ""
   },
   "render/background_draw.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.30252,
-    "ast_hash": "1c17587d4c433c4ae46587ba9dc8fc8e",
+    "mtime": 1789752419.05522,
+    "seen": 1790017942.1753638,
+    "ast_hash": "2007b35dc21a2474382b984618354294",
     "semantic_hash": ""
   },
   "render/bodies.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.302521,
-    "ast_hash": "fa00ff7760de7ef7105bc69bdba14380",
+    "mtime": 1789752456.4672058,
+    "seen": 1790017942.175365,
+    "ast_hash": "88f73e431b0179e19d7963329d3b7ce0",
     "semantic_hash": ""
   },
   "render/draw.py": {
-    "mtime": 1788466154.9110956,
-    "seen": 1788897742.302522,
-    "ast_hash": "8240dab5787f12ecf659b1f8fed2bedd",
+    "mtime": 1789752673.856016,
+    "seen": 1790017942.1753657,
+    "ast_hash": "aa2bd8d862c4178b8ed91023b6d423e6",
     "semantic_hash": ""
   },
   "render/line_kernels.py": {
-    "mtime": 1788466154.921095,
-    "seen": 1788897742.302523,
-    "ast_hash": "90d275f72a1023fd5b9c5b5f1903efba",
+    "mtime": 1789752658.7009406,
+    "seen": 1790017942.1753666,
+    "ast_hash": "66e7f931945a191fe63fbbdeb85b686f",
     "semantic_hash": ""
   },
   "render/maneuver.py": {
-    "mtime": 1788811608.8955998,
-    "seen": 1788897742.3025236,
-    "ast_hash": "a0a56f81381682bcd70e5c6d46197962",
+    "mtime": 1789752564.4815722,
+    "seen": 1790017942.1753676,
+    "ast_hash": "72c25149b17be4b572b81e11af799224",
     "semantic_hash": ""
   },
   "render/orbits.py": {
-    "mtime": 1788466154.921095,
-    "seen": 1788897742.3025246,
-    "ast_hash": "4583ac43d78bc853a604102d63a84b4d",
+    "mtime": 1789752548.5279436,
+    "seen": 1790017942.175369,
+    "ast_hash": "81e6ddd771678509952531ae5fa6ddfc",
     "semantic_hash": ""
   },
   "render/pipelines.py": {
-    "mtime": 1788466154.921095,
-    "seen": 1788897742.3025255,
-    "ast_hash": "bb57e803b4b3cb192a43b09c224ea831",
+    "mtime": 1789752673.8835375,
+    "seen": 1790017942.17537,
+    "ast_hash": "fa7feaf6fdcec50588956ac52b8c288c",
     "semantic_hash": ""
   },
   "render/prediction.py": {
-    "mtime": 1788466154.921095,
-    "seen": 1788897742.3025265,
-    "ast_hash": "4d11f8136d540a67a7b830b2b6c6798b",
+    "mtime": 1789752666.424737,
+    "seen": 1790017942.175371,
+    "ast_hash": "c97697e9f5bc17600411d46e631c0618",
     "semantic_hash": ""
   },
   "render/renderer.py": {
-    "mtime": 1788811802.0367966,
-    "seen": 1788897742.3025272,
-    "ast_hash": "20501b85b8eb85c5d74b26168b8ed2bd",
+    "mtime": 1789752531.6718595,
+    "seen": 1790017942.175372,
+    "ast_hash": "6f33f329b0cfc1d4ace5430fd1d50bee",
     "semantic_hash": ""
   },
   "render/ship.py": {
-    "mtime": 1788641075.3334239,
-    "seen": 1788897742.302528,
-    "ast_hash": "72aa7a2887e0a151af1c898c5bc4852e",
+    "mtime": 1789752531.6331003,
+    "seen": 1790017942.1753728,
+    "ast_hash": "779f1f69e0eb84772032ff3c7f8e28bd",
     "semantic_hash": ""
   },
   "render/text.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.302529,
-    "ast_hash": "bf98d820cc1bab99d0f34cad261731c8",
+    "mtime": 1789752666.4545026,
+    "seen": 1790017942.1753738,
+    "ast_hash": "6d15e99e47cde3d69d157bced09079de",
     "semantic_hash": ""
   },
   "runtime/bootstrap.py": {
-    "mtime": 1788811580.41906,
-    "seen": 1788897742.3025298,
-    "ast_hash": "d1e00ae38a33e63fce97c43e83bee399",
+    "mtime": 1789752105.4820304,
+    "seen": 1790017942.1753745,
+    "ast_hash": "35720671a2e405c28fa7e4938b0ee675",
     "semantic_hash": ""
   },
   "runtime/gl_device.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.302531,
-    "ast_hash": "0fccab6984b34d0fa3dd35c1c46aeee2",
+    "mtime": 1789752169.2329652,
+    "seen": 1790017942.1753757,
+    "ast_hash": "94327338c5f8fb3324930ee62a7333c6",
     "semantic_hash": ""
   },
   "runtime/input.py": {
-    "mtime": 1788728799.3177507,
-    "seen": 1788897742.3025322,
-    "ast_hash": "c1981d27455e5dfee9041f343daa7fff",
+    "mtime": 1789752169.3851557,
+    "seen": 1790017942.175377,
+    "ast_hash": "80d116c56121adc8fdfbf83788ef9dfc",
     "semantic_hash": ""
   },
   "runtime/loop.py": {
-    "mtime": 1788728131.4796407,
-    "seen": 1788897742.3025331,
-    "ast_hash": "b65849c16db2216436a81a6ec55d7ef1",
+    "mtime": 1789752139.4078145,
+    "seen": 1790017942.1753778,
+    "ast_hash": "308aa94fb7d467caff77c9ea69728235",
     "semantic_hash": ""
   },
   "runtime/system_loader.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025339,
-    "ast_hash": "697192ba54cacf30cd3fad768d537ff6",
+    "mtime": 1789752095.861084,
+    "seen": 1790017942.1753788,
+    "ast_hash": "8a900418f1a6c303f0f5ead5db7f590d",
     "semantic_hash": ""
   },
   "runtime/window.py": {
-    "mtime": 1788900171.2259245,
-    "seen": 1788900203.5282826,
-    "ast_hash": "92b0b8c118e0bf55f29a15e218b7ea3a",
+    "mtime": 1790017511.7348194,
+    "seen": 1790017942.1753798,
+    "ast_hash": "64f5363615de8f27156fe428ca1d1fad",
     "semantic_hash": ""
   },
   "ship/art.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.302536,
-    "ast_hash": "9cc2daf2479182a7376aec9ceef5e092",
+    "mtime": 1789752327.9532058,
+    "seen": 1790017942.1753805,
+    "ast_hash": "f69cd4bd9d4bbe38272db796afd8d2b0",
     "semantic_hash": ""
   },
   "ship/camera.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025367,
-    "ast_hash": "c0daac525a2d9e399f65676fe9818c16",
+    "mtime": 1789752374.4124818,
+    "seen": 1790017942.1753817,
+    "ast_hash": "57830f9283618559cb52ef7aa248ece9",
     "semantic_hash": ""
   },
   "ship/control.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025377,
-    "ast_hash": "7c91781b6856bad1e04a46a7a8b69441",
+    "mtime": 1789752260.0745547,
+    "seen": 1790017942.1753826,
+    "ast_hash": "6fb4975698b11279cfd5176e89337f6f",
     "semantic_hash": ""
   },
   "ship/horizon.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.302539,
-    "ast_hash": "f5d158c3b8fcbf1b7f07b713686d5bc9",
+    "mtime": 1789752316.41584,
+    "seen": 1790017942.1753836,
+    "ast_hash": "d73976ca072b05e2f0aabf91002eee6f",
     "semantic_hash": ""
   },
   "ship/maneuver/__init__.py": {
@@ -270,9 +270,9 @@
     "semantic_hash": ""
   },
   "ship/maneuver/executor.py": {
-    "mtime": 1788640747.859887,
-    "seen": 1788897742.3025405,
-    "ast_hash": "7627d1b1dfc726df0e2fc2f495d1329d",
+    "mtime": 1790017512.0208101,
+    "seen": 1790017942.1753852,
+    "ast_hash": "a1e4328b7650dcc3afd66cbd50ecbac1",
     "semantic_hash": ""
   },
   "ship/maneuver/plan.py": {
@@ -282,9 +282,9 @@
     "semantic_hash": ""
   },
   "ship/maneuver/preview.py": {
-    "mtime": 1788728589.291517,
-    "seen": 1788897742.302542,
-    "ast_hash": "f3bd39a5e1469726e2c772d3f144cd7c",
+    "mtime": 1789752475.54321,
+    "seen": 1790017942.1753874,
+    "ast_hash": "0e6843703ef6f57adf94138ad0c37326",
     "semantic_hash": ""
   },
   "ship/maneuver/profile.py": {
@@ -300,33 +300,33 @@
     "semantic_hash": ""
   },
   "ship/predictor/compute.py": {
-    "mtime": 1788635625.0890298,
-    "seen": 1788897742.3025448,
-    "ast_hash": "219b7fc5d0faea9ddbf60d1c32f1fa58",
+    "mtime": 1790016223.484296,
+    "seen": 1790017942.1753902,
+    "ast_hash": "241124fa18814adcda710c72cebb906b",
     "semantic_hash": ""
   },
   "ship/predictor/core.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025455,
-    "ast_hash": "7def79601e072799dae41ec15ec1ac2b",
+    "mtime": 1789752679.8399954,
+    "seen": 1790017942.175391,
+    "ast_hash": "191c6f6565eca110ddcf688526fe5dac",
     "semantic_hash": ""
   },
   "ship/predictor/hold.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025465,
-    "ast_hash": "7a118f1877b6e002a04430e13a2dd9b9",
+    "mtime": 1790016291.1773677,
+    "seen": 1790017942.175392,
+    "ast_hash": "ea19ff90f419dac7a7130b00edadb053",
     "semantic_hash": ""
   },
   "ship/predictor/jobs.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025475,
-    "ast_hash": "39a9f9f707b5fc1e72cb45c7c32b3c74",
+    "mtime": 1789752961.7665675,
+    "seen": 1790017942.175393,
+    "ast_hash": "893f064ad606c5fe277124fd43ac7772",
     "semantic_hash": ""
   },
   "ship/predictor/view.py": {
-    "mtime": 1788466154.931095,
-    "seen": 1788897742.3025482,
-    "ast_hash": "30acba15954f1f6a156ddb93cc3b2d7a",
+    "mtime": 1790016315.938143,
+    "seen": 1790017942.1753938,
+    "ast_hash": "cd6e4f64ef17113440d3992fd21abd26",
     "semantic_hash": ""
   },
   "tests/apsis_stability_test.py": {
@@ -486,33 +486,33 @@
     "semantic_hash": ""
   },
   "tools/game_shot.py": {
-    "mtime": 1788728608.8563974,
-    "seen": 1788897742.3025777,
-    "ast_hash": "456793d98ecffae4b697d2e1db47fef0",
+    "mtime": 1790016251.75269,
+    "seen": 1790017942.1754215,
+    "ast_hash": "c4b4523b6168c0fb091863ad965920fc",
     "semantic_hash": ""
   },
   "ui/__init__.py": {
-    "mtime": 1786880093.0831666,
-    "seen": 1788897742.3025787,
-    "ast_hash": "dc13f2bbc6d340dd13306124a172e957",
+    "mtime": 1790017511.482524,
+    "seen": 1790017942.1754222,
+    "ast_hash": "effe45d322c4f668d7f9912422897d9c",
     "semantic_hash": ""
   },
   "ui/core.py": {
-    "mtime": 1788384490.6028795,
-    "seen": 1788897742.3025796,
-    "ast_hash": "af6ef06375a9face80352968869e6b4e",
+    "mtime": 1789752331.385239,
+    "seen": 1790017942.175423,
+    "ast_hash": "6a42e915603489017fd3e24943927669",
     "semantic_hash": ""
   },
   "ui/devui.py": {
-    "mtime": 1788466154.9510953,
-    "seen": 1788897742.3025806,
-    "ast_hash": "dd42bf5046d50e6c1a815bcdf179fe0e",
+    "mtime": 1790016251.7097108,
+    "seen": 1790017942.175424,
+    "ast_hash": "80f2dd1c0f9af4800ace6e43257a5b28",
     "semantic_hash": ""
   },
   "ui/draw.py": {
-    "mtime": 1788466154.9510953,
-    "seen": 1788897742.3025813,
-    "ast_hash": "84a3bc0c953fc45a2d9ed7fcd5c72aa5",
+    "mtime": 1789752214.8267448,
+    "seen": 1790017942.175425,
+    "ast_hash": "cac68414abe474cabaf707239b423047",
     "semantic_hash": ""
   },
   "ui/hud/__init__.py": {
@@ -522,87 +522,87 @@
     "semantic_hash": ""
   },
   "ui/hud/apsis_tooltip.py": {
-    "mtime": 1788289698.6875186,
-    "seen": 1788897742.3025837,
-    "ast_hash": "16b5219d2910b042ed7e1277bec66466",
+    "mtime": 1789752630.2097232,
+    "seen": 1790017942.175427,
+    "ast_hash": "a45c3cd869d751cbb1f421e72b2477e3",
     "semantic_hash": ""
   },
   "ui/hud/attitude.py": {
-    "mtime": 1788641188.2812994,
-    "seen": 1788897742.302585,
-    "ast_hash": "78d5acb0f3a101a7525d96b4d84c83c0",
+    "mtime": 1789752550.702536,
+    "seen": 1790017942.175428,
+    "ast_hash": "f982c3a537e593bc610f4ba22ff2c3f6",
     "semantic_hash": ""
   },
   "ui/hud/body_browser.py": {
-    "mtime": 1787174685.9856417,
-    "seen": 1788897742.3025858,
-    "ast_hash": "ab19e622ff7db73a3eb9faafd72a308f",
+    "mtime": 1789752659.2303362,
+    "seen": 1790017942.1754286,
+    "ast_hash": "120348ade93cf44db83814e55e436e20",
     "semantic_hash": ""
   },
   "ui/hud/chrome.py": {
-    "mtime": 1787171279.0698626,
-    "seen": 1788897742.3025868,
-    "ast_hash": "196d4ef6d17036d7f1c164df76788189",
+    "mtime": 1790017511.8288167,
+    "seen": 1790017942.1754296,
+    "ast_hash": "8000abec6556cdb27e19a43387f0eb2d",
     "semantic_hash": ""
   },
   "ui/hud/controls.py": {
-    "mtime": 1788641188.2812994,
-    "seen": 1788897742.3025877,
-    "ast_hash": "6793805b7bd9bfcf1519db306cd4c733",
+    "mtime": 1789752715.4778857,
+    "seen": 1790017942.1754303,
+    "ast_hash": "955fca00e8872ebcdf410d7cc9abc383",
     "semantic_hash": ""
   },
   "ui/hud/layout.py": {
-    "mtime": 1788791808.1620774,
-    "seen": 1788897742.3025885,
-    "ast_hash": "d3f4862e2f8735c229660455ce1b2282",
+    "mtime": 1789752678.1161342,
+    "seen": 1790017942.1754313,
+    "ast_hash": "fd8fe9c59aa87b89eba89dddedc882bb",
     "semantic_hash": ""
   },
   "ui/hud/maneuver.py": {
-    "mtime": 1788890382.9637818,
-    "seen": 1788897742.3025892,
-    "ast_hash": "a46a101316cba051d6c363e40b35c7a1",
+    "mtime": 1790016236.1331234,
+    "seen": 1790017942.175432,
+    "ast_hash": "c0b0aaffa709558d2aa4f6188439d710",
     "semantic_hash": ""
   },
   "ui/hud/navball.py": {
-    "mtime": 1788791558.5447292,
-    "seen": 1788897742.3025901,
-    "ast_hash": "6c7a4f27611876505788b89f22eb8bb2",
+    "mtime": 1789752567.9624631,
+    "seen": 1790017942.1754327,
+    "ast_hash": "dd4cb40d125c6e813ab0ab23882f6be3",
     "semantic_hash": ""
   },
   "ui/hud/panels.py": {
-    "mtime": 1787171355.6813872,
-    "seen": 1788897742.302591,
-    "ast_hash": "7e5f76142158d52f47ce3bca87277bbf",
+    "mtime": 1789752494.9071543,
+    "seen": 1790017942.1754334,
+    "ast_hash": "d46e69c0d7a4d3a7ec4f7c22f316a26b",
     "semantic_hash": ""
   },
   "ui/hud/system_map.py": {
-    "mtime": 1788630014.2935655,
-    "seen": 1788897742.3025918,
-    "ast_hash": "a481ea2f7cb7eabd0eed4ae33341d994",
+    "mtime": 1789752739.3461015,
+    "seen": 1790017942.1754346,
+    "ast_hash": "1a305b8bf04858fcfee4decfd6452563",
     "semantic_hash": ""
   },
   "ui/hud/telemetry.py": {
-    "mtime": 1788641217.882472,
-    "seen": 1788897742.3025925,
-    "ast_hash": "d64020219efe3a0aa8414095b788e6e8",
+    "mtime": 1789752617.2802074,
+    "seen": 1790017942.1754353,
+    "ast_hash": "9239d1e3de54c67aca066444427bb958",
     "semantic_hash": ""
   },
   "ui/state.py": {
-    "mtime": 1788466154.9510953,
-    "seen": 1788897742.3025932,
-    "ast_hash": "4c5a0c587b944aac0e96227e10417c54",
+    "mtime": 1789752355.34482,
+    "seen": 1790017942.175436,
+    "ast_hash": "aee8fefedf555e4fcdda9fa856601804",
     "semantic_hash": ""
   },
   "ui/text.py": {
-    "mtime": 1788466154.9510953,
-    "seen": 1788897742.302594,
-    "ast_hash": "d42a898a7de50b59d99ceb00eeaa3da2",
+    "mtime": 1789752331.3548496,
+    "seen": 1790017942.1754367,
+    "ast_hash": "29d3c0be322a7279d49533aeb84bd622",
     "semantic_hash": ""
   },
   "ui/theme.py": {
-    "mtime": 1788641188.2812994,
-    "seen": 1788897742.302595,
-    "ast_hash": "b7a22606897124afb0a1f2a168d0d9db",
+    "mtime": 1789752447.58816,
+    "seen": 1790017942.175438,
+    "ast_hash": "1c5f6a5a4b7e3bd4d1897c535795b67b",
     "semantic_hash": ""
   },
   "ui/units.py": {
@@ -612,39 +612,33 @@
     "semantic_hash": ""
   },
   "ui/widgets/__init__.py": {
-    "mtime": 1788378978.8044717,
-    "seen": 1788897742.302598,
-    "ast_hash": "add79e24cbae2af76b3e327129d1378e",
+    "mtime": 1790017511.4432888,
+    "seen": 1790017942.1754394,
+    "ast_hash": "8f5b073da2d97100eea6ee84d8b682be",
     "semantic_hash": ""
   },
   "ui/widgets/button.py": {
-    "mtime": 1786880554.1978157,
-    "seen": 1788897742.302599,
-    "ast_hash": "b349a1016739098fe1119121b2619def",
-    "semantic_hash": ""
-  },
-  "ui/widgets/dropdown.py": {
-    "mtime": 1786880074.9567945,
-    "seen": 1788897742.3026166,
-    "ast_hash": "4c83b53ff5eb2d8b31e77c0aa7e4e809",
+    "mtime": 1789752404.0818212,
+    "seen": 1790017942.17544,
+    "ast_hash": "8df7806e766fc7609449358d694b59eb",
     "semantic_hash": ""
   },
   "ui/widgets/label.py": {
-    "mtime": 1786879955.0286777,
-    "seen": 1788897742.3026173,
-    "ast_hash": "ae4329d19d249e279387b9d630d19a5a",
+    "mtime": 1790017511.5782807,
+    "seen": 1790017942.1754408,
+    "ast_hash": "e8ba9a76f964bf6f831c9870267a959b",
     "semantic_hash": ""
   },
   "ui/widgets/panel.py": {
-    "mtime": 1786883375.4369445,
-    "seen": 1788897742.3026183,
-    "ast_hash": "9eae1742f6cf667c64d0bafe16939407",
+    "mtime": 1789752411.292141,
+    "seen": 1790017942.175442,
+    "ast_hash": "37c20e4d52c5025c90f55d87b951dc7a",
     "semantic_hash": ""
   },
   "ui/widgets/rate_slider.py": {
-    "mtime": 1788791830.4186246,
-    "seen": 1788897742.3026192,
-    "ast_hash": "87d643638a2d452cbc013538e9eae98f",
+    "mtime": 1789752442.3937528,
+    "seen": 1790017942.1754427,
+    "ast_hash": "a5fc58e2918511bae11e44b1b4a9e5c7",
     "semantic_hash": ""
   },
   "ui/widgets/slider.py": {
@@ -690,9 +684,9 @@
     "semantic_hash": ""
   },
   "Obsidian Vault/Evaluation/_Arbeit/00 Gliederung (KI Ansatz, irrelevant).md": {
-    "mtime": 1787685890.5604103,
-    "seen": 1788897742.3026254,
-    "ast_hash": "80581c3a00566fe3d27f72144b0a5546",
+    "mtime": 1789321646.8316095,
+    "seen": 1790017942.1754613,
+    "ast_hash": "9baff5a88bf30c13c2a572a7e43111b1",
     "semantic_hash": ""
   },
   "Obsidian Vault/Evaluation/_Arbeit/01 Einleitung.md": {
@@ -702,9 +696,9 @@
     "semantic_hash": ""
   },
   "Obsidian Vault/Evaluation/_Arbeit/Quellen/Quellen.md": {
-    "mtime": 1788813591.7056618,
-    "seen": 1788897742.302627,
-    "ast_hash": "60124ac13b41239bedeadda62e00246b",
+    "mtime": 1789325933.5074303,
+    "seen": 1790017942.1754646,
+    "ast_hash": "bd6d2973c9d188ad784fdb147abd184d",
     "semantic_hash": ""
   },
   "Obsidian Vault/Plan f\u00fcr SpaceSim.md": {
@@ -714,9 +708,9 @@
     "semantic_hash": ""
   },
   "Obsidian Vault/Readme's Github/09.05.2026 April-Mai Vergleich.md": {
-    "mtime": 1780337574.9806263,
-    "seen": 1788897742.3026302,
-    "ast_hash": "20627e1aaaef3d05de24797d33496958",
+    "mtime": 1783017584.6908035,
+    "seen": 1790017942.1754699,
+    "ast_hash": "ea3478fa65c4ee5c7f10544ec5b5b889",
     "semantic_hash": ""
   },
   "Obsidian Vault/Readme's Github/11.03.2026 Erstes Update.md": {
@@ -750,9 +744,9 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1788814104.9123566,
-    "seen": 1788897742.302635,
-    "ast_hash": "7183e30a124506d5e36a12938fa39854",
+    "mtime": 1788900493.2962177,
+    "seen": 1790017942.1754756,
+    "ast_hash": "753012810f7ae16aa2b95d7bde4b86ec",
     "semantic_hash": ""
   },
   "ui/assets/OFL-Oxanium.txt": {
@@ -771,6 +765,120 @@
     "mtime": 1788294273.5262372,
     "seen": 1788897742.3026376,
     "ast_hash": "fe352b139d1491210d567373a66257fe",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/.space/def.json": {
+    "mtime": 1787073918.154328,
+    "seen": 1790017942.1753297,
+    "ast_hash": "91eb005034df8fb6817628f40cc958d2",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/settings.local.json": {
+    "mtime": 1779738191.0,
+    "seen": 1790017942.175332,
+    "ast_hash": "545d2bd3d589cccb1d8558ee7cd6abd6",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/background.md": {
+    "mtime": 1788436076.0,
+    "seen": 1790017942.1754444,
+    "ast_hash": "6bfd1635c8d2cd310848ba674d007534",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/body-art.md": {
+    "mtime": 1788436077.0,
+    "seen": 1790017942.1754453,
+    "ast_hash": "c2cb6bceb5bf9aae876d884bcecb9c21",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/camera-input.md": {
+    "mtime": 1788436171.0,
+    "seen": 1790017942.175446,
+    "ast_hash": "735317d82d2318c72a12dc6e0af1604e",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/config-loader.md": {
+    "mtime": 1788436171.0,
+    "seen": 1790017942.1754467,
+    "ast_hash": "af5190a3c8eaab90ef2e7a73f9e3e3a2",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/devui.md": {
+    "mtime": 1788436171.0,
+    "seen": 1790017942.1754477,
+    "ast_hash": "efde37bdb6f48c12f3927faa7cdf2364",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/hud-ui.md": {
+    "mtime": 1788792692.0,
+    "seen": 1790017942.1754484,
+    "ast_hash": "f61436da7e0bd9f532d463c14ce0834a",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/maneuver.md": {
+    "mtime": 1788855839.0,
+    "seen": 1790017942.1754491,
+    "ast_hash": "e1a64ba8428f4479daa03eb4cc8c8b13",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/orbit-lines.md": {
+    "mtime": 1788468522.0,
+    "seen": 1790017942.1754498,
+    "ast_hash": "6074588bcbc34accede135cb51266c80",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/physics-world.md": {
+    "mtime": 1788436171.0,
+    "seen": 1790017942.1754506,
+    "ast_hash": "ceed0b88ed083d30df9a3436d20cc91e",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/predictor.md": {
+    "mtime": 1788436255.0,
+    "seen": 1790017942.1754513,
+    "ast_hash": "631f8e96b90158b958da1e6a5d55f82b",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/reference-frames.md": {
+    "mtime": 1788436077.0,
+    "seen": 1790017942.1754522,
+    "ast_hash": "7b1eb9181527d843f4a5d24664c25705",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/rendering.md": {
+    "mtime": 1788900186.775463,
+    "seen": 1790017942.175453,
+    "ast_hash": "4b7b90cb7ea4faeb2b4ddb16216b9df3",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/.claude/rules/tests.md": {
+    "mtime": 1788855840.0,
+    "seen": 1790017942.1754537,
+    "ast_hash": "b027a419293aefc35a3da63007d5386e",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Claude MD Kopie/CLAUDE.md": {
+    "mtime": 1788900190.168203,
+    "seen": 1790017942.1754544,
+    "ast_hash": "b1603733abda755f11720a4e71f8813a",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Evaluation/_Arbeit/02 Physikalische Grundlagen.md": {
+    "mtime": 1789417644.3550844,
+    "seen": 1790017942.1754637,
+    "ast_hash": "9474a90049269f90be19e30699f0bc99",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Obsidian Vault.md": {
+    "mtime": 1787073918.1455212,
+    "seen": 1790017942.1754656,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": ""
+  },
+  "Obsidian Vault/Planumsetzung/Plan f\u00fcr SpaceSim.md": {
+    "mtime": 1787073909.3016257,
+    "seen": 1790017942.1754684,
+    "ast_hash": "25878aa1030a7b20b38232d093567d6b",
     "semantic_hash": ""
   }
 }

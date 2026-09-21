@@ -17,7 +17,7 @@ zeile fuer zeile moeglich bleibt. ``build()`` rechnet sie einmalig in den
     local_y = SVG_CY - svg_y      # +y nach OBEN (ortho-konvention)
 
 Der ursprung liegt damit im sichtbaren mittelpunkt des schiffs, und
-``rendering.Renderer._draw_ship_sprite`` muss nur noch drehen, skalieren
+``Renderer._draw_ship_sprite`` (render/ship.py) muss nur noch drehen, skalieren
 und verschieben. Die einheit bleibt "SVG-pixel"; ``SHIP_LENGTH`` sagt,
 wieviele davon die gesamtlaenge sind, sodass der renderer auf eine
 gewuenschte bildschirmlaenge normieren kann.

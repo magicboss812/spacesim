@@ -2,12 +2,11 @@
 
 Alle benutzen dasselbe bauteil aus chrome.py -- gefaste ecken, doppelter
 rahmen, notch-tab auf der kante. Ein panel bringt hier KEINE eigene kontur
-mehr mit; genau das hielt die alte fassung als sammlung schwebender
-lozenges zusammen statt als eine tafel.
+mit, damit die bloecke als eine tafel lesen.
 
-Die bahnelemente stehen nicht mehr hier, sondern im navball-block
-(hud/navball.py): AP und PE liest man waehrend eines brennmanoevers, also
-genau dann, wenn der blick ohnehin auf dem instrument liegt.
+Die bahnelemente stehen im navball-block (hud/navball.py): AP und PE liest
+man waehrend eines brennmanoevers, also genau dann, wenn der blick ohnehin
+auf dem instrument liegt.
 """
 
 from ..core import FILL, Rect, Widget
@@ -110,26 +109,6 @@ class HudPanel(Panel):
                        color=palette.accent_for(self.glow_role), edge='bottom')
 
 
-class SectionLabel(Widget):
-    """Die gesperrte versal-ueberschrift eines panels."""
-
-    def __init__(self, text='', color_role=None, **kwargs):
-        kwargs.setdefault('size', (FILL, None))
-        super().__init__(**kwargs)
-        self.text = text
-        self.color_role = color_role
-
-    def measure(self, ctx):
-        return ctx.text.measure(str(self.text), 'section')
-
-    def draw(self, ctx):
-        palette = ctx.theme.palette
-        color = (palette.accent_for(self.color_role) if self.color_role
-                 else palette.text_dim)
-        ctx.text.draw(str(self.text), self.rect.x, self.rect.y,
-                      role='section', color=color)
-
-
 class TargetHeader(Widget):
     """'TARGET' links, 'LOCKED'-marke rechts."""
 
@@ -185,9 +164,9 @@ class TargetName(Widget):
                       color=ctx.theme.palette.target)
 
 
-def _row(label, value, value_color=None):
+def _row(label, value):
     return Readout(
-        label=label, value=value, value_color=value_color,
+        label=label, value=value,
         label_role='key', value_role='value', size=(FILL, None),
     )
 
@@ -197,10 +176,9 @@ def build_target_panel(telemetry, **kwargs):
     keine eigene zielauswahl, und der bezugskoerper ist genau der, auf den
     sich alle uebrigen anzeigen beziehen.
 
-    Er sitzt jetzt in der LINKEN spalte unter der schiffs-plakette statt
-    frei am rechten rand: schiff, bezugskoerper und die werte dazwischen
-    gehoeren zusammen, und die rechte bildschirmhaelfte bleibt so frei fuer
-    die bahn.
+    Er sitzt in der LINKEN spalte unter der schiffs-plakette: schiff,
+    bezugskoerper und die werte dazwischen gehoeren zusammen, und die rechte
+    bildschirmhaelfte bleibt so frei fuer die bahn.
     """
     panel = HudPanel(glow_role='target', gap=9,
                      tab=chrome.tab_text('TARGET', 'INFO'), **kwargs)
@@ -275,8 +253,8 @@ class ShipBadge(Widget):
 class IconRail(Widget):
     """Schmale senkrechte leiste fuer das kompakte layout.
 
-    Ersetzt unter der umbruchbreite ein ganzes info-panel: die werte selbst
-    haetten dort keinen platz mehr, die kuerzel als abrufbare knoepfe schon.
+    Steht unter der umbruchbreite statt eines ganzen info-panels: die werte
+    selbst haetten dort keinen platz, die kuerzel als abrufbare knoepfe schon.
     """
 
     def __init__(self, entries, color_role='elem', **kwargs):

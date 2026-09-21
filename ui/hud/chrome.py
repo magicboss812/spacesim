@@ -4,7 +4,7 @@ Vier bauteile, aus denen praktisch jede flaeche des HUDs zusammengesetzt
 ist. Sie stehen hier und nicht in den einzelnen widgets, weil genau das der
 unterschied zwischen "eine tafel" und "viele einzelne kaesten" ist: sobald
 jedes widget seinen eigenen rahmen erfindet, zerfaellt die oberflaeche in
-schwebende inseln -- der auffaelligste mangel der vorherigen fassung.
+schwebende inseln.
 
 1. FASE STATT RUNDUNG. Alle ecken werden unter 45 grad geschnitten, und
    meist nur EINIGE davon. Umgesetzt ueber ein negatives vorzeichen im
@@ -19,7 +19,7 @@ schwebende inseln -- der auffaelligste mangel der vorherigen fassung.
    ist das einzelne element, das den groessten teil des wiedererkennungs-
    wertes traegt. Der punkt statt eines leerzeichens gehoert dazu.
 
-4. TEILUNG. Gestrichelte marken entlang einer kante oder eines bogens, mit
+4. TEILUNG. Gestrichelte marken entlang eines bogens, mit
    unterschiedlichem gewicht fuer haupt- und zwischenstriche.
 
 KOORDINATEN wie ueberall in ui/: top-down pixel. WINKEL in den
@@ -143,9 +143,7 @@ def tab(ctx, text, x, y, color=None, align='left', edge='top', width=None,
         left -= box_w
 
     # AUSSERHALB der kante, nicht darauf: (x, y) ist die kante selbst, der
-    # tab sitzt daneben. Legte man ihn nach innen, verdeckte er die erste
-    # zeile des blocks -- bei der zeitraffer-leiste waren das die beiden
-    # ersten stufen.
+    # tab sitzt daneben, damit er die erste zeile des blocks nicht verdeckt.
     top = float(y) - height if edge == 'top' else float(y)
     cut = ctx.px(ctx.theme.radius.cut_sm)
     # Zur kante hin scharf, von ihr weg gefast.
@@ -165,28 +163,12 @@ def tab(ctx, text, x, y, color=None, align='left', edge='top', width=None,
 
 # ---------------------------------------------------------------- teilung
 
-def ruler(ctx, x, y, length, color, count=12, major_every=4, vertical=False,
-          major=7.0, minor=4.0, width=1.0):
-    """Gerade teilung entlang einer kante."""
-    if count <= 1:
-        return
-    step = float(length) / float(count - 1)
-    for index in range(count):
-        is_major = (index % max(1, major_every)) == 0
-        size = ctx.px(major if is_major else minor)
-        shade = color if is_major else with_alpha(color, 0.45)
-        if vertical:
-            ctx.draw.rect(x, y + index * step, size, ctx.px(width), fill=shade)
-        else:
-            ctx.draw.rect(x + index * step, y, ctx.px(width), size, fill=shade)
-
-
 def arc_ruler(ctx, cx, cy, radius, color, start_deg, end_deg, count=13,
               major_every=4, major=9.0, minor=5.0, width=1.4, inward=True):
     """Teilung entlang eines kreisbogens, in kompassgrad.
 
     inward=True zieht die striche nach innen (zur ringmitte), sonst nach
-    aussen. Zwei ruler auf demselben radius, einer nach innen und einer
+    aussen. Zwei teilungen auf demselben radius, eine nach innen und eine
     nach aussen, ergeben die doppelte teilung der vorlage.
     """
     if count <= 1:
@@ -249,31 +231,3 @@ def segment_arc(ctx, cx, cy, radius, thickness, start_deg, end_deg, fraction,
             color if lit else empty,
             compass_to_screen(lo + abs(span)), cell,
         )
-
-
-def bar_cells(ctx, x, y, w, h, fraction, color, count=10, gap=2.0,
-              empty=None, vertical=False):
-    """Dasselbe geradlinig: ein balken aus einzelnen zellen."""
-    palette = ctx.theme.palette
-    empty = palette.edge_inner if empty is None else empty
-    count = max(1, int(count))
-    gap_px = ctx.px(gap)
-    lit = -1 if fraction is None else int(
-        round(count * max(0.0, min(1.0, float(fraction))))
-    ) - 1
-    cut = -ctx.px(2.0)
-    if vertical:
-        cell = (h - gap_px * (count - 1)) / count
-        for index in range(count):
-            # Von UNTEN fuellen: ein senkrechter pegel waechst nach oben.
-            top = y + h - (index + 1) * cell - index * gap_px
-            ctx.draw.rect(x, top, w, cell,
-                          fill=color if index <= lit else empty,
-                          radius=(cut, 0.0, cut, 0.0))
-    else:
-        cell = (w - gap_px * (count - 1)) / count
-        for index in range(count):
-            left = x + index * (cell + gap_px)
-            ctx.draw.rect(left, y, cell, h,
-                          fill=color if index <= lit else empty,
-                          radius=(cut, 0.0, cut, 0.0))

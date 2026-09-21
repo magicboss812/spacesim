@@ -1,10 +1,10 @@
 """Datenschicht des HUDs -- rechnet die anzeigewerte EINMAL pro frame aus.
 
 Warum getrennt von den widgets: die bahnelemente kosten ein paar dutzend
-gleitkomma-operationen, und AP, PE, ECC, PERIODE und T-AP kommen alle aus
+gleitkomma-operationen, und AP, PE und die countdowns kommen alle aus
 derselben zwischenrechnung. Wuerde jedes label seinen wert selbst holen,
-liefe dieselbe kepler-loesung fuenfmal pro frame. Die widgets lesen hier nur
-noch fertige felder ab.
+liefe dieselbe kepler-loesung mehrmals pro frame. Die widgets lesen hier nur
+fertige felder ab.
 
 INVARIANTEN:
 - Nur LESEN. Diese datei fasst keinen simulationszustand an.
@@ -212,7 +212,7 @@ class Telemetry:
 
         self.warp_factor = 1.0
         # Ab welcher raffung (sim-sekunden je echtsekunde) der schub gesperrt
-        # ist. Wird von test.py aus simulation.realtime_warp_max gesetzt und
+        # ist. Wird beim aufbau aus simulation.realtime_warp_max gesetzt und
         # ist hier nur vorbelegt, damit das HUD auch allein lauffaehig bleibt.
         self.realtime_warp_max = 60.0
         self.thrust_locked = False
@@ -220,9 +220,8 @@ class Telemetry:
         # Hoechste raffung, bei der die BAHN noch aufgeloest ist. Nahe an einem
         # koerper ist das keine frage der rechenleistung, sondern der physik:
         # ein frame bei 1 y/s rueckt um 48 stunden vor, das sind ~24 umlaeufe
-        # eines 2-stunden-orbits. Die kann kein integrator in 40 schritten
-        # abbilden -- gemessen 5120 teilschritte und 270 ms je frame.
-        # Grenze ist world.characteristic_timescale() / warp_timescale_divisor.
+        # eines 2-stunden-orbits, die kein integrator in wenigen schritten
+        # abbilden kann. Grenze ist world.characteristic_timescale() / warp_timescale_divisor.
         self.warp_timescale_divisor = 3.0
         self.max_warp_rate = None
 
@@ -281,7 +280,7 @@ class Telemetry:
         self._sample_conic(reference)
 
         self.warp_factor = float(getattr(self.camera, 'sim_dt', 1.0)) * self.tick_rate
-        # Im zeitraffer ist der schub gesperrt (siehe test.py): ein impuls je
+        # Im zeitraffer ist der schub gesperrt: ein impuls je
         # frame waere dort weder dosierbar noch reproduzierbar. Der regler
         # zeigt das an, sonst drueckt der spieler 'Up' und nichts geschieht.
         self.thrust_locked = self.warp_factor > self.realtime_warp_max * 1.001
@@ -347,23 +346,7 @@ class Telemetry:
             self.maneuver_burn_seconds = None
             self.maneuver_time_to_ignition = None
 
-    # -- die fuenf aktionen des MANEUVER-blocks -----------------------------
-
-    def adjust_node_dv(self, axis, amount):
-        """`axis` ist 'prograde' oder 'normal'. Zaehlt plan.version hoch."""
-        node = self.maneuver_node
-        if node is None or self.maneuver_plan is None:
-            return False
-        if axis == 'prograde':
-            node.dv_prograde = float(node.dv_prograde) + float(amount)
-        elif axis == 'normal':
-            node.dv_normal = float(node.dv_normal) + float(amount)
-        else:
-            return False
-        # OHNE touch() bliebe die gezeichnete linie auf dem alten stand --
-        # die vorschau rechnet nur bei geaenderter version neu.
-        self.maneuver_plan.touch()
-        return True
+    # -- die aktionen des MANEUVER-blocks -----------------------------------
 
     def select_node(self, index):
         if self._maneuver_selected_set is None:
@@ -495,9 +478,8 @@ class Telemetry:
         ACHTUNG, das ist keine feinheit: world.update_planets() setzt bei
         koerpern mit Kepler-elementen (fixed=True, wie Erde, Mond, Mars) NUR
         die position neu. Ihr velocity-feld behaelt den ladewert, meist
-        (0, 0). Wer es direkt liest, rechnet gegen einen stillstehenden
-        planeten -- eine saubere kreisbahn um die Erde kommt dann als
-        hyperbel mit exzentrizitaet 4 heraus.
+        (0, 0). Direkt gelesen rechnete man gegen einen stillstehenden
+        planeten, und eine kreisbahn um die Erde erschiene als hyperbel.
 
         Deshalb hier eine zentrale differenz ueber position_at_time(), also
         genau die funktion, die auch der integrator fuer bewegte
@@ -601,14 +583,10 @@ class Telemetry:
 
     # AP/PE SIND ABSTAENDE ZUM MITTELPUNKT, NICHT HOEHEN UEBER GRUND.
     #
-    # Sie standen einmal als `apsis - koerperradius` da, also als hoehe. Die
-    # Ap/Pe-fahnen auf der linie zeigen aber `r` aus
-    # `Predictor.get_apsis_markers()`, und das ist der abstand zum
-    # MITTELPUNKT des referenzkoerpers. Zwei zahlen fuer denselben punkt, die
-    # sich um einen ganzen koerperradius unterscheiden (bei Erde 6371 km) --
-    # und nichts an der anzeige sagt, welche welche ist. Beide messen jetzt
-    # vom mittelpunkt; die hoehe ueber grund steht weiterhin im ALT-feld,
-    # wo sie hingehoert (siehe text_altitude).
+    # Die Ap/Pe-fahnen auf der linie zeigen `r` aus
+    # `Predictor.get_apsis_markers()`, den abstand zum MITTELPUNKT des
+    # referenzkoerpers; HUD und fahnen muessen fuer denselben punkt dieselbe
+    # zahl zeigen. Die hoehe ueber grund steht im ALT-feld (gauge_altitude).
     def text_apoapsis(self):
         e = self.elements
         if not e.valid or e.apoapsis is None:
@@ -620,31 +598,6 @@ class Telemetry:
         if not e.valid or e.periapsis is None:
             return '--'
         return units.distance(e.periapsis)
-
-    def text_eccentricity(self):
-        return units.eccentricity(self.elements.eccentricity)
-
-    def text_period(self):
-        if not self.elements.closed:
-            return 'ESCAPE'
-        return units.duration(self.elements.period)
-
-    def text_time_to_apoapsis(self):
-        if not self.elements.closed:
-            return '--'
-        return units.duration(self.elements.time_to_apoapsis)
-
-    def text_speed(self):
-        speed = self.frame_speed
-        if speed is None:
-            return '--'
-        if speed >= 100000.0:
-            return f"{speed / 1000.0:,.0f}".replace(',', ' ')
-        return f"{speed:,.0f}".replace(',', ' ')
-
-    def text_speed_unit(self):
-        speed = self.frame_speed
-        return 'KM/S' if speed is not None and speed >= 100000.0 else 'M/S'
 
     def text_heading(self):
         return f"{int(round(self.heading)) % 360:03d}°"
@@ -664,9 +617,6 @@ class Telemetry:
 
     def text_time_to_closest(self):
         return units.duration(self.time_to_closest)
-
-    def text_warp(self):
-        return units.time_warp(self.warp_factor)
 
     def text_mission_time(self):
         """Die laufende weltzeit als 'T+000y 012d 04:05'.
@@ -728,11 +678,9 @@ class Telemetry:
         """(bahntempo, kreisbahn-tempo, fluchttempo) am aktuellen ort.
 
         Der MASSSTAB der geschwindigkeitsnadel, und er wird aus der bahn
-        gerechnet statt festgelegt. Vorher stand im ring ein fester
-        vollausschlag von 2600 m/s -- eine zahl, die zu nichts gehoert: im
-        niedrigen Erdorbit fliegt man 7.7 km/s und die nadel klebt am
-        anschlag, um Pluto 4.7 km/s und ebenfalls, waehrend sie um einen
-        kleinen mond ueberhaupt nicht ausschlaegt.
+        gerechnet statt festgelegt: ein fester vollausschlag passt zu keinem
+        koerper -- im niedrigen Erdorbit klebte die nadel am anschlag, um
+        einen kleinen mond schluege sie gar nicht aus.
 
         Die beiden ehrlichen bezugsgroessen liefert der zentralkoerper
         selbst:
@@ -782,7 +730,7 @@ class Telemetry:
             return None
         return float(circular) / float(escape)
 
-    def radial_fraction(self, full_scale=None):
+    def radial_fraction(self):
         """Radialgeschwindigkeit auf [-1, 1], fuer den rechten bogen.
 
         MASSSTAB AUS DER BAHN, nicht fest: die auftretenden raten reichen
@@ -803,10 +751,9 @@ class Telemetry:
         value = self.radial_speed
         if value is None:
             return None
-        if full_scale is None:
-            full_scale = self.elements.speed if self.elements.valid else None
-            if not full_scale:
-                full_scale = self.relative_speed or self.frame_speed
+        full_scale = self.elements.speed if self.elements.valid else None
+        if not full_scale:
+            full_scale = self.relative_speed or self.frame_speed
         if not full_scale or full_scale <= 0.0:
             return None
         return max(-1.0, min(1.0, float(value) / float(full_scale)))

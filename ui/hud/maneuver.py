@@ -2,11 +2,10 @@
 
 WARUM DORT UND NIRGENDWO SONST. Der navball-block hat vier freie felder,
 und sie sind bereits gerastert: ueber der ORB-flanke, unter dem
-THR-streifen, ueber der ALT-flanke, unter dem V/S-streifen. Alles andere
-daneben zu stellen -- erst ein 200x206-klotz, dann drei plaettchen mit
-eigenem dock-abstand -- laesst den block als navball MIT ANHAENGSEL lesen
-und laesst gleichzeitig diese vier felder leer. Die plaettchen sind
-deshalb keine nachbarn des blocks mehr, sie sind teil seines rasters:
+THR-streifen, ueber der ALT-flanke, unter dem V/S-streifen. Etwas daneben
+zu stellen liesse den block als navball MIT ANHAENGSEL lesen und diese vier
+felder leer. Die plaettchen sind deshalb keine nachbarn des blocks, sie sind
+teil seines rasters:
 
     +--------+                        +--------+
     |  BURN  |                        |  PLAN  |   <- ueber den flanken
@@ -33,22 +32,18 @@ Nach aussen zeigende ecken gefast, die zur kugel zeigenden SCHARF -- genau
 die regel, nach der schon die flanken angesetzt statt danebengestellt
 aussehen.
 
-DIE BEIDEN DELTA-V-ZEILEN SIND EINGABEFELDER, keine schrittknoepfe. Vier
-pfeilknoepfe je achse frassen 60 der 124 einheiten breite, und wer 1900 m/s
-einstellen will, klickt 190-mal. Angeklickt nimmt die zeile die tastatur
-und man tippt die zahl hinein -- ZIFFERN UND PUNKT, sonst nichts, und das
-feld waechst an ort und stelle statt in einem dialog woanders. Es startet
-MIT DEM STEHENDEN WERT, aber als ganzes markiert: die erste ziffer ERSETZT
-ihn (bloss vorbelegt hiesse anhaengen -- aus '0.0' und getippten '250.5'
-wurde '0.02505'), ein RUECKSCHRITT steigt in ihn ein und aendert ihn
-weiter. Leer zu starten war die andere haelfte desselben fehlers: die zeile
-zeigte '0', waehrend der knoten noch 250 trug. GESCHRIEBEN WIRD ERST BEIM
-ABSCHLUSS -- Enter, Tab oder ein klick woanders --, nicht bei jedem
-anschlag: jeder anschlag ist sonst ein `plan.touch()`, und wer '25000'
-tippt, laesst die kette auch die ZWISCHENSTUFEN 2, 25, 250 und 2500
-rechnen. Die teuerste davon ist die letzte vor der gewollten, und ein
-vertipptes '250000' haengt die eingabe an einem brennbogen fest, den
-niemand sehen wollte. Die
+DIE BEIDEN DELTA-V-ZEILEN SIND EINGABEFELDER, keine schrittknoepfe:
+schrittknoepfe kosten breite, und grosse werte waeren nur mit hunderten
+klicks erreichbar. Angeklickt nimmt die zeile die tastatur und man tippt
+die zahl hinein -- ZIFFERN UND PUNKT, sonst nichts, und das feld waechst an
+ort und stelle statt in einem dialog woanders. Es startet MIT DEM STEHENDEN
+WERT, aber als ganzes markiert: die erste ziffer ERSETZT ihn (bloss
+vorbelegt hiesse anhaengen), ein RUECKSCHRITT steigt in ihn ein und aendert
+ihn weiter; leer gestartet zeigte die zeile '0', waehrend der knoten noch
+seinen wert traegt. GESCHRIEBEN WIRD ERST BEIM ABSCHLUSS -- Enter, Tab oder
+ein klick woanders --, nicht bei jedem anschlag: jeder anschlag waere sonst
+ein `plan.touch()`, und wer '25000' tippt, liesse die kette auch die
+ZWISCHENSTUFEN 2, 25, 250 und 2500 rechnen. Die
 RICHTUNG ist kein vorzeichen zum tippen, sondern die beschriftung selbst:
 `PRO` schaltet auf `RET`, `NRM` auf `ANM`. Deshalb ist der kleinste
 tippbare wert 0.0 -- ein minus gaebe es zweimal, einmal als zeichen und
@@ -107,9 +102,9 @@ PLAN_HEIGHT = 48.0
 
 #: Die beiden unteren platten. HOEHER GEHT NICHT: der ORBITAL.INFO-block ist
 #: nur um eine halbe flankenbreite eingerueckt, ragt also unter beide
-#: flanken, und beginnt 47 einheiten unter dem streifen -- was tiefer
-#: haengt, liegt darauf. `layout()` klemmt zusaetzlich gegen seine oberkante,
-#: damit eine geaenderte BOX_H oder INFO_H das nicht stillschweigend kippt.
+#: flanken -- was tiefer haengt, liegt darauf. `layout()` klemmt zusaetzlich
+#: gegen seine oberkante, damit eine geaenderte BOX_H oder INFO_H das nicht
+#: stillschweigend kippt.
 AXES_HEIGHT = 40.0
 NODES_HEIGHT = 40.0
 
@@ -196,8 +191,7 @@ class _ManeuverPlate(Widget):
             sx, sy, sw, sh = navball.strip_rect(ctx, self.SIDE)
             top = sy + sh + gap
             # GEKLEMMT gegen die apsiden-leiste: sie ragt unter beide
-            # flanken, und ein plaettchen, das auf ihr liegt, ist der
-            # fehler, den die aufteilung gerade beseitigen soll.
+            # flanken, und kein plaettchen darf auf ihr liegen.
             limit = navball.info_rect(ctx)[1] - ctx.px(1.0)
             self.rect = Rect(sx, top, sw, max(ctx.px(12.0),
                                               min(height, limit - top)))
@@ -236,10 +230,9 @@ class _ManeuverPlate(Widget):
     def _draw_row(self, ctx, rect, key, value, color, key_color=None):
         """Eine zeile: beschriftung links, wert rechts.
 
-        DREI STUFEN, genau wie `NavballCluster._strip`, und aus demselben
-        anlass: der inhalt haengt an der groessenordnung des werts. Bei 124
-        einheiten breite belegt 'T-1d 07:29:43' die ganze zeile und schoebe
-        sich sonst ueber sein eigenes 'NODE'. Der wert gewinnt immer, die
+        DREI STUFEN, genau wie `NavballCluster._strip`: der inhalt haengt an
+        der groessenordnung des werts, und ein langer wert darf sich nicht
+        ueber seine beschriftung schieben. Der wert gewinnt immer, die
         beschriftung ist die zugabe.
         """
         palette = ctx.theme.palette
@@ -328,9 +321,9 @@ class ManeuverBurnBlock(_ManeuverPlate):
                      else telemetry.maneuver_time_to_node)
         # ROT, SOBALD ES 'T+' HEISST (siehe modulkopf).
         past = countdown is not None and float(countdown) < 0.0
-        # KOMPAKT gesetzt: die volle form ist 125 px breit und passt in
-        # die 102 px innenbreite nur ohne ihre beschriftung -- also
-        # ausgerechnet ohne das, was NODE von IGN unterscheidet.
+        # KOMPAKT gesetzt: die volle form passt in die innenbreite nur ohne
+        # ihre beschriftung -- also ausgerechnet ohne das, was NODE von IGN
+        # unterscheidet.
         self._draw_row(ctx, regions['_countdown'],
                        'IGN' if active else 'NODE',
                        units.countdown_compact(countdown),
@@ -521,12 +514,8 @@ class ManeuverAxesBlock(_ManeuverPlate):
                     return True
                 if self._editing != field:
                     # MIT DEM STEHENDEN WERT VORBELEGT, aber als GANZES
-                    # MARKIERT. Ein leeres feld log ueber den knoten: der
-                    # wert stand noch drin, die zeile zeigte '0'. Blosses
-                    # vorbelegen dagegen hiesse ANHAENGEN -- aus '0.0' und
-                    # getippten '250.5' wurde '0.02505', und der punkt, den
-                    # man tippt, war schon vergeben. Markiert kann beides:
-                    # tippen ersetzt, pfeil oder klick steigen ein.
+                    # MARKIERT: tippen ersetzt, pfeil oder klick steigen ein
+                    # (siehe modulkopf).
                     self._open(field)
                 else:
                     # SCHON OFFEN: der klick setzt den caret dorthin, wo er
@@ -541,8 +530,7 @@ class ManeuverAxesBlock(_ManeuverPlate):
     def on_wheel(self, ctx, dx, dy):
         """Das rad verstellt die zeile unter dem zeiger um einen feinschritt.
 
-        Der schnelle griff, den die vier pfeilknoepfe frueher hatten -- nur
-        ohne die 60 einheiten breite, die sie dafuer brauchten.
+        Der schnelle griff fuer kleine korrekturen, ohne eigene knoepfe.
         """
         if not dy or self._node() is None:
             return False
@@ -616,10 +604,8 @@ class ManeuverAxesBlock(_ManeuverPlate):
 
         char = event.unicode
         # DIE LAENGE ZUERST PRUEFEN. `'' in '0123456789'` ist WAHR -- ein
-        # teilstring-test, kein zeichentest. Ohne diese zeile zaehlte jede
-        # taste OHNE zeichen (pfeile, umschalt, F-tasten) als ziffer: sie
-        # warf die markierung weg und haengte nichts an, das feld sprang
-        # also beim ersten pfeildruck auf leer und beim schliessen auf 0.
+        # teilstring-test, kein zeichentest. Tasten OHNE zeichen (pfeile,
+        # umschalt, F-tasten) liefern '' und duerfen nicht als ziffer zaehlen.
         if len(char) != 1:
             return True
         # Komma wie punkt: auf einer deutschen tastatur liegt auf dem
@@ -744,9 +730,8 @@ class ManeuverAxesBlock(_ManeuverPlate):
                 ctx.draw.rect(vx, vy, vw, vh, fill=palette.active,
                               radius=-ctx.px(3.0))
                 # ZWEI ZUSTAENDE, ZWEI ZEICHEN. Markiert: ein band unter
-                # dem ganzen wert, denn die naechste ziffer ersetzt ihn --
-                # ohne das sah es aus, als loesche das feld die zahl von
-                # selbst. Sonst: ein caret GENAU an der schreibstelle, denn
+                # dem ganzen wert, denn die naechste ziffer ersetzt ihn.
+                # Sonst: ein caret GENAU an der schreibstelle, denn
                 # eingefuegt wird dort und nicht am ende.
                 #
                 # Das band traegt die ACHSENFARBE, keine neue: die vier
@@ -760,13 +745,10 @@ class ManeuverAxesBlock(_ManeuverPlate):
                                   fill=with_alpha(color, 0.5),
                                   radius=-ctx.px(2.0))
                 elif (self._caret_phase % _CARET_BLINK_S) < _CARET_BLINK_S * 0.6:
-                    # IN DER ACHSENFARBE und ueber der ganzen zeilenhoehe.
-                    # Gemessen: in `palette.text`, einen pixel breit und auf
-                    # der schreibstelle beginnend, unterschied er sich vom
-                    # bild ohne ihn in genau VIER pixeln -- er lag unter dem
-                    # weissen stamm der naechsten ziffer und war dieselbe
-                    # farbe. Er sitzt deshalb MITTIG auf der zeichengrenze,
-                    # also in der luecke zwischen zwei ziffern.
+                    # IN DER ACHSENFARBE, ueber der ganzen zeilenhoehe und
+                    # MITTIG auf der zeichengrenze, also in der luecke
+                    # zwischen zwei ziffern -- in textfarbe auf dem stamm der
+                    # naechsten ziffer waere er unsichtbar.
                     cw = max(2.0, ctx.px(1.5))
                     cx = eleft + (ctx.text.measure(text[:self._caret], erole)[0]
                                   if self._caret else 0.0)
@@ -787,9 +769,8 @@ class ManeuverAxesBlock(_ManeuverPlate):
             # tut -- liesse '0.0' gross und '1907.6' klein nebeneinander
             # stehen, und das sind zwei felder DESSELBEN eingabepaars.
             #
-            # OHNE EINHEIT, und zwar immer: 'm/s' kostet 25 der 70 px
-            # wert-spalte und passte damit nur, wenn BEIDE zahlen gerade
-            # klein sind. Eine einheit, die je nach wert erscheint und
+            # OHNE EINHEIT, und zwar immer: 'm/s' passte in die wert-spalte
+            # nur, wenn BEIDE zahlen gerade klein sind. Eine einheit, die je nach wert erscheint und
             # verschwindet, ist schlechter als gar keine -- und die
             # DV-zeile zwei plaettchen weiter oben, in derselben spalte,
             # traegt sie.
@@ -1051,24 +1032,20 @@ class ManeuverGizmo(Widget):
     (`renderer.maneuver_node_hits`) -- dieselbe arbeitsteilung wie beim
     schwebezettel an den Ap/Pe-rauten.
 
-    DIE GRIFFE SIND KNUEPPEL, KEINE SCHIEBEREGLER. Frueher war der wert die
-    absolute zeigerstrecke mal einem faktor: fuer 500 m/s musste man den
-    zeiger 660 px weit ziehen, also quer ueber den schirm, und am bildrand
-    war schluss. Jetzt ist die AUSLENKUNG eine RATE (m/s je sekunde), die
-    laeuft, solange gehalten wird -- dieselbe bauart wie der horizontregler
-    (`ui/widgets/rate_slider.py`) und aus demselben grund: eine groesse ohne
-    natuerliche obergrenze braucht ein steuer, keinen weg.
+    DIE GRIFFE SIND KNUEPPEL, KEINE SCHIEBEREGLER. Die AUSLENKUNG ist eine
+    RATE (m/s je sekunde), die laeuft, solange gehalten wird -- dieselbe
+    bauart wie der horizontregler (`ui/widgets/rate_slider.py`) und aus
+    demselben grund: eine groesse ohne natuerliche obergrenze braucht ein
+    steuer, keinen weg.
 
-    Es ist auch der grund, warum die eingabe jetzt weich ist. Am absoluten
-    regler sprang der wert mit jedem maus-ereignis; hier laeuft er
-    ZEITINTEGRIERT in `update()` weiter, also mit der bildrate geglaettet
-    und unabhaengig davon, wie oft das betriebssystem die maus meldet.
+    Der wert laeuft ZEITINTEGRIERT in `update()`, also mit der bildrate
+    geglaettet und unabhaengig davon, wie oft das betriebssystem die maus
+    meldet.
 
     ER FAENGT DIE MAUS NUR UEBER EINEM GRIFF. `hit_test` prueft radien, kein
     rechteck: das widget sitzt mitten im bild ueber der bahn, und eines, das
     dort flaechig klicks schluckt, blockierte koerperauswahl und
-    kameraschwenk -- derselbe fehler, den `AttitudeRing.hit_test` fuer den
-    kompassring behebt.
+    kameraschwenk (dieselbe regel wie bei `AttitudeRing.hit_test`).
 
     EIN FRAME VERSATZ, UND ZWAR ABSICHTLICH. Die trefferliste entsteht in
     `renderer.render()`, also NACH der ereignisschleife; ein klick prueft

@@ -1,10 +1,8 @@
 """Ausklappbare koerperliste zur wahl des BEZUGSKOERPERS.
 
-Bisher liess sich der bezugskoerper nur mit der taste R durchblaettern --
-eine reihenfolge, die man nicht sieht, ohne ziel und ohne rueckweg. Das ist
-genau die art undurchschaubarer tastenbelegung, die dieser HUD ersetzen
-soll: der bezugskoerper bestimmt saemtliche bahnwerte, er gehoert direkt
-waehlbar.
+Die taste R blaettert den bezugskoerper nur in einer unsichtbaren
+reihenfolge durch. Der bezugskoerper bestimmt aber saemtliche bahnwerte und
+gehoert deshalb direkt waehlbar.
 
 AUFBAU DER LISTE. Die gliederung wird NICHT von hand gepflegt, sondern aus
 den ``is_moon_of``-verweisen gelesen, die der loader ohnehin schon zu
@@ -35,10 +33,8 @@ from .. import units
 # Entwurfseinheiten, wie ueberall im HUD -- niemals pixel.
 #
 # Der knopf ist so BREIT wie das ziel-panel darunter und die plakette
-# darueber. Er war einmal ein 34x34-quadrat mit einem symbol darin und sass
-# damit als einzelnes kleines kaestchen zwischen zwei breiten bloecken -- die
-# linke spalte las sich als drei zufaellig gestapelte teile statt als eine
-# spalte. Gleiche breite ist hier die ganze arbeit.
+# darueber: erst die gleiche breite laesst die linke spalte als EINE spalte
+# lesen statt als drei gestapelte teile.
 _BUTTON = 34.0
 _BUTTON_WIDTH = 190.0
 _PANEL_WIDTH = 214.0
@@ -132,20 +128,18 @@ def build_hierarchy(bodies):
 class BodyBrowser(Widget):
     """Symbolknopf plus die dahinter liegende koerperliste.
 
-    EIN widget statt knopf + panel, aus demselben grund wie bei
-    ``PaletteButton``: die liste ist ein ueberlagerndes ausklapp-element.
-    Als eigenstaendiges widget muesste ihre trefferflaeche mit der des
+    EIN widget statt knopf + panel: die liste ist ein ueberlagerndes
+    ausklapp-element. Als eigenstaendiges widget muesste ihre trefferflaeche mit der des
     knopfes von hand synchron gehalten werden; so erweitert schlicht
     ``hit_test`` die flaeche, solange die liste offen ist.
     """
 
-    def __init__(self, telemetry, ui_state, side='left', **kwargs):
+    def __init__(self, telemetry, ui_state, **kwargs):
         kwargs.setdefault('size', (_BUTTON_WIDTH, _BUTTON))
         kwargs.setdefault('z', 150)
         super().__init__(**kwargs)
         self.telemetry = telemetry
         self.ui_state = ui_state
-        self.side = side
         self.blocks_mouse = True
         self.open = False
         # Aufklapp-fortschritt, 0..1. Getrennt von `open`, weil `open` das
@@ -175,13 +169,8 @@ class BodyBrowser(Widget):
         pad = ctx.px(_PADDING)
         height = (pad * 2.0 + ctx.px(_HEADER) + ctx.px(_GAP)
                   + len(rows) * ctx.px(_ROW_HEIGHT))
-        # Die liste haengt unter dem knopf und richtet sich an DERSELBEN
-        # kante aus wie er -- links verankert nach rechts, rechts verankert
-        # nach links. Sonst ragt sie bei rechter verankerung aus dem bild.
-        if self.side == 'right':
-            x = self.rect.right - width
-        else:
-            x = self.rect.x
+        # Die liste haengt unter dem knopf, buendig mit seiner linken kante.
+        x = self.rect.x
         y = self.rect.bottom + ctx.px(_GAP)
         # Nach unten begrenzen: bei vielen koerpern liefe die liste sonst
         # aus dem fenster, und die untersten zeilen waeren unerreichbar.
@@ -192,10 +181,8 @@ class BodyBrowser(Widget):
         """Das panel in seiner MOMENTANEN aufklapp-hoehe.
 
         Es waechst aus der unterkante des knopfes NACH UNTEN heraus: x, y
-        und breite bleiben fest, nur die hoehe laeuft. Ein einflug von der
-        seite haette so ausgesehen, als kaeme die liste von woanders her --
-        sie gehoert aber zu genau diesem knopf, und das soll die bewegung
-        sagen.
+        und breite bleiben fest, nur die hoehe laeuft. Die liste gehoert zu
+        genau diesem knopf, und das soll die bewegung sagen.
         """
         x, y, w, h = self._panel_rect(ctx)
         return (x, y, w, h * self._open_t)
@@ -311,9 +298,7 @@ class BodyBrowser(Widget):
         ctx.draw.circle(cx + orbit * 0.707, middle - orbit * 0.707,
                         ctx.px(2.0), fill=tint)
 
-        # Der knopf sagt jetzt selbst, was er tut. Vorher stand hier nur das
-        # symbol, und der einzige hinweis auf den bezugskoerper war das
-        # kuerzel in der plakette darueber.
+        # Die beschriftung sagt, was der knopf tut.
         ctx.text.draw('REFERENCE', cx + orbit + ctx.px(11), middle,
                       role='caption', color=palette.text_dim, valign='middle')
         arrow = self.rect.right - ctx.px(_PADDING)
@@ -348,9 +333,7 @@ class BodyBrowser(Widget):
                 # sonst laege die zeile ausserhalb des panels in der luft.
                 break
             # Jede zeile blendet GENAU DANN auf, wenn die wachsende
-            # unterkante sie ueberstreicht. Ohne das erschiene sie
-            # schlagartig, und das waere das einzige an der bewegung, was
-            # noch ruckelt.
+            # unterkante sie ueberstreicht, statt schlagartig zu erscheinen.
             reveal = max(0.0, min(1.0, (bottom - by) / max(row_h, 1e-6)))
             selected = body_index == reference
             cut = -ctx.px(4.0)

@@ -16,7 +16,6 @@ eine integrator-konstante hier zu aendern heisst, sie auch in
 """
 import math
 
-import numpy as np
 from numba import njit
 
 from physics.kernels.kepler import _body_position_at_time_numba
@@ -162,10 +161,8 @@ def _rkn4_step_numba(
     p2y = py + half_dt * vy + 0.125 * dt2 * k1_ay
     k2_ax, k2_ay = _rkn_acc_numba(p2x, p2y, ref_ax, ref_ay, body_x, body_y, body_m, body_fixed, G)
 
-    # k3 teilt sein argument mit k2 -- siehe _rkn4_step_time_numba. Der
-    # ausdruck war derselbe, die funktion ist rein, also war die dritte
-    # kraftauswertung bit fuer bit k2 und damit ein viertel der arbeit
-    # umsonst.
+    # k3 teilt sein argument mit k2 (klassisches RKN4) und ist damit
+    # dasselbe k -- siehe _rkn4_step_time_numba.
     k3_ax = k2_ax
     k3_ay = k2_ay
 
@@ -505,13 +502,11 @@ def _local_timescale_numba(
     nur EINE definition davon im projekt; diese hier ist ihre numba-form,
     weil der kernel die welt nicht fragen kann.
 
-    MINIMUM ueber alle koerper, NIE argmax(g): jenseits von r ~ 2.6e8 m
-    von der Erde ist die sonnenbeschleunigung groesser als die der Erde,
-    waehrend die Erd-SOI bis 9.2e8 m reicht -- die auswahl kippte dort auf
-    die Sonne und meldete deren zeitskala. Ueber einen 2-%-radiusschritt
-    gemessen ein sprung um das 97-fache. Das minimum stetiger funktionen
-    hat den sprung nicht (hoechstens 1.03x). Siehe die ausfuehrliche
-    herleitung in `.claude/rules/physics-world.md`.
+    MINIMUM ueber alle koerper, NIE argmax(g): der koerper mit der
+    groessten anziehung ist nicht immer der umlaufene (jenseits von
+    ~2.6e8 m von der Erde zieht die Sonne staerker), und ein minimum
+    stetiger funktionen springt nicht. Siehe
+    `.claude/rules/physics-world.md`.
 
     Rueckgabe 0.0, wenn kein koerper eine zeitskala liefert -- der aufrufer
     laesst seine decke dann unveraendert.
@@ -606,8 +601,7 @@ def _rkn_acc_time_numba(
             rpx = ref_px
             rpy = ref_py
         # Diese zweite aufstellung ALLER koerper laeuft zur exakt selben
-        # zeit wie die darunter -- ohne notizblock war sie eine volle
-        # verdopplung der teuersten schleife im predictor.
+        # zeit wie die darunter und trifft deshalb den notizblock.
         ref_ax, ref_ay = _compute_acc_time_numba(
             rpx,
             rpy,
@@ -695,49 +689,12 @@ def _rkn4_step_time_numba(
         body_memo
     )
 
-    # DRITTE STUFE: k1, NICHT k2.
-    #
-    # Im klassischen RKN4 teilen sich k2 und k3 ihr argument -- genau
-    # diese identitaet ist der ganze vorteil des verfahrens (ordnung 4
-    # aus 3 kraftauswertungen, wo RK4 vier braucht). Mit `k2` hier
-    # unterscheiden sich die stufen, die ordnungsbedingung bricht, und
-    # man bezahlt die vierte auswertung fuer 3. ordnung.
-    #
-    # Die welt hat diesen fehler am 2026-08-18 verloren
-    # (world.py + world_kernels.py:147), der predictor NICHT -- er ist
-    # bis hierher 3. ordnung geblieben. Zwei verfahren auf derselben
-    # physik laufen aber auseinander, und weil die vorhersage die einzige
-    # ist, deren ergebnis man SIEHT, sah man es an ihr: gemessen in einer
-    # erdumlaufbahn (rp 2e7 m, e = 0.3) lag ihr apoapsis bei 3.7133e7 m,
-    # das der welt bei 3.7692e7 m -- 5.5e5 m auseinander nach EINEM
-    # umlauf, und beide fuer sich in der schrittweite auskonvergiert.
-    # Im zeitraffer, wo die kurve stehenbleibt und das schiff an ihr
-    # entlangrutscht, ist genau das das "schiff loest sich von der linie".
-    #
-    # UND WEIL k3 SEIN ARGUMENT MIT k2 TEILT, IST ES DASSELBE k.
-    # `p3 == p2` stand hier als eigener ausdruck, wurde aber aus denselben
-    # summanden in derselben reihenfolge gebildet -- und
-    # `_rkn_acc_time_numba` ist eine reine funktion von (ort, zeit). Die
-    # dritte auswertung lieferte also denselben wert wie die zweite. Das
-    # ist die klassische 3-stufen-form (ordnung 4 aus 3 auswertungen), es
-    # geht keine genauigkeit verloren -- eine verdopplung faellt weg.
-    #
-    # ES SIND ABER NICHT DIE ERHOFFTEN 25 %, UND DER GRUND IST DER
-    # NOTIZBLOCK. `.claude/rules/physics-world.md` beziffert diese stufe
-    # mit "~25 % der integratorkosten"; das gilt fuer den WELT-kernel, der
-    # keinen `body_memo` hat. Hier lief k3 zur exakt selben zeit wie k2,
-    # traf also fuer jeden koerper den notizblock und bezahlte nur noch die
-    # 28 nachschlage plus die kraftsumme -- die teuren kepler-loesungen
-    # waren laengst gespart. Gemessen ueber die neun messlagen von
-    # `tests/warp_predictor_test.py` §24, gegen denselben lauf mit wieder
-    # eingesetzter dritter auswertung: **1.02x bis 1.15x, median 1.12x**.
-    #
-    # Und es ist BIT-IDENTISCH -- in allen neun lagen groesste abweichung
-    # 0.000e+00 bei gleicher schrittzahl. (Auf einer bahn, die numerisch
-    # davonlaeuft, verstaerkt sich unter `fastmath` eine unterschiedliche
-    # rundung von `k1 + k2 + k3` gegen `k1 + 2*k2` durchaus bis auf
-    # millimeter; auf den bahnen, die das spiel zeichnet, tut sie es
-    # nicht.)
+    # DRITTE STUFE: im klassischen RKN4 teilen sich k2 und k3 ihr argument
+    # (p3 = p0 + v0*h/2 + k1*h^2/8 = p2) -- genau diese identitaet gibt
+    # ordnung 4 aus 3 kraftauswertungen. Weil `_rkn_acc_time_numba` eine
+    # reine funktion von (ort, zeit) ist, IST k3 damit k2; die auswertung
+    # entfaellt. Die summen unten behalten die form `k1 + k2 + k3`, damit
+    # die rundung dieselbe bleibt wie mit ausgewertetem k3.
     k3_ax = k2_ax
     k3_ay = k2_ay
 
@@ -798,30 +755,15 @@ def _rkn_adaptive_step_time_numba(
     # DIE DECKE IST ORTLICH, NICHT GLOBAL.
     #
     # `max_dt` kommt als die vom HORIZONT abgeleitete decke herein (viele
-    # tausend sekunden bei langer vorausschau). Sie darf aber nicht ueber
-    # die bahn springen, und wie eng sie sein muss, haengt davon ab, wo das
-    # schiff GERADE ist -- nicht davon, wo es beim anlegen des
-    # schnappschusses stand. Genau das war der fehler: `_make_snapshot`
-    # rechnete `t_char/divisor` EINMAL am schiff und legte das ergebnis
-    # ueber den ganzen lauf. Auf einer abflugbahn (Erdorbit -> Jupiter)
-    # ist das die zeitskala der ERDE, und die galt dann auch fuer die
-    # 2.85 jahre heliozentrischen reiseflugs, wo die fehlerkontrolle
-    # muehelos 30 000 s schritte nimmt. Gemessen bei 128x horizont:
-    # **24 633 schritte / 899 ms gegen 1 276 / 56 ms**, dieselbe bahn --
-    # das 16-fache, und praktisch die gesamte rechenzeit lag im fernfeld,
-    # wo sie nichts kauft.
+    # tausend sekunden bei langer vorausschau). Sie darf nicht ueber die
+    # bahn springen, und wie eng sie sein muss, haengt davon ab, wo das
+    # schiff GERADE ist: auf einer abflugbahn gilt nahe der Erde deren
+    # zeitskala, im heliozentrischen reiseflug die viel groessere der
+    # Sonne. Deshalb `t_char/timescale_divisor` je schritt am aktuellen ort.
     #
-    # Ortlich gerechnet ist die decke nahe der Erde genauso eng wie zuvor
-    # (der boden `max_dt_floor` bindet dort ohnehin) und oeffnet sich erst,
-    # wenn das schiff die Erde wirklich verlassen hat. Fuer einen lauf, der
-    # in EINEM regime bleibt -- jede geschlossene umlaufbahn, also auch die
-    # lage aus §20 -- ist das bit fuer bit die alte rechnung.
-    #
-    # Die kosten sind fast null, und zwar wegen der REIHENFOLGE: die
-    # zeitskala wird zur zeit `local_t` ausgewertet, also genau der zeit,
-    # zu der gleich darauf k1 alle koerper braucht. Sie WAERMT damit den
-    # notizblock, statt zusaetzliche kepler-loesungen zu bezahlen; was
-    # bleibt, sind 28 wurzeln je schritt gegen 12 x 28 kepler-loesungen.
+    # Die zeitskala wird zur zeit `local_t` ausgewertet, also genau der
+    # zeit, zu der gleich darauf k1 alle koerper braucht -- sie waermt damit
+    # den notizblock, statt zusaetzliche kepler-loesungen zu kosten.
     if timescale_divisor > 0.0:
         t_char = _local_timescale_numba(
             px,
@@ -844,9 +786,8 @@ def _rkn_adaptive_step_time_numba(
         if t_char > 0.0:
             orbit_cap = t_char / timescale_divisor
             # Der boden ist die voreingestellte schrittdecke der
-            # qualitaetsstufe. Er darf nicht unterschritten werden -- sonst
-            # wuerde die ortliche decke im nahfeld STRENGER als die alte
-            # globale und der nahfeld-lauf teurer statt gleich teuer.
+            # qualitaetsstufe: die ortliche decke macht das nahfeld nie
+            # strenger als diese.
             if orbit_cap < max_dt_floor:
                 orbit_cap = max_dt_floor
             if orbit_cap < max_dt:

@@ -1,40 +1,18 @@
 """Numba-fassung des welt-integrators. WORTGLEICH zur python-fassung.
 
-WARUM ES DIESE DATEI GIBT. `world.update_dynamics` rueckt die freien koerper
-in schritten von hoechstens `integrator_max_step` (30 s) vor. Bei hohem
-zeitraffer ist das der teuerste teil des ganzen spiels und waechst LINEAR
-mit der raffung:
+`world.update_dynamics` ist bei hohem zeitraffer der teuerste teil des
+spiels (kosten linear in der zahl der teilschritte). Dieser kernel rechnet
+dieselben formeln, koeffizienten, schrittsteuerung, toleranzen und
+summationsreihenfolge wie world.py -- nur ohne Python-objekte, und muss
+bit-identische ergebnisse liefern (`tests/energy_test.py`,
+`tests/warp_predictor_test.py` §2).
 
-    7d/s  = 604800 sim-s je echtsekunde
-          = 10080 sim-s je frame bei 60 fps
-          = 336 adaptive schritte je frame
+Zwei regeln:
 
-Jeder dieser schritte macht schritt-verdopplung (drei RKN4-auswertungen zu je
-vier beschleunigungen), jede beschleunigung laeuft ueber alle koerper und legt
-dabei Vec2-objekte an -- gemessen 47.4 ms je frame allein hierfuer, gegenueber
-0.17 ms bei 1m/s. Das ist die ursache der 1-2 fps bei hoher raffung, nicht der
-predictor (der lag im selben messlauf bei 5.6 ms) und nicht das zeichnen.
-
-WAS HIER NICHT PASSIERT: die genauigkeit wird NICHT angetastet. Es sind
-dieselben formeln, dieselben koeffizienten, dieselbe schrittsteuerung,
-dieselben toleranzen und dieselbe summationsreihenfolge wie in world.py --
-nur ohne Python-objekte. `tests/energy_test.py` muss danach exakt dieselben
-werte liefern; tut es das nicht, ist die uebertragung falsch, nicht "etwas
-ungenauer".
-
-ZWEI STELLEN, AN DENEN MAN LEICHT DANEBENGREIFT:
-
-1. **Das koerpermodell ist die Kepler-loesung, und zwar in ALLEN DREIEN.**
-   Bis 2026-08-27 stand hier das gegenteil: die welt rechnete mit KONSTANTER
-   winkelgeschwindigkeit (`theta_t = theta_ref + omega_ref * dt`), der
-   predictor mit mittlerer anomalie und Newton-iteration, und diese datei
-   bildete bewusst das erstere nach. Das war der fehler, nicht die regel --
-   die naeherung ist nur an den apsiden richtig und ihr fehler waechst mit
-   dem ALTER DES BOOKMARKS, also mit der chunk-groesse, also mit der
-   raffungsstufe. `bodies.kepler_relative_xy` ist jetzt die eine quelle;
-   `_body_pos_at_time` unten ist ihre wortgleiche uebertragung. Wer eine der
-   beiden anfasst, muss die andere mitziehen -- `tests/warp_predictor_test.py`
-   §2 misst die bit-identitaet und faellt sofort darauf.
+1. **Das koerpermodell ist die exakte Kepler-loesung.**
+   `bodies.kepler_relative_xy` ist die eine quelle; `_body_pos_at_time`
+   unten ist ihre wortgleiche uebertragung. Wer eine der beiden anfasst,
+   muss die andere mitziehen.
 2. **Die summe laeuft in koerper-reihenfolge.** Gleitkomma-addition ist nicht
    assoziativ; eine andere reihenfolge gibt andere letzte bits und damit eine
    andere energiedrift.
@@ -88,8 +66,7 @@ def _body_pos_at_time(index, t, bx, by, k_has, k_a, k_e, k_arg, k_parent,
         delta_t = t - k_ref_time[idx]
 
         # Exakte Kepler-fortschreibung -- WORT FUER WORT
-        # bodies.kepler_relative_xy (und damit auch
-        # predictor._body_scripted_relative_xy_numba). Siehe modulkopf, punkt 1.
+        # bodies.kepler_relative_xy. Siehe modulkopf, punkt 1.
         cos_nu0 = math.cos(nu0)
         sin_nu0 = math.sin(nu0)
         denom = 1.0 + e * cos_nu0
@@ -240,12 +217,9 @@ def advance_dynamics(dyn, dyn_px, dyn_py, dyn_vx, dyn_vy, t_start, total_dt,
     `accepted_all`, waehrend eines versuchs sehen sich die freien koerper
     also gegenseitig noch am alten ort.
 
-    `h_hint` ist die zuletzt ANGENOMMENE schrittweite (0 = keine). Ohne sie
-    beginnt jeder aeussere durchlauf wieder bei `max_step` und muss sich per
-    ablehnung erneut nach unten arbeiten -- gemessen in einem 2000-km-orbit bei
-    1 y/s: 3794 angenommene gegen 19810 abgelehnte schritte, 629 ms je frame.
-    Mit dem hinweis faengt der naechste durchlauf dort an, wo der letzte
-    aufgehoert hat, und waechst nach einem erfolg wieder um das doppelte.
+    `h_hint` ist die zuletzt ANGENOMMENE schrittweite (0 = bei `max_step`
+    beginnen). Damit faengt der naechste aufruf dort an, wo der letzte
+    aufgehoert hat, statt sich von der decke per ablehnung herunterzuarbeiten.
 
     Rueckgabe: (substeps, rejections, forced, worst_pos_err, worst_vel_err,
                 h_hint_out).

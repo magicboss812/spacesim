@@ -216,8 +216,7 @@ def _midpoint_normal(a, b):
     """Normierte kugel-normale in der mitte einer kante.
 
     Bewusst `math.sqrt` statt `np.linalg.norm`: die kante ist ein 3-tupel, und
-    numpy kostet auf so kleinen daten mehr overhead als rechnung -- gemessen
-    war das der groesste einzelposten beim bauen.
+    numpy kostet auf so kleinen daten mehr overhead als rechnung.
     """
     nx = a[0] + b[0]
     ny = a[1] + b[1]
@@ -346,7 +345,7 @@ def build_planet_style(seed, color=(255, 255, 255), mode=None, shape=None,
     if accent_shape is None:
         accent_shape = SHAPES[int(_hash3(s, 17, 91, seed + 6151) * len(SHAPES))]
 
-    shape_gate = 0.3 + rnd() * 0.45
+    rnd()  # shapeGate des mockups -- ersetzt durch shape_density, nur mitgezogen
     if shape_density is None:
         shape_density = DEFAULT_SHAPE_DENSITY
     shape_gate = max(0.0, min(1.0, float(shape_density)))
@@ -572,10 +571,9 @@ def _emit_shape(shape, pa, pb, pc, n, fill, fill_alpha, stroke, line_alpha,
         # Kreis als polygon: die figur bleibt vektor, nur eben mit 12 ecken.
         #
         # Begrenzt wird er vom INKREIS, nicht von der halben strecke zum
-        # eckpunkt. Am rand der scheibe sind die facetten stark verkuerzt;
-        # die halbe eckstrecke lag dort ausserhalb des dreiecks und damit
-        # ausserhalb des einheitskreises -- gemessen 1.0045, also 0.45 %
-        # ueber den rand, wo der koerper eigentlich schon zu ende ist.
+        # eckpunkt: am rand der scheibe sind die facetten stark verkuerzt,
+        # und nur der inkreis bleibt dort sicher im dreieck und damit im
+        # einheitskreis.
         side_a = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
         side_b = math.hypot(pc[0] - pb[0], pc[1] - pb[1])
         side_c = math.hypot(pa[0] - pc[0], pa[1] - pc[1])

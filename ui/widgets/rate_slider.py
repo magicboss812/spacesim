@@ -5,11 +5,11 @@ solange man haelt -- die auslenkung ist die GESCHWINDIGKEIT der aenderung,
 nicht ihr zielwert. Loslassen federt weich in die mitte zurueck.
 
 Getrennt von ui/widgets/slider.py (das ist ein LAGE-regler), weil die
-interaktion eine voellig andere ist -- ein `log=`-schalter reichte nicht.
+interaktion eine voellig andere ist.
 
 Benutzt fuer den vorhersage-horizont: die gezeichnete linienlaenge folgt
 der auslenkung jeden frame ueber predictor.set_display_length() (O(1), kein
-neuaufbau). Siehe plans/predictor_horizon_slider_design.md.
+neuaufbau).
 """
 
 import math
@@ -81,8 +81,8 @@ class HorizonSlider(Widget):
 
     def _track_rect(self, ctx):
         # Spur einwaerts gesetzt: die '-'/'+'-endglyphen sitzen px(9)+px(3)
-        # AUSSERHALB der spur, und ohne diesen einzug ragte das minus ueber
-        # die widget-kante hinaus fast bis an den bildschirmrand.
+        # AUSSERHALB der spur und muessen noch innerhalb der widget-kante
+        # liegen.
         inset = ctx.px(12.0)
         h = ctx.px(5.0)
         top_band = self._tab_h(ctx) + self._readout_h(ctx)
@@ -139,10 +139,9 @@ class HorizonSlider(Widget):
 
         `get_display_length()` gibt die GERECHNETE laenge (aufs punktbudget
         geklemmt) -- und die eilt dem knauf waehrend eines zugs voraus, weil
-        `horizon_targets()` sie auf groben sprossen mitfaehrt. Frueher stand
-        hier deshalb den ganzen zug ueber die reglerdecke statt der gewaehlte
-        wert. Der clip `predictor.display_length` ist der ehrliche wert: genau
-        so viel wird gezeichnet.
+        `horizon_targets()` sie auf groben sprossen mitfaehrt. Der clip
+        `predictor.display_length` ist der ehrliche wert: genau so viel wird
+        gezeichnet.
         """
         pred = self.predictor
         if pred is not None:

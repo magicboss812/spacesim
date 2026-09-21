@@ -68,7 +68,7 @@ QUALITY_PRESETS = ("fast", "balanced", "accurate", "rk4")
 # teil des dateiformats des puffers und darf nicht umsortiert werden, ohne
 # TimingHistory.push() mitzuziehen.
 #
-# Es sind GENAU die vier groessen, die test.py in der `TIMING:`-zeile
+# Es sind GENAU die groessen, die runtime/loop.py in der `TIMING:`-zeile
 # ausgibt, aus derselben quelle gelesen -- graph und ausgabe koennen sich
 # damit nicht widersprechen. `frame` ist die fuenfte, aber keine gezeichnete:
 # sie ist nur der bezug (budget-strich, textzeile).
@@ -137,8 +137,7 @@ class TimingHistory:
     eine serie und damit eine gueltige eingabe fuer `plot_lines`, ohne kopie.
     Geschrieben wird ueber eine schreibmarke, NICHT ueber np.roll oder eine
     liste mit append: das abtasten laeuft in jedem frame -- auch wenn das
-    panel zu ist -- und darf im bildbudget nicht auftauchen. Gemessen liegt
-    `push()` bei ~1-2 us, also unter 0.04 % eines 5.6-ms-frames.
+    panel zu ist -- und darf im bildbudget nicht auftauchen.
 
     `window()` liefert das feld zusammen mit dem offset der AELTESTEN probe,
     weil imgui `values[(i + offset) % n]` liest. Zeigt der offset auf die
@@ -320,7 +319,7 @@ class DevContext:
         self.timings = TimingHistory(timing_capacity)
 
     def sample_timings(self, frame_ms=0.0):
-        """Eine probe der vier zeitreihen. Je frame einmal, aus test.py.
+        """Eine probe der vier zeitreihen. Je frame einmal, aus der hauptschleife.
 
         BEWUSST ausserhalb von draw_dev_panels: das panel ist meistens zu
         (F1), und ein puffer, der nur gefuellt wird, waehrend man hinschaut,

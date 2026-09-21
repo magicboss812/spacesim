@@ -3,10 +3,8 @@
 Nachgebaut nach der instrumententafel von Kerbal Space Program 2. Deren
 eigentliche leistung ist nicht die kugel, sondern die VERDICHTUNG: kurs,
 geschwindigkeit, hoehe, schub, steigrate und die beiden apsiden sitzen in
-einem einzigen, zusammenhaengenden block von der groesse einer handflaeche.
-Vorher lagen dieselben werte hier in fuenf einzelnen panels ueber den
-ganzen bildschirm verteilt -- und die mitte, wo die bahn gezeichnet wird,
-war zugebaut.
+einem einzigen, zusammenhaengenden block von der groesse einer handflaeche,
+und die bildmitte bleibt frei fuer die bahn.
 
     ┌──────────┐        ╭─ 357° ─╮        ┌──────────┐
     │ ORB      │      ╱            ╲      │      ALT │
@@ -89,7 +87,7 @@ class NavballCluster(Widget):
         self.blocks_mouse = True
         self._dragging_throttle = False
         self.ring = self.add(AttitudeRing(
-            telemetry, ship_control, size=(RING_SIZE, RING_SIZE), hub_only=True,
+            telemetry, ship_control, size=(RING_SIZE, RING_SIZE),
         ))
 
     # -------------------------------------------------------------- geometrie
@@ -343,10 +341,9 @@ class NavballCluster(Widget):
         # Mit VORZEICHEN: das ist die ganze aussage der groesse. Ein '+'
         # vorweg, weil ein blosses '38' nicht sagt, ob es steigt oder faellt.
         #
-        # EINE nachkommastelle, nicht zwei: '+14.41km/s' ist bei 15 px
-        # genau so breit wie der ganze streifen und schob sich damit ueber
-        # die beschriftung. Die zweite stelle sagt an einer anzeige, die
-        # daneben ohnehin einen bogen hat, auch nichts.
+        # EINE nachkommastelle, nicht zwei: mit zwei fuellt ein wert wie
+        # '+14.41km/s' bei 15 px den ganzen streifen, und die zweite stelle
+        # sagt neben einem bogen, der dasselbe zeigt, auch nichts.
         radial = telemetry.radial_speed
         if radial is None:
             text = '--'
@@ -364,12 +361,10 @@ class NavballCluster(Widget):
         beschriftung -> kleiner wert ALLEIN. Der wert gewinnt immer; die
         beschriftung ist die zugabe.
 
-        Der anlass war '+14.41km/s': bei 15 px belegte das die vollen 100 px
-        des streifens, und das 'V/S' verschwand darunter. Die kleine stufe
-        allein reicht dafuer nicht -- die pixelschrift rastet ihre groesse
-        auf fuenferschritte, die "kleine" rolle ist also nicht ueberall
-        proportional kleiner. Bei 250 km/s laeuft auch sie noch ueber, und
-        genau dann faellt die beschriftung weg.
+        Eine einzige kleine stufe reicht nicht: die pixelschrift rastet ihre
+        groesse auf fuenferschritte, die "kleine" rolle ist also nicht
+        ueberall proportional kleiner, und bei sehr grossen werten laeuft
+        auch sie noch ueber -- dann faellt die beschriftung weg.
         """
         palette = ctx.theme.palette
         sx, sy, sw, sh = self._strip_rect(ctx, side)
@@ -400,7 +395,7 @@ class NavballCluster(Widget):
     def _draw_heading_badge(self, ctx, cx):
         """Der kurs ueber der kugel -- die auffaelligste einzelzahl der vorlage.
 
-        Er steht bewusst NICHT mehr in der ringmitte: dort lief die
+        Er steht bewusst NICHT in der ringmitte: dort liefe die
         geschwindigkeitsnadel quer durch die ziffern.
         """
         palette = ctx.theme.palette
@@ -427,8 +422,7 @@ class NavballCluster(Widget):
     def _draw_info(self, ctx):
         """AP und PE mit ihren restzeiten -- der ORBITAL.INFO-block.
 
-        Das ersetzt das frueher eigenstaendige seitenpanel. Die beiden
-        apsiden gehoeren neben das instrument, nicht an den bildschirmrand:
+        Die beiden apsiden gehoeren neben das instrument, nicht an den bildschirmrand:
         man liest sie waehrend eines brennmanoevers, also genau dann, wenn
         der blick auf dem kurs liegt.
         """

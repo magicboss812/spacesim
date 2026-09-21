@@ -1,16 +1,11 @@
 """Die GL-geraeteschicht des Renderers.
 
-War teil der 5900-zeiligen `Renderer`-klasse in `rendering.py`. Als MIXIN
-herausgeloest, nicht als eigenes objekt: die methoden greifen auf dutzende
-`self._*`-felder zu, die `Renderer.__init__` anlegt, und eine echte
-komposition haette hunderte zugriffe umgeschrieben -- ein grosses risiko fuer
-eine rein strukturelle aenderung.
+Ein MIXIN von `Renderer`, kein eigenes objekt: die methoden greifen auf die
+`self._*`-felder zu, die `Renderer.__init__` anlegt.
 """
-import os
 import time
 
 import moderngl
-import numpy as np
 import pygame
 
 
@@ -32,8 +27,7 @@ class GLDeviceMixin:
         # Hintergrundfarbe (dunkelblau)
         self._clear_color = (0.0, 0.0, 0.05, 1.0)
 
-        # VSync kommt vom fenster-swap: pygame.display.set_mode(..., vsync=1)
-        # bzw. SDL_VIDEO_VSYNC in test.py. Der alte wgl/glX-hack entfällt.
+        # VSync kommt vom fenster-swap (runtime/window.py).
 
     def _create_fxaa_targets(self):
         """Erstellt FBO-textur und framebuffer in aktueller fenstergröße."""
@@ -191,13 +185,8 @@ class GLDeviceMixin:
         Von der hauptschleife aufzurufen, NACHDEM alle overlays gezeichnet sind.
 
         `frame_ms` bleibt dabei stehen: es ist die dauer von render() SELBST.
-        Frueher wurde es hier auf "render-start bis nach dem swap" gesetzt,
-        und weil `rend_calc` daraus als `frame_ms - swap` gebildet wird, lief
-        alles, was zwischen render() und present() gezeichnet wird -- vor
-        allem das spieler-HUD (`ui_root.render()`, gemessen ~8 ms median) --
-        stillschweigend unter "render calc". Das ist die haelfte der zahl,
-        und sie stand an der falschen stelle. Die luecke heisst jetzt
-        `overlay_ms` und wird getrennt ausgewiesen.
+        Was zwischen render() und present() gezeichnet wird (spieler-HUD,
+        dev-oberflaeche), steht getrennt als `overlay_ms`.
         """
         swap_t0 = time.perf_counter()
         pygame.display.flip()
@@ -221,16 +210,12 @@ class GLDeviceMixin:
         # u_viewport haengt an der fenstergroesse -- der zustandscache waere
         # sonst genau ueber diesen wert veraltet.
         self._invalidate_gl_state_cache()
-        # WICHTIG: moderngl erkennt die groesse von ctx.screen nur EINMAL beim
-        # anlegen des contexts. Nach einem resize meldet ctx.screen.size noch
-        # die alte fenstergroesse -- und jedes ctx.screen.use() stellt daraus
-        # viewport UND scissor wieder her. Ohne die explizite neuzuweisung
-        # unten klemmt der scissor nach dem FXAA-pass (render() ruft dort
-        # ctx.screen.use()) alles nachfolgende -- predictor-linie, schiff, HUD
-        # -- auf das alte fenster-rechteck: beim maximieren ist dann nur noch
-        # ein ausschnitt des spiels sichtbar.
-        # ctx.screen.scissor = None hilft NICHT: das setzt den scissor auf die
-        # (weiterhin veraltete) eigengroesse des framebuffers zurueck.
+        # moderngl erkennt die groesse von ctx.screen nur EINMAL beim anlegen
+        # des contexts, und jedes ctx.screen.use() stellt daraus viewport UND
+        # scissor wieder her. Ohne die explizite neuzuweisung klemmt der
+        # scissor alles nach dem FXAA-pass auf das alte fenster-rechteck.
+        # ctx.screen.scissor = None genuegt nicht: das setzt ihn auf die
+        # (veraltete) eigengroesse des framebuffers zurueck.
         try:
             self.ctx.screen.viewport = (0, 0, width, height)
             self.ctx.screen.scissor = (0, 0, width, height)

@@ -86,19 +86,13 @@ class Rect:
         return Rect(self.x + dx, self.y + dy, max(0.0, self.w - 2 * dx),
                     max(0.0, self.h - 2 * dy))
 
-    def moved(self, dx, dy):
-        return Rect(self.x + dx, self.y + dy, self.w, self.h)
-
-    def copy(self):
-        return Rect(self.x, self.y, self.w, self.h)
-
     def __repr__(self):
         return f"Rect({self.x:.1f}, {self.y:.1f}, {self.w:.1f}, {self.h:.1f})"
 
 
 def ease(current, target, rate, dt):
-    """Framerate-unabhaengiges exponentielles easing -- dieselbe formel wie
-    das kamera-easing aus Phase 1 (1 - exp(-rate * dt))."""
+    """Framerate-unabhaengiges exponentielles easing (1 - exp(-rate * dt)),
+    dieselbe formel wie das kamera-easing."""
     if rate <= 0.0:
         return float(target)
     alpha = 1.0 - math.exp(-float(rate) * max(0.0, float(dt)))
@@ -134,17 +128,13 @@ class UIContext:
         # Eingabezustand des aktuellen frames.
         self.mouse_x = 0.0
         self.mouse_y = 0.0
-        self.mouse_down = False
         self.dt = 0.0
 
     def px(self, design_units):
         """Design-einheiten -> pixel. Das gegenstueck zu Renderer.ui_px().
 
         Nimmt auch eine FOLGE, denn ein eckradius darf pro ecke verschieden
-        sein (theme.cut_corners). Ohne diesen fall muesste jeder aufrufer
-        die umrechnung selbst ueber das tupel ziehen -- und genau das ging
-        einmal schief: Panel reichte das tupel ungeprueft weiter und starb
-        an "float() argument must be ... not 'tuple'".
+        sein (theme.cut_corners); jedes element wird dann einzeln skaliert.
         """
         if isinstance(design_units, (tuple, list)):
             return tuple(float(value) * self.ui_scale for value in design_units)
@@ -207,11 +197,6 @@ class Widget:
         child.parent = self
         self.children.append(child)
         return child
-
-    def remove(self, child):
-        if child in self.children:
-            child.parent = None
-            self.children.remove(child)
 
     def walk(self):
         """Sich selbst und alle nachkommen, eltern zuerst."""
@@ -306,13 +291,6 @@ class Widget:
     def draw(self, ctx):
         """Eigene darstellung. Basisklasse zeichnet nichts."""
 
-    def draw_tree(self, ctx):
-        if not self.visible:
-            return
-        self.draw(ctx)
-        for child in sorted(self.children, key=lambda c: c.z):
-            child.draw_tree(ctx)
-
     # -------------------------------------------------------------- eingabe
 
     def hit_test(self, ctx, x, y):
@@ -345,8 +323,8 @@ class UIRoot(Widget):
     verbraucht wurden.
 
     EINGABE-VORFAHRT: custom-UI -> ImGui -> welt. Diese klasse ist die
-    erste stufe; test.py fragt wants_mouse / wants_keyboard ab und reicht
-    sie an devui, kamera und schiffsteuerung weiter.
+    erste stufe; die hauptschleife fragt wants_mouse / wants_keyboard ab und
+    reicht sie an devui, kamera und schiffsteuerung weiter.
 
     WICHTIG: schiffsteuerung und WASD-schwenk lesen die tastatur per POLLING
     (pygame.key.get_pressed()), nicht ueber ereignisse. Ein ereignis hier zu
@@ -399,13 +377,9 @@ class UIRoot(Widget):
         container hebt damit seinen ganzen teilbaum an, und ein einzelnes
         widget kann sich trotzdem ueber geschwister-TEILBAEUME legen.
 
-        Warum global und nicht je ebene: vorher wurden nur geschwister nach z
-        sortiert, und der zeichen- wie der treffer-pfad liefen einfach in
-        tiefensuch-reihenfolge. Ein aufklappmenue mit z=200 verlor damit
-        gegen JEDES panel, das weiter hinten im baum haengt -- die
-        palettenauswahl wurde von der system-karte verdeckt und fing deren
-        klicks ab, obwohl sie sichtbar darueber lag. Ein z, das nur innerhalb
-        einer ebene gilt, ist kein z.
+        Global und nicht je ebene: ein aufklappmenue mit hohem z muss auch
+        ueber panels liegen, die weiter hinten im baum haengen -- beim
+        zeichnen wie beim treffertest.
 
         Die tiefensuche haelt eltern vor ihren kindern, das malprinzip
         (erst flaeche, dann inhalt) bleibt also erhalten. Bei gleichem z
@@ -458,16 +432,11 @@ class UIRoot(Widget):
         self.update(ctx, dt)
 
     def render(self):
-        # Flach in globaler z-reihenfolge zeichnen, NICHT ueber draw_tree:
-        # das sortiert nur je ebene und legt ein aufklappmenue unter jedes
-        # panel, das weiter hinten im baum steht (siehe paint_order).
+        # Flach in globaler z-reihenfolge zeichnen (siehe paint_order).
         for widget in self.paint_order():
             widget.draw(self.ui)
-        # Erst die gesammelten rechtecke raus (instanzierter draw), dann der
-        # aufgeschobene text zuletzt: er darf nie unter einer flaeche
-        # verschwinden, die spaeter im baum gezeichnet wird.
+        # Die restlichen gesammelten rechtecke raus (instanzierter draw).
         self.ui.draw.flush()
-        self.ui.text.flush()
 
     def _refresh_hover(self):
         x, y = self._mouse_pos
@@ -513,7 +482,6 @@ class UIRoot(Widget):
                 # fokussiertes eingabefeld die tastatur fuer immer.
                 self.set_focus(None)
                 return False
-            ctx.mouse_down = True
             self._active_widget = target
             target.pressed = True
             self.set_focus(target if target.takes_keyboard else None)
@@ -522,7 +490,6 @@ class UIRoot(Widget):
 
         if event.type == pygame.MOUSEBUTTONUP:
             self._mouse_pos = (float(event.pos[0]), float(event.pos[1]))
-            ctx.mouse_down = False
             active = self._active_widget
             if active is None:
                 return False

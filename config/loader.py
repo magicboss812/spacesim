@@ -1,8 +1,6 @@
 """Zentrale konfiguration: `config.json` -> world/camera/schiff/predictor/renderer.
 
-Der SystemLoader (die KOERPER aus `solar_system.json`) lag frueher in derselben
-datei und ist jetzt `runtime/system_loader.py` -- die beiden teilten nichts
-ausser dem JSON-modul.
+Die KOERPER aus `solar_system.json` laedt `runtime/system_loader.py`.
 
 `config.json` und `solar_system.json` liegen neben diesem modul, damit alles
 einstellbare an einem ort steht.
@@ -203,7 +201,7 @@ class ConfigLoader:
                 continue
             used.add(key)
             if attr is None:
-                # schluessel wird anderswo ausgewertet (z. B. direkt in test.py);
+                # schluessel wird anderswo ausgewertet (z. B. in runtime/);
                 # hier nur als "bekannt" markieren, damit keine warnung kommt.
                 continue
             value = section[key]
@@ -416,13 +414,13 @@ class ConfigLoader:
             # Gleichzeitige vorhersagen unter schub. Eine rechnung dauert
             # laenger als ein bild, also gibt erst der DURCHSATZ mehrerer
             # zeitversetzter laeufe eine bildweise nachziehende linie.
-            # 1 = wie vorher (eine nach der anderen).
+            # 1 = eine rechnung nach der anderen.
             ('thrust_pipeline_depth', 'thrust_pipeline_depth', int),
             # Jitter-puffer fuer das einwechseln fertiger vorhersagen.
             # 0 = immer sofort das neueste (kuerzeste verzoegerung, aber
             # ruckartig), 2 = vollstaendig gleichmaessig, dafuer aeltere linie.
             ('swap_backlog_max', 'swap_backlog_max', int),
-            # nur von test.py ausgewertet (tastenbelegung / ein-aus-verhalten)
+            # anderswo ausgewertet (runtime/, ship/horizon.py)
             ('display_length_quantum_points', None, None),
             ('horizon_slider_min_mult', None, None),
             ('horizon_slider_max_mult', None, None),
@@ -466,7 +464,7 @@ class ConfigLoader:
             ('prediction_hermite_max_subdiv', 'prediction_hermite_max_subdiv', int),
             ('prediction_error_ladder_m', 'prediction_error_ladder_m', _float_list),
             # Das spieler-HUD haengt nicht am renderer, sondern wird in
-            # test.py aufgebaut -- hier nur als bekannt markieren.
+            # runtime/bootstrap.py aufgebaut -- hier nur als bekannt markieren.
             ('hud_enabled', None, None),
             ('show_debug_hud', 'show_debug_hud', bool),
             ('show_apsis_markers', 'show_apsis_markers', bool),
@@ -622,8 +620,7 @@ class ConfigLoader:
             renderer.render_benchmark_every_n_frames = every_n
 
         # Die hintergrund-ebene haengt am renderer, hat aber einen eigenen
-        # config-abschnitt -- hier mitgereicht, damit apply_all() nichts
-        # zusaetzliches uebergeben muss.
+        # config-abschnitt.
         self.apply_to_background(getattr(renderer, 'background', None))
         return renderer
 
@@ -661,22 +658,4 @@ class ConfigLoader:
                   f"(erlaubt: {', '.join(background.GRID_ANCHORS)})")
             bg.grid_anchor = background.GRID_ANCHORS[0]
         return bg
-
-    def apply_all(self, world_obj=None, camera=None, ship_control=None,
-                  predictor=None, renderer=None):
-        """Bequemlichkeit: alle abschnitte auf einmal verteilen."""
-        self.apply_globals()
-        if world_obj is not None:
-            self.apply_to_world(world_obj)
-        if camera is not None:
-            self.apply_to_camera(camera)
-        if ship_control is not None:
-            self.apply_to_ship_control(ship_control)
-        if predictor is not None:
-            self.apply_to_predictor(predictor)
-        if renderer is not None:
-            self.apply_to_renderer(renderer)
-        if self.unknown_keys and self.get_bool('debug.print_loader_info', True):
-            print(f"CONFIG: unbekannte schluessel ignoriert: {', '.join(sorted(set(self.unknown_keys)))}")
-        return self
 

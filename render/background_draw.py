@@ -3,8 +3,6 @@
 Die geometrie (sterne, gitter) rechnet `render/background.py` in reinem numpy;
 hier steht der GL-pfad dazu.
 """
-import math
-
 import moderngl
 
 import numpy as np
@@ -28,8 +26,8 @@ class BackgroundDrawMixin:
 
         Gezeichnet wird als INSTANZIERTES quad, nicht als punkt-sprite --
         `gl_PointCoord` liefert auf dem NVIDIA-treiber dieses rechners
-        konstant (0, 0) und liess damit die zellmaske jedes sternfragment
-        verwerfen. Begruendung in shaders/star.vert.
+        konstant (0, 0), und die zellmaske verwuerfe damit jedes
+        sternfragment. Begruendung in render/gl/star.vert.
         """
         if self._star_program is None:
             return None
@@ -97,11 +95,9 @@ class BackgroundDrawMixin:
         # koerpers (absolut, damit ein rahmenwechsel es nicht ruckt); steht die
         # kamera frei, uebernimmt der schwenk.
         #
-        # ACHTUNG: hier stand einmal `focus.velocity`. Das ist fuer
-        # himmelskoerper IMMER (0, 0) -- solar_system.json setzt es so, und
-        # world.update_planets schreibt nur die kepler-POSITION. Das feld stand
-        # damit bei jedem koerper ausser dem Schiff still. Uebergeben wird
-        # deshalb die position, abgeleitet wird in background._focus_speed.
+        # Uebergeben wird die POSITION, nicht `focus.velocity` (das ist fuer
+        # geskriptete koerper immer (0, 0)); abgeleitet wird in
+        # background._focus_speed.
         focus = getattr(camera, 'target', None)
         focus_world_xy = None
         focus_frame_xy = None
@@ -180,10 +176,7 @@ class BackgroundDrawMixin:
                                     [lv.node_alpha for lv in levels[:count]] + [0.0] * pad)
                 # ACHTUNG: `u_level_phase` ist ein vec2-ARRAY. moderngl will
                 # dafuer eine liste von PAAREN -- eine flache liste wirft
-                # "Value after * must be an iterable, not float". Das ist
-                # genau der fehler, der hier einmal drin war: der schreib-
-                # versuch schlug still fehl, die phasen blieben null, und das
-                # gitter klebte am bildschirm statt an der welt.
+                # "Value after * must be an iterable, not float".
                 phases = [(lv.phase_a, lv.phase_b) for lv in levels[:count]]
                 phases.extend([(0.0, 0.0)] * pad)
                 self._write_uniform(program, 'u_level_phase', phases)

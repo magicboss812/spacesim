@@ -55,9 +55,9 @@ class Vec2:
         return self
 
     def __rmul__(self, scalar):
+        """skalare multiplikation (scalar * self)."""
         if not isinstance(scalar, (int, float)):
             return NotImplemented
-        """skalare multiplikation (scalar * self)."""
         s = float(scalar)
         return Vec2(self.x * s, self.y * s)
     
@@ -82,42 +82,11 @@ class Vec2:
     def magnitude(self):
         """betrag (länge) des vektors."""
         return math.sqrt(self.magnitude_squared())
-    
-    def normalize(self):
-        """gibt normalisierten (einheits-)vektor zurück."""
-        m2 = self.magnitude_squared()
-        if m2 < 1e-30:
-            return Vec2(0.0, 0.0)
-        mag = math.sqrt(m2)
-        return Vec2(self.x / mag, self.y / mag)
-    
-    def dot(self, other):
-        """skalarprodukt."""
-        if isinstance(other, Vec2):
-            return self.x * other.x + self.y * other.y
-        return NotImplemented
-    
+
     def copy(self):
         """erstellt eine kopie dieses vektors."""
         return Vec2(self.x, self.y)
-    
-    def to_tuple(self):
-        """in (x, y)-tuple umwandeln."""
-        return (self.x, self.y)
-    
-    @staticmethod
-    def from_tuple(t):
-        """erstellt Vec2 aus tuple oder liste."""
-        return Vec2(float(t[0]), float(t[1]))
-    
-    def distance_squared_to(self, other):
-        """quadratische distanz zu einem anderen vektor."""
-        if isinstance(other, Vec2):
-            dx = self.x - other.x
-            dy = self.y - other.y
-            return dx * dx + dy * dy
-        return NotImplemented
-    
+
     def clear(self):
         """vektor auf null zurücksetzen."""
         self.x = 0.0

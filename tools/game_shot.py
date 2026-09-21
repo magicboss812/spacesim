@@ -1,8 +1,6 @@
 """Ein echter frame des SPIELS (welt + HUD) als PNG.
 
-`hud_shot.py` zeichnet nur das HUD und benutzt die flache modulaufteilung von
-vor der umstrukturierung (2026-09-03) -- es laeuft nicht mehr. Dieses hier
-faehrt `runtime/bootstrap.py` hoch, laeuft N frames ohne ereignisse und liest
+Faehrt `runtime/bootstrap.py` hoch, laeuft N frames ohne ereignisse und liest
 den framebuffer VOR present(), also genau das, was im fenster stuende.
 
     python tools/game_shot.py [breite hoehe] [-o datei.png] [--frames N]

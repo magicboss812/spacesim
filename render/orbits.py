@@ -38,10 +38,8 @@ class OrbitDrawMixin:
             active_ids.add(body_id)
             trail = self._reference_traj_points.get(body_id)
             if trail is None:
-                # Fester numpy-puffer statt deque von tupeln: das zeichnen
-                # braucht die spur als array, und np.asarray über eine
-                # tupel-liste kostete pro körper und frame spürbar zeit
-                # (27 körper x bis zu 300 punkte, jeden frame neu gewandelt).
+                # Fester numpy-puffer: das zeichnen braucht die spur als
+                # array, ohne sie je frame neu wandeln zu muessen.
                 cap = max(64, int(self.reference_trajectories_max_points))
                 trail = {'buf': np.empty((cap, 2), dtype=np.float64), 'n': 0}
                 self._reference_traj_points[body_id] = trail
@@ -119,11 +117,8 @@ class OrbitDrawMixin:
             cg = min(1.0, max(0.0, base[1] / 255.0))
             cb = min(1.0, max(0.0, base[2] / 255.0))
 
-            # ALS SPALTEN WEITERREICHEN. Die punkte liegen schon als arrays
-            # vor; die tupel-liste, die hier stand, wurde vom klipper und
-            # von _draw_polyline sofort wieder in arrays zurueckverwandelt
-            # -- bei bis zu 300 punkten je koerper und frame reine arbeit
-            # ohne ergebnis.
+            # Als (n, 2)-array und spalten weiterreichen: klipper und
+            # _draw_polyline arbeiten beide auf arrays.
             screen_points = np.empty((sxs.shape[0], 2), dtype=np.float64)
             screen_points[:, 0] = sxs
             screen_points[:, 1] = sys_
@@ -235,9 +230,9 @@ class OrbitDrawMixin:
 
         Das ist der messwert der bahnlinie: liegt dieser kreis ueber der
         weissen schiffs-endkappe, steckt das schiff zur endzeit der vorhersage
-        im koerper. Anders als die alte raute ist er KEIN fester pixelwert --
-        er ist `body.radius * camera.scale` und schrumpft mit heraus-zoomen
-        auf nichts, genau wie die koerperscheibe selbst.
+        im koerper. Er ist KEIN fester pixelwert, sondern
+        `body.radius * camera.scale` und schrumpft mit heraus-zoomen auf
+        nichts, genau wie die koerperscheibe selbst.
         """
         if not (math.isfinite(sx) and math.isfinite(sy) and math.isfinite(r_px)):
             return
@@ -263,11 +258,10 @@ class OrbitDrawMixin:
         trifft man. Das ist der ganze zweck, und es funktioniert nur, wenn
         beide linien durch dieselbe transformation gehen.
 
-        Eine feste ellipse waere hier schlicht falsch: ein plot-frame ist
-        eine ZEITABHAENGIGE abbildung, eine starr transformierte ellipse
-        zeigt die bahn also so, wie sie JETZT gerade laege. Im Erd-rahmen
-        kam dabei eine Erdbahn um die Sonne heraus, obwohl die Erde dort im
-        ursprung steht.
+        Bewusst keine feste ellipse: ein plot-frame ist eine ZEITABHAENGIGE
+        abbildung, eine starr transformierte ellipse zeigte die bahn so, wie
+        sie JETZT gerade laege (im Erd-rahmen etwa eine Erdbahn um die Sonne,
+        obwohl die Erde dort im ursprung steht).
         """
         self.debug_info['orbit_lines_drawn'] = 0
         if not self.orbit_lines_enabled:
@@ -396,7 +390,7 @@ class OrbitDrawMixin:
                 if full_table is not None:
                     ftrack = entry.full_track
                     # ALLE stichproben projizieren -- kein stride. Der stride
-                    # oben schaetzt die zeichen-aufloesung aus `track_len`, und
+                    # der spur schaetzt die zeichen-aufloesung aus `track_len`, und
                     # das ist die WELT-bogenlaenge; ueber eine ganze periode
                     # traegt die eltern-heliozentrik da das zehn- bis
                     # hundertfache der plot-frame-laenge hinein. Es sind ohnehin
@@ -413,7 +407,7 @@ class OrbitDrawMixin:
 
             # DAS GEZEICHNETE GITTER, nicht das gemessene. Fuer koerper,
             # deren umlaufzeit das praediktor-fenster ueberdauert, sind das
-            # dieselben arrays und dieselbe tabelle wie bisher; ein mond mit
+            # die gemeinsamen arrays und die gemeinsame tabelle; ein mond mit
             # hunderten umlaeufen im fenster bekommt ein eigenes, feineres
             # gitter ueber die letzten umlaeufe (OrbitLineSet._build_draw_track).
             d_track = getattr(entry, 'draw_track', None)

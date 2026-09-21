@@ -13,9 +13,10 @@ Zwei schichten, beide unter allem anderen gezeichnet:
   eigener deckkraft -- beim zoomen uebergibt eine dekade stetig an die
   naechste. Nach `idle_fade_delay` sekunden ohne zoom blendet es aus.
 
-Wie `orbit_lines.py`: reines numpy, kein GL, kein pygame -- damit der ganze
-block headless testbar bleibt. Das zeichnen liegt in `rendering.py`, die
-rasterung in `shaders/background.frag` bzw. `shaders/star.vert`.
+Wie `bodies/orbit_lines.py`: reines numpy, kein GL, kein pygame -- damit der
+ganze block headless testbar bleibt. Das zeichnen liegt in
+`render/background_draw.py`, die rasterung in `render/gl/background.frag` bzw.
+`render/gl/star.vert`.
 
 Die vollstaendige begruendung steht in `.claude/rules/background.md`; die vier
 punkte, die man beim aendern kennen muss, auch hier:
@@ -96,7 +97,7 @@ STAR_SPEED_UNIT = 1000.0
 #: bildschirmbewegung des schwenks die sterne, gedaempft um diesen faktor mal
 #: `star_motion_scale`. In weltmetern gerechnet waere der schwenk bei kleinem
 #: zoom astronomisch (0.8 schirme/s bei 1e12 m je schirm) und liefe dauerhaft
-#: in die notbremse -- genau so rasten die sterne beim schwenken davon.
+#: in die notbremse.
 FREE_PAN_GAIN = 0.3
 
 
@@ -366,13 +367,10 @@ class BackgroundLayer:
     def _focus_speed(self, focus_world_xy, focus_key, sim_time):
         """Die geschwindigkeit des verfolgten koerpers, aus seiner POSITION.
 
-        > **Ein `velocity`-feld gibt es fuer himmelskoerper nicht.** In
-        > `solar_system.json` steht bei JEDEM geskripteten koerper
-        > `"velocity": [0, 0]`, und `world.update_planets` schreibt nur
-        > `position` (Kepler), nie `velocity`. Wer `body.velocity` liest,
-        > bekommt fuer Erde, Mond, Mars ... exakt null -- nur das integrierte
-        > Schiff traegt einen echten wert. Genau daran stand das sternenfeld
-        > still, sobald man irgendetwas ausser dem Schiff anschaute.
+        `body.velocity` taugt dafuer nicht: fuer geskriptete koerper steht es
+        immer auf (0, 0) (`world.update_planets` schreibt nur die
+        Kepler-`position`); nur das integrierte Schiff traegt einen echten
+        wert.
 
         Deshalb wird abgeleitet: `dpos / dsim_t`. Zwei dinge muessen dabei
         stimmen:
@@ -462,13 +460,10 @@ class BackgroundLayer:
             step_x = float(focus_velocity[0]) * gain * dt
             step_y = -float(focus_velocity[1]) * gain * dt
         elif prev_cam is not None and scale > 0.0 and math.isfinite(scale):
-            # FREIE KAMERA. Hier gibt es keine eigengeschwindigkeit, und die
-            # kamerabewegung in WELTMETERN taugt nicht als ersatz: bei
-            # 1e-9 px/m sind 0.8 schirme/s rund 1e12 m/s, das ist tausendfach
-            # ueber der notbremse -- die sterne rasten dann konstant mit
-            # klammergeschwindigkeit davon, egal wie langsam man schwenkt.
-            # Der schwenk ist eine BILDSCHIRM-bewegung, also wird er auch als
-            # solche gelesen und nur gedaempft.
+            # FREIE KAMERA: keine eigengeschwindigkeit. Der schwenk wird als
+            # BILDSCHIRM-bewegung gelesen und gedaempft, nicht in weltmetern
+            # (bei 1e-9 px/m waeren 0.8 schirme/s rund 1e12 m/s, weit ueber
+            # der notbremse).
             gain = float(self.star_motion_scale) * FREE_PAN_GAIN
             step_x = (cam_x - prev_cam[0]) * scale * gain
             step_y = -(cam_y - prev_cam[1]) * scale * gain
@@ -503,9 +498,9 @@ class BackgroundLayer:
         # Der rueckstand bleibt dann stehen, und das ist richtig so: ein
         # unendliches lattice hat keinen ursprung, seine absolute lage ist
         # unbeobachtbar. Sichtbar ist nur die bewegung -- und die stimmt.
-        # (Den rueckstand stattdessen aufzuholen hiesse, den FEHLER falten zu
-        # muessen; das gitter zoege dann bei extremem zoom zur naechsten
-        # gitteraequivalenten stelle statt in flugrichtung und zappelte.)
+        # Den rueckstand aufzuholen hiesse, den FEHLER zu falten; das gitter
+        # zoege dann bei extremem zoom zur naechsten gitteraequivalenten
+        # stelle statt in flugrichtung.
         if grid_target is not None and scale > 0.0 and math.isfinite(scale):
             tx = float(grid_target[0])
             ty = float(grid_target[1])
@@ -525,11 +520,9 @@ class BackgroundLayer:
                     # abfahren -- sonst gliten bis zu 1e11 m minutenlang
                     # durchs bild. Der anflug verdeckt den versatz.
                     #
-                    # Warum ein SCHLUESSEL und keine sprunghoehe: beides
-                    # ueberlappt. Der wechsel Erde->Mond misst bei 1e-4 px/m
-                    # 3.8e4 px je bild, ein vorbeiflug am zoomanschlag
-                    # 8.3e4 px -- jede schwelle dazwischen trifft einmal das
-                    # falsche. Der schluessel weiss es ohne zu raten.
+                    # Ein SCHLUESSEL statt einer sprunghoehen-schwelle, weil
+                    # sich bezugswechsel und schnelle vorbeifluege in der
+                    # sprunghoehe ueberlappen.
                     self.grid_anchor_m[0] += dx
                     self.grid_anchor_m[1] += dy
                     self.grid_lag_px = 0.0

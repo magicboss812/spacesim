@@ -4,6 +4,7 @@
     kepler.py        skriptierte koerperbahnen (das EINE bahnmodell)
     apsis.py         Ap/Pe-suche und ihre verfeinerung
     propagate.py     die punktreihen: _compute_distance_points_*
+    burn.py          das schubprofil eines manoeverknotens
 
 Numba-regeln: keine Python-objekte, kein pygame, kein OpenGL -- nur einfache
 arrays und skalare. `cache=True` bleibt ueberall stehen; ein verschieben der
@@ -18,9 +19,8 @@ import numpy as np
 #: Die beiden geschwindigkeits-spalten machen aus der liste eine stueckweise
 #: KUBISCHE kurve statt einer folge von positionen -- der renderer kann sie
 #: damit zur zeichenzeit beliebig fein auswerten (Hermite), ohne dass hier ein
-#: integrationsschritt mehr faellt. Der rkn-kernel rechnet die tangente
-#: ohnehin (als ableitung genau des polynoms, mit dem er die position
-#: interpoliert) und warf sie bisher weg.
+#: integrationsschritt mehr faellt. Die tangente ist die ableitung genau des
+#: polynoms, mit dem der rkn-kernel die position interpoliert.
 #:
 #: Kernel, die ihre punkte LINEAR auf die schrittsehne setzen, schreiben hier
 #: NaN. Das ist kein fehlerfall, sondern die wahrheit: ein sehnenpunkt hat
@@ -38,30 +38,25 @@ def _no_body_memo():
     """Leerer notizblock fuer aufrufer, bei denen sich das merken nicht lohnt.
 
     `_body_position_at_time_numba` erkennt an der zeilenzahl 0, dass kein
-    notizblock vorliegt, und rechnet wie zuvor.
+    notizblock vorliegt, und rechnet ohne.
 
     **Das MUSS eine funktion sein, keine modul-konstante.** Numba behandelt
     ein globales array als compile-zeit-konstante und typisiert es
-    `readonly` -- die (per `use_memo` ohnehin nie erreichten) schreibzugriffe
-    im rumpf lassen sich dann nicht mehr typisieren, und der GANZE aufrufende
-    kernel scheitert beim uebersetzen. Genau so verschwanden die Ap/Pe-marker:
-    `_find_apsis_markers_numba` warf `NumbaTypeError`, der aufrufer fing die
-    ausnahme, und `get_apsis_markers()` lieferte stillschweigend null marker
-    -- im spiel sichtbar nur daran, dass die rauten und die HUD-zahlen fehlten.
+    `readonly` -- die (per `use_memo` nie erreichten) schreibzugriffe im
+    rumpf lassen sich dann nicht mehr typisieren, und der GANZE aufrufende
+    kernel scheitert beim uebersetzen.
     """
     return np.zeros((0, BODY_MEMO_COLUMNS), dtype=np.float64)
 
 
 def _empty_points():
     """Leere punkteliste in der kanonischen breite."""
-    if np is None:
-        return []
     return np.empty((0, POINT_COLUMNS), dtype=np.float64)
 
 
 def _widen_points(points):
     """Punkte auf POINT_COLUMNS bringen; fehlende tangenten werden NaN."""
-    if np is None or not isinstance(points, np.ndarray) or points.ndim != 2:
+    if not isinstance(points, np.ndarray) or points.ndim != 2:
         return points
     have = int(points.shape[1])
     if have >= POINT_COLUMNS:

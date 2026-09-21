@@ -20,10 +20,9 @@ das profil dieselbe zahl benutzen:
 
     a_max_sim = thrust_acc / realtime_warp_max
 
-Mit `thrust_acc` direkt braennte der autopilot sechzigmal so hart wie die
-pfeiltaste -- und die vorschau zeigte diesen brennvorgang auch noch
-korrekt an, so dass NICHTS auf dem schirm den fehler verraten wuerde.
-`config.maneuver.max_accel` ueberschreibt die ableitung.
+`a_max` wird beim scharfschalten im profil festgehalten und nicht aus
+`ship_control.thrust_acc` gelesen -- das feld schreibt der schubregler des
+HUDs. `config.maneuver.max_accel` ueberschreibt die ableitung.
 
 KICK-THEN-DRIFT. `update()` legt das delta-v EINES schrittes an, BEVOR
 `world.step()` diesen schritt geht. Die vorschau integriert den schub
@@ -80,12 +79,6 @@ class ManeuverExecutor:
         self.dv_delivered = 0.0
         self.abort_reason = None
 
-        #: Beim scharfschalten festgehalten. `a_max` DARF nicht waehrend des
-        #: brennens neu aus `ship_control.thrust_acc` gelesen werden -- der
-        #: schubregler des HUDs schreibt genau dieses feld, und der
-        #: brennvorgang wuerde sich dann unter sich selbst veraendern.
-        self._a_max_armed = 0.0
-        self._tau_now = 0.0
         self._thrust_acc_before = None
         self._thrust_level_before = None
 
@@ -104,16 +97,6 @@ class ManeuverExecutor:
     def can_arm(self):
         node = self.plan.first() if self.plan is not None else None
         return node is not None and node.is_executable(self.min_executable_dv)
-
-    def time_to_ignition(self, world):
-        if not self.is_active:
-            return None
-        return self.t_ignition - float(getattr(world, 'time', 0.0))
-
-    def throttle_level(self):
-        if self.state != BURNING or self.profile is None:
-            return 0.0
-        return self.profile.throttle_at(self._tau_now)
 
     # ----------------------------------------------------------- schalten
 
@@ -156,8 +139,6 @@ class ManeuverExecutor:
         self.t_ignition = t_ignition
         self.dv_delivered = 0.0
         self.abort_reason = None
-        self._a_max_armed = a_max
-        self._tau_now = 0.0
         self.state = ARMED
 
         if self.ship_control is not None:
@@ -171,13 +152,6 @@ class ManeuverExecutor:
             self._thrust_level_before = float(
                 getattr(self.telemetry, 'thrust_level', 1.0))
         return True
-
-    def disarm(self):
-        self._restore()
-        self.state = IDLE
-        self.node = None
-        self.profile = None
-        self.abort_reason = None
 
     def abort(self, reason='aborted'):
         if not self.is_active:
@@ -266,7 +240,6 @@ class ManeuverExecutor:
 
         tau0 = now - self.t_ignition
         tau1 = tau0 + step
-        self._tau_now = max(0.0, tau0)
 
         dv = self.profile.dv_between(tau0, tau1)
         if dv > 0.0 and self.ship is not None:

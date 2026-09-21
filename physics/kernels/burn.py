@@ -8,16 +8,12 @@ deshalb nicht aufrufbar ist. Die doppelung ist bewusst und wird bewacht:
 stuetzstellen auf EXAKTE gleichheit. Wer eine der beiden aendert, aendert
 beide.
 
-DIE SCHRITTE LIEGEN AUF DEN PHASENGRENZEN, und das ist keine feinheit.
-Das profil ist an den beiden rampenknicken stetig, aber nicht
-differenzierbar. RK4 wertet je schritt an drei zeitpunkten aus und wiegt
-sie wie Simpson -- ueber einen knick hinweg ist das nur noch erster
-ordnung. Gemessen bei 400 gleichverteilten schritten ueber ein 12.6-s-
-profil: **119.999775 statt 120.000000 m/s**, also 1.9e-6 relativ. Innerhalb
-einer phase ist die beschleunigung dagegen linear oder konstant, und
-Simpson integriert beides EXAKT -- mit phasenweiser schrittung landet das
-gelieferte delta-v auf der letzten stelle. Deshalb bekommt jede der drei
-phasen ihre eigene, gleichmaessige schrittweite statt einer gemeinsamen.
+DIE SCHRITTE LIEGEN AUF DEN PHASENGRENZEN. Das profil ist an den beiden
+rampenknicken stetig, aber nicht differenzierbar; RK4 (gewichtet wie
+Simpson) ist ueber einen knick hinweg nur erster ordnung. Innerhalb einer
+phase ist die beschleunigung linear oder konstant, und das integriert
+Simpson EXAKT. Deshalb bekommt jede der drei phasen ihre eigene,
+gleichmaessige schrittweite statt einer gemeinsamen.
 """
 
 import numpy as np

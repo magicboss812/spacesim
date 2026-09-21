@@ -9,8 +9,8 @@ zweite geometrie-pipeline gibt.
 KOORDINATEN: alle oeffentlichen methoden nehmen TOP-DOWN bildschirmpixel
 (ursprung oben links, y nach unten) -- dieselbe konvention wie pygames
 maus-ereignisse. Die umrechnung in die ortho-konvention (y nach oben) des
-shaders passiert ausschliesslich in _submit(). Das ist die in CLAUDE.md
-geforderte "eine konvention, umrechnung an der grenze".
+shaders passiert ausschliesslich in _submit(): eine konvention, umrechnung
+an der grenze.
 
 WINKEL: grad, gegen den uhrzeigersinn, 0 = nach rechts -- so, wie man es
 auf dem bildschirm sieht.
@@ -22,8 +22,7 @@ import os
 import moderngl
 import numpy as np
 
-# Der pfad zu den GLSL-quellen kommt aus EINER quelle (render/__init__.py),
-# statt ihn hier ein drittes mal nachzurechnen.
+# Der pfad zu den GLSL-quellen kommt aus EINER quelle (render/__init__.py).
 from render import GL_DIR as _SHADER_DIR
 
 _TAU = 6.28318530718
@@ -40,7 +39,7 @@ class UIDraw:
         self._program = None
         self._vao = None
         self._quad_vbo = None
-        # Zuletzt gesetzte uniform-werte, siehe _uniform().
+        # Zuletzt gesetzte uniform-werte, siehe flush().
         self._last = {}
         self._init_pipeline()
 
@@ -110,10 +109,6 @@ class UIDraw:
             ],
         )
         self._instance_capacity = cap
-
-    @property
-    def available(self):
-        return self._vao is not None
 
     # ------------------------------------------------------------ primitive
 
@@ -225,14 +220,6 @@ class UIDraw:
             fill=color, radius=radius, rotation_deg=angle_deg,
         )
 
-    def divider(self, x, y, length, color, thickness=1.0, vertical=False):
-        """Trennlinie. Achsenparallel, deshalb ohne rotation und damit ohne
-        rasterungs-unschaerfe an den enden."""
-        if vertical:
-            self.rect(x, y, thickness, length, fill=color)
-        else:
-            self.rect(x, y, length, thickness, fill=color)
-
     # --------------------------------------------------------------- intern
 
     def _submit(self, left, top, width, height, radii, fill, fill2, gradient,
@@ -240,13 +227,11 @@ class UIDraw:
                 shadow_softness, expand, rotation_rad, arc_params):
         """Instanz in den stapel legen -- gezeichnet wird erst in flush().
 
-        Frueher war jeder aufruf ein eigener draw mit 14 uniform-schreib-
-        vorgaengen; bei gut 160 aufrufen pro HUD-frame war das der groesste
-        einzelposten der UI-zeit. Jetzt sammeln sich aufeinanderfolgende
-        formen in einem per-instanz-puffer und gehen als EIN instanzierter
-        draw an die GPU. Die instanz-reihenfolge ist die aufruf-reihenfolge,
-        das blending bleibt also exakt gleich; text (eigene pipeline) stoesst
-        vor seinem eigenen draw einen flush an, damit die schichtung stimmt.
+        Aufeinanderfolgende formen sammeln sich in einem per-instanz-puffer
+        und gehen als EIN instanzierter draw an die GPU. Die instanz-
+        reihenfolge ist die aufruf-reihenfolge, das blending entspricht also
+        einzelnen draws; text (eigene pipeline) stoesst vor seinem eigenen
+        draw einen flush an, damit die schichtung stimmt.
         """
         # TOP-DOWN -> ORTHO: die untere linke ecke liegt bei
         # height - (top + hoehe). Das ist die EINZIGE stelle der UI-schicht,
@@ -256,11 +241,10 @@ class UIDraw:
         n = self._instance_count
         if n >= self._instance_capacity:
             self._ensure_capacity(n + 1)
-        # EINE zuweisung statt zwanzig. Jede einzelne schreiboperation auf
-        # einer numpy-zeile kostet einen kompletten ufunc-durchlauf; ueber
-        # die rund 200 formen eines HUD-frames war das gemessen der groesste
-        # einzelposten von _submit. Die reihenfolge der 33 werte ist
-        # dieselbe wie zuvor und muss zu _INSTANCE_FORMAT passen.
+        # EINE slice-zuweisung fuer die ganze zeile: jede einzelne
+        # schreiboperation auf einer numpy-zeile kostet einen kompletten
+        # ufunc-durchlauf. Die reihenfolge der 33 werte muss zu
+        # _INSTANCE_FORMAT passen.
         offset = n * self._INSTANCE_FLOATS
         self._instance_flat[offset:offset + self._INSTANCE_FLOATS] = (
             left, ortho_y, width, height, expand, rotation_rad,
@@ -286,19 +270,16 @@ class UIDraw:
         if self._last.get('u_viewport') != viewport:
             self._last['u_viewport'] = viewport
             self._program['u_viewport'].value = viewport
-        # Die zeilen 0..count sind zusammenhaengend im speicher, also direkt
-        # als puffer uebergeben statt ueber tobytes() zu kopieren -- das
-        # waeren bei ~200 formen und knapp 60 flushes je frame gut 1.5 MB
-        # kopie fuer nichts.
+        # Die zeilen 0..count sind zusammenhaengend im speicher und gehen
+        # ohne kopie direkt als puffer an write().
         self._inst_vbo.write(self._instance_data[:count])
         self._vao.render(moderngl.TRIANGLE_STRIP, instances=count)
 
     def resize(self, width, height):
         self.width = int(width)
         self.height = int(height)
-        # u_viewport haengt an der fenstergroesse -- der cache waere sonst
-        # genau ueber diesen einen wert veraltet und die UI landete im
-        # falschen massstab.
+        # u_viewport haengt an der fenstergroesse: cache verwerfen, damit
+        # flush() ihn neu setzt.
         self._last = {}
 
     def release(self):

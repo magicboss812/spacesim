@@ -6,7 +6,6 @@ gefunden -- `_load_shader_source` ist die einzige stelle, die sie oeffnet.
 import os
 import struct
 
-import moderngl
 import numpy as np
 
 
@@ -70,13 +69,12 @@ class ShaderPipelineMixin:
             self._line_vao = None
 
     def _init_ortho_pipeline(self):
-        """Geometrie in der alten fixed-function-ortho-konvention (y nach oben).
+        """Geometrie in ortho-konvention (y nach oben, ursprung unten links).
 
-        Ersetzt die früheren immediate-mode-pfade unter gluOrtho2D(0, w, 0, h)
-        (schiffspfeil, debug-kreuze): exakt dieselbe pixel-abbildung, nur via
-        shader (ortho.vert, OHNE den y-flip von line.vert). Der konventions-
-        unterschied zwischen line- und ortho-pfad ist absichtlich und
-        dokumentiert (CLAUDE.md, render-convention caveat).
+        Fuer schiffspfeil und debug-kreuze: ortho.vert bildet wie
+        gluOrtho2D(0, w, 0, h) ab, OHNE den y-flip von line.vert. Der
+        unterschied zwischen line- und ortho-pfad ist absichtlich
+        (CLAUDE.md, zwei Y-konventionen).
         """
         program = self._compile_shader_program('ortho.vert', 'line.frag', 'ortho')
         if program is None:
@@ -248,14 +246,11 @@ class ShaderPipelineMixin:
 
     # ---- GL-zustandscache -------------------------------------------------
     #
-    # Jedes `program['u_x'].value = ...` und jedes `ctx.line_width = ...` geht
-    # als eigener aufruf in den treiber. Der linien-zeichenweg setzt beides
-    # bei JEDEM aufruf neu -- gemessen ~300 uniform-schreibvorgaenge je frame,
-    # von denen sich die allermeisten gegenueber dem vorigen aufruf gar nicht
-    # geaendert haben (u_viewport ist ueber den ganzen frame konstant, u_color
-    # ueber ganze gruppen von linien). Der cache haelt nur den zuletzt
-    # GESCHRIEBENEN wert; geschrieben wird weiterhin jeder wechsel, die
-    # sichtbare ausgabe ist also unveraendert.
+    # Jedes `program['u_x'].value = ...` und jedes `ctx.line_width = ...` ist
+    # ein eigener treiber-aufruf, und die meisten werte aendern sich zwischen
+    # zwei linien nicht (u_viewport ist ueber den frame konstant, u_color ueber
+    # ganze gruppen). Der cache haelt den zuletzt GESCHRIEBENEN wert und
+    # ueberspringt nur identische schreibvorgaenge; jeder wechsel geht durch.
 
     def _set_uniform(self, program, name, cache_attr, value):
         if getattr(self, cache_attr, None) == value:
@@ -273,12 +268,10 @@ class ShaderPipelineMixin:
         aendern (gitterphasen, sterndrift, zeit) waere der vergleich teurer
         als der schreibvorgang.
 
-        Ein fehlschlag wird NICHT verschluckt, sondern einmal je uniform in
-        `debug_info` vermerkt und einmal gedruckt. Ein still fehlschlagender
-        schreibversuch sieht sonst aus wie ein shader-fehler: der uniform
-        behaelt seinen wert (in der GL: null), und man sucht die ursache im
-        GLSL statt im aufrufer. Genau so ging einmal `u_level_phase` als
-        flache liste statt als liste von paaren durch.
+        Ein fehlschlag wird einmal je uniform in `debug_info` vermerkt und
+        einmal gedruckt, nicht verschluckt: ein still fehlschlagender
+        schreibversuch laesst den uniform auf null und sieht aus wie ein
+        shader-fehler.
         """
         try:
             program[name].value = value

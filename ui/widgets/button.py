@@ -1,7 +1,7 @@
 """Schaltflaeche und rastender umschalter."""
 
 from ..core import Widget, ease
-from ..theme import mix, with_alpha
+from ..theme import mix
 
 
 class Button(Widget):
@@ -162,78 +162,3 @@ class Toggle(Widget):
                 valign='middle',
             )
 
-
-class SegmentedControl(Widget):
-    """Mehrere sich gegenseitig ausschliessende optionen in einer leiste.
-
-    Die form fuer kleine, feste auswahlmengen -- etwa die rahmen-modi
-    (non-rotating / body-direction). Sichtbar sind alle optionen gleichzeitig,
-    anders als beim aufklappmenue.
-    """
-
-    def __init__(self, options=(), value=0, on_change=None, role='label',
-                 size=(None, None), **kwargs):
-        super().__init__(size=size, **kwargs)
-        self.options = list(options)
-        self.value = value
-        self.on_change = on_change
-        self.role = role
-        self.blocks_mouse = True
-
-    def resolve_value(self):
-        return int(self.value() if callable(self.value) else self.value)
-
-    def measure(self, ctx):
-        pad = ctx.px(ctx.theme.spacing.lg) * 2.0
-        widest = 0.0
-        for option in self.options:
-            widest = max(widest, ctx.text.measure(str(option), self.role)[0])
-        count = max(1, len(self.options))
-        return ((widest + pad) * count, ctx.px(ctx.theme.control_height))
-
-    def _segment_rect(self, index):
-        count = max(1, len(self.options))
-        width = self.rect.w / count
-        return (self.rect.x + width * index, self.rect.y, width, self.rect.h)
-
-    def on_mouse_up(self, ctx, x, y, button):
-        if button != 1 or not self.enabled:
-            return True
-        for index in range(len(self.options)):
-            sx, sy, sw, sh = self._segment_rect(index)
-            if sx <= x < sx + sw and sy <= y < sy + sh:
-                if not callable(self.value):
-                    self.value = index
-                if self.on_change is not None:
-                    self.on_change(index)
-                break
-        return True
-
-    def draw(self, ctx):
-        theme = ctx.theme
-        palette = theme.palette
-        radius = ctx.px(theme.radius.md)
-        selected = self.resolve_value()
-
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, self.rect.h,
-            fill=palette.panel_sunken, radius=radius,
-            border_color=palette.border, border_width=theme.border_width,
-        )
-
-        for index, option in enumerate(self.options):
-            sx, sy, sw, sh = self._segment_rect(index)
-            active = index == selected
-            if active:
-                inset = ctx.px(2.0)
-                ctx.draw.rect(
-                    sx + inset, sy + inset, sw - 2 * inset, sh - 2 * inset,
-                    fill=with_alpha(palette.accent, 0.22),
-                    radius=max(0.0, radius - inset),
-                    border_color=palette.accent, border_width=theme.border_width,
-                )
-            ctx.text.draw(
-                str(option), sx + sw * 0.5, sy + sh * 0.5, role=self.role,
-                color=palette.accent_strong if active else palette.text_muted,
-                align='center', valign='middle',
-            )

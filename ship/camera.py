@@ -36,28 +36,21 @@ class Camera:
         #
         # Die verfolgung ist ENTWEDER-ODER: solange sie besteht, sitzt der
         # körper EXAKT in der bildmitte, und jeder schwenk (WASD, ziehen) löst
-        # sie auf. Es gibt keinen zustand "verfolgt, aber verschoben" mehr --
-        # früher gab es ihn (`follow_offset`), und er machte den zeitraffer
-        # unbrauchbar: ein versatz zum körper wird ja mitgeführt, die kamera
-        # rennt also mit bahngeschwindigkeit durchs system, obwohl der spieler
-        # nur zur seite geschaut hat. Nach dem schwenk steht die kamera stattdessen
-        # im weltraum still (weltgeschwindigkeit exakt 0); angeheftet wird nur
-        # wieder, wenn der spieler einen körper anwählt oder Home drückt.
+        # sie auf. Es gibt keinen zustand "verfolgt, aber verschoben": ein
+        # mitgeführter versatz liesse die kamera im zeitraffer mit
+        # bahngeschwindigkeit durchs system rennen. Nach dem schwenk steht die
+        # kamera im weltraum still (weltgeschwindigkeit exakt 0); angeheftet
+        # wird nur wieder, wenn der spieler einen körper anwählt oder Home drückt.
         self.target = None
         # Restversatz eines LAUFENDEN anflugs (`focus_on`), der auf null
         # ausläuft. Nur dieser versatz wird geglättet, niemals die absolute
         # kameraposition: eine exponentielle glättung auf ein BEWEGTES ziel
-        # behält einen bleibenden rückstand von v/k -- und v ist hier
-        # `bahngeschwindigkeit * sim_dt * fps`, also astronomisch: bei sim_dt=900
-        # und 17 km/s sind das 9.2e8 m pro echtsekunde, was bei pan_smoothing=20
-        # rund 46 px danebenliegt. Der körper stünde dauerhaft neben der
-        # bildmitte, und der versatz wüchse linear mit dem zeitraffer.
+        # behält einen bleibenden rückstand von v/k, und v ist hier
+        # `bahngeschwindigkeit * sim_dt * fps`, also astronomisch.
         self._focus_offset = Vec2(0.0, 0.0)
 
         # Schwenkgeschwindigkeit der tastatur-steuerung, in BILDSCHIRM-HÖHEN
-        # pro sekunde. (Früher wurde dieser wert als pixel/sekunde gedeutet --
-        # bei einem default von 3.0 schwenkte die ansicht mit 3 px/s, also
-        # praktisch gar nicht.)
+        # pro sekunde.
         self.move_speed = 1.0
 
         # Zoom-Grenzen
@@ -114,16 +107,8 @@ class Camera:
         # Subpixel-Präzision behalten, damit Bewegung nicht stufig wirkt.
         return (screen_x, screen_y)
 
-    def screen_to_world(self, screen_pos):
-        """Wandelt Bildschirmkoordinaten in Weltkoordinaten um."""
-        return self._screen_to_world_with(screen_pos, self.position, self.scale)
-
     def _screen_to_world_with(self, screen_pos, position, scale):
-        """screen->welt gegen eine BELIEBIGE position/skala.
-
-        Wird für das zoom-ankern gebraucht: dort muss gegen die ZIEL-werte
-        gerechnet werden, nicht gegen die gerade noch nachlaufenden.
-        """
+        """screen->welt gegen eine BELIEBIGE position/skala."""
         screen_x, screen_y = screen_pos
         safe_scale = max(float(scale), 1e-30)
         world_x = (screen_x - self.width / 2) / safe_scale + position.x
@@ -220,12 +205,7 @@ class Camera:
         """Schwenkt die ansicht um `delta` (welt-meter) -- und LÖST DABEI.
 
         Ein schwenk ist die aussage "ich will woanders hinsehen", nicht "ich
-        will den körper weiter verfolgen, nur versetzt". Der zweite zustand
-        existierte einmal (`follow_offset`) und war im zeitraffer unbrauchbar:
-        er führt den versatz mit, die kamera fliegt also mit voller
-        bahngeschwindigkeit weiter, obwohl der spieler nur zur seite geschaut
-        hat -- und beim zoomen sieht man den versatz nachlaufen, als hinge die
-        kamera dem schiff hinterher.
+        will den körper weiter verfolgen, nur versetzt" (siehe `self.target`).
 
         Das lösen passiert genau EINMAL, beim ersten schwenk: danach ist
         `target` schon None. Ohne diese bedingung würde `unfollow()` in jedem
@@ -247,13 +227,8 @@ class Camera:
         skala. Damit ist der zoom die einzige geste, die den bildmittelpunkt
         garantiert in ruhe lässt -- was beim verfolgen genau das gewünschte
         ergebnis hat: der körper steht still, das bild wächst um ihn herum.
-
-        Vorher wurde auf den MAUSZEIGER geankert (die karten-konvention). Das
-        verschiebt das kamera-ziel bei jeder raste, und bei schnellem
-        auf-und-ab-zoomen sieht man die geglättete position dem ziel
-        hinterherlaufen -- als würde die kamera versuchen, das schiff
-        einzuholen. Genau dieses nachlaufen ist der grund, warum es weg ist;
-        wer eine andere stelle betrachten will, schwenkt dorthin.
+        Ein anker am mauszeiger verschöbe das kamera-ziel bei jeder raste, und
+        die geglättete position liefe ihm sichtbar hinterher.
 
         Gerechnet wird gegen `target_scale`, nicht gegen die nachlaufende
         `scale`: so bauen mehrere schnelle rasten sauber aufeinander auf.
@@ -490,15 +465,9 @@ class Camera:
 
         `min_sim_dt` ist in sim-sekunden JE TICK angegeben und haengt damit an
         der bildrate; zeitraffer-stufen sind in sim-sekunden je ECHTSEKUNDE
-        angegeben und tun das nicht. Der config-wert 1.0 stammt aus der zeit
-        von 60 fps, wo er genau die unterste stufe (60 s/s) traf.
-
-        Bei window.fps = 180 sperrte er sie aus: die langsamste erreichbare
-        rate war 1.0 * 180 = 180 s/s, also dauerhaft ueber
-        simulation.realtime_warp_max. Folge im spiel -- der schub war in JEDER
-        stufe gesperrt (der regler zeigte staendig "HOLD") und die vorhersage
-        kam nie aus dem zeitraffer-halt heraus. Der boden darf die
-        echtzeit-stufe bei keiner bildrate ausschliessen.
+        angegeben und tun das nicht. Der boden darf die echtzeit-stufe bei
+        keiner bildrate ausschliessen -- sonst waere der schub in jeder stufe
+        gesperrt und die vorhersage kaeme nie aus dem zeitraffer-halt.
         """
         rate = float(rate_s_per_s)
         ticks = float(tick_rate)
@@ -512,7 +481,7 @@ class Camera:
 
         `sim_dt` ist je TICK angegeben, die zeitraffer-stufen des HUDs je
         echtsekunde -- diese multiplikation ist der einzige uebergang zwischen
-        beiden, und sie stand vorher als closure in `test.py`.
+        beiden.
         """
         return float(self.sim_dt) * float(tick_rate)
 
@@ -529,10 +498,8 @@ class Camera:
 
         Nahe an einem koerper ist die obergrenze keine frage der rechen-
         leistung: ein frame bei 1 y/s rueckt um 48 stunden vor, das sind rund
-        24 umlaeufe eines 2-stunden-orbits. Gemessen in einem 2000-km-orbit
-        bei 1 y/s: 5120 teilschritte und 270 ms je frame -- und die waeren
-        auch dann noetig, wenn sie billig waeren, weil sonst schlicht die
-        bahn verloren geht.
+        24 umlaeufe eines 2-stunden-orbits -- die bahn waere schlicht nicht
+        mehr aufgeloest.
 
         Das HUD blendet gesperrte stufen bereits ab; das hier ist der riegel
         fuer PageUp/PageDown und die dev-oberflaeche, die daran vorbeigehen.

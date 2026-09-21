@@ -1,8 +1,7 @@
 """Tastenbelegung und die klick-geste.
 
-Stand als eine 100-zeilige if/elif-kette mitten in der ereignisschleife von
-`test.py`. Die vorfahrt (custom-UI -> ImGui -> welt) entscheidet weiterhin die
-schleife in `loop.py`; hier steht nur, WAS eine taste tut.
+Die vorfahrt (custom-UI -> ImGui -> welt) entscheidet die schleife in
+`loop.py`; hier steht nur, WAS eine taste tut.
 
 Die volle tastenreferenz steht in `.claude/rules/camera-input.md` und im HUD --
 das HUD liest seine werte aus der simulation zurueck, die beiden koennen
@@ -99,9 +98,8 @@ class InputRouter:
         elif key == pygame.K_e:
             self._toggle_epicycles()
 
-        # R / 1 / 2 / T schreiben denselben zustand wie die HUD-bedienelemente
-        # (ui/state.py) -- deshalb kein direktes setzen mehr, sondern die
-        # methoden des zustands. Das anwenden loest die aenderungs-
+        # R / 1 / 2 / T schreiben ueber die methoden von ui/state.py denselben
+        # zustand wie die HUD-bedienelemente; das loest die aenderungs-
         # benachrichtigung aus.
         elif key == pygame.K_r:
             app.ui_state.cycle_reference()
@@ -157,8 +155,6 @@ class InputRouter:
             self._set_precision(app.predictor.precision * app.precision_step)
 
         return True
-
-    # -- die etwas laengeren einzelfaelle ------------------------------------
 
     # -- manoeverknoten ------------------------------------------------------
 
@@ -229,13 +225,9 @@ class InputRouter:
             executor.abort('cancelled')
             print("MANEUVER: abgebrochen")
             return
-        # Auf die vorschau WARTEN, bevor scharf geschaltet wird. Sie rechnet
-        # nebenher, und die schubrichtung kommt aus ihren markern -- wer
-        # gleich nach dem setzen eines knotens X drueckt, traefe sonst
-        # gelegentlich auf eine kette, die den knoten noch nicht kennt, und
-        # bekaeme ein 'nicht ausfuehrbar', das beim zweiten druck weg ist.
-        # Einmalige zehn millisekunden an einer stelle, an der der spieler
-        # ohnehin gerade etwas ausloest.
+        # Auf die vorschau WARTEN, bevor scharf geschaltet wird: sie rechnet
+        # nebenher, und die schubrichtung kommt aus ihren markern -- direkt
+        # nach dem setzen eines knotens kennt ihre kette ihn sonst noch nicht.
         if app.maneuver_preview is not None:
             app.maneuver_preview.wait(1.0)
         ok = executor.arm(app.world, app.ui_state.reference_body,

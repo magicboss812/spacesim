@@ -15,24 +15,14 @@ import math
 import numpy as np
 from numba import njit
 
-from physics.kernels import BODY_MEMO_COLUMNS, POINT_COLUMNS
-from physics.kernels.kepler import (
-    _body_kepler_constants_numba,
-    _body_position_at_time_numba,
-)
+from physics.kernels.kepler import _body_kepler_constants_numba
 from physics.kernels.integrators import (
     _compute_acc_nearest_numba,
     _compute_acc_numba,
-    _compute_acc_time_numba,
     _leapfrog_step_numba,
-    _local_timescale_numba,
     _rk4_step_numba,
-    _rkn_acc_numba,
-    _rkn_acc_time_numba,
     _rkn_adaptive_step_numba,
     _rkn_adaptive_step_time_numba,
-    _rkn4_step_numba,
-    _rkn4_step_time_numba,
 )
 
 
@@ -85,13 +75,10 @@ def _compute_distance_points_rkn_numba(
     # derselbe reststrecken-zaehler. Das ist die grundlage dafuer, die
     # vorhersage im zeitraffer hinten stueckweise zu verlaengern, statt
     # sie periodisch ganz neu zu rechnen.
-    # Spalten 3/4 sind die GESCHWINDIGKEIT am ausgegebenen punkt. Sie
-    # kostet nichts -- die emissions-schleife unten rechnet sie ohnehin
-    # (als ableitung desselben Hermite-polynoms, mit dem sie die position
-    # interpoliert) und warf bisher alle bis auf die letzte weg. Mit ihr
-    # ist die punkteliste keine folge von positionen mehr, sondern eine
-    # stueckweise KUBISCHE kurve: der renderer kann sie zur zeichenzeit
-    # beliebig fein auswerten, ohne dass hier ein schritt mehr faellt.
+    # Spalten 3/4 sind die GESCHWINDIGKEIT am ausgegebenen punkt (die
+    # ableitung desselben Hermite-polynoms, mit dem die position
+    # interpoliert wird). Damit ist die punkteliste eine stueckweise
+    # KUBISCHE kurve, die der renderer beliebig fein auswerten kann.
     out = np.empty((max_points, 5), dtype=np.float64)
     out[0, 0] = init_px
     out[0, 1] = init_py
@@ -103,21 +90,17 @@ def _compute_distance_points_rkn_numba(
     # EINMAL fuer den ganzen lauf angelegt und ueber alle schritte hinweg
     # gueltig. Nullen heisst "noch nichts gerechnet" -- ein NaN-merker
     # waere unter fastmath wirkungslos, siehe
-    # _body_position_at_time_numba. Die kepler-aufstellung der
-    # koerper ist 99 % der rechenzeit dieses kernels -- gemessen 61.7 ms
-    # gegen 0.6 ms mit eingefrorenen koerpern -- und ein grossteil davon
-    # war reine wiederholung derselben zeit. Siehe
-    # _body_position_at_time_numba.
-    # `use_body_memo = 0` legt ihn mit null zeilen an: dann greift in
-    # _body_position_at_time_numba kein einziger treffer und der kernel
-    # rechnet exakt wie vor der einfuehrung. Das ist der A/B-schalter fuer
-    # den bit-vergleich (Predictor.use_body_memo), nach demselben muster
-    # wie world.use_fast_integrator.
+    # _body_position_at_time_numba. Die kepler-aufstellung der koerper ist
+    # fast die ganze rechenzeit dieses kernels, und vieles davon wiederholt
+    # dieselbe zeit.
+    # `use_body_memo = 0` legt ihn mit null zeilen an: dann rechnet der
+    # kernel ohne notizblock. Das ist der A/B-schalter fuer den
+    # bit-vergleich (Predictor.use_body_memo).
     _memo_rows = body_x.shape[0] if use_body_memo != 0 else 0
     body_memo = np.zeros((_memo_rows, 10), dtype=np.float64)
     # Vorlauf: die zeitunabhaengigen bahngroessen EINMAL je koerper.
     # Spalte 9 traegt das ergebnis: 1 = brauchbar, -1 = bahn unbrauchbar
-    # (dann liefert die auswertung wie zuvor sofort ok = 0).
+    # (dann liefert die auswertung sofort ok = 0).
     for _bi in range(_memo_rows):
         (_m0, _mm, _s1e2, _ca, _sa, _cok) = _body_kepler_constants_numba(
             _bi, body_m, body_a, body_e, body_theta, body_arg, body_parent, G,
@@ -137,7 +120,7 @@ def _compute_distance_points_rkn_numba(
     # Fortsetz-punkt = LETZTER AUSGEGEBENER punkt (nicht das ende des
     # letzten integrationsschritts). Nur so ist die reststrecke dort
     # definitionsgemaess 0 und kann beim fortsetzen nicht groesser als
-    # der punktabstand werden -- genau daran scheiterte die naht sonst.
+    # der punktabstand werden; die naht bleibt luecken- und stufenlos.
     resume_px = init_px
     resume_py = init_py
     resume_vx = init_vx
@@ -335,9 +318,7 @@ def _compute_distance_points_rkn_numba(
                 # Geschwindigkeit am ausgegebenen punkt: ableitung
                 # DESSELBEN Hermite-polynoms, mit dem oben die position
                 # interpoliert wurde -- also konsistent, nicht genaehert.
-                # Sie wird VOR dem schreiben gerechnet, weil sie jetzt
-                # mit in die zeile geht (spalten 3/4) und nicht mehr nur
-                # den fortsetz-zustand fuellt.
+                # Sie fuellt spalten 3/4 und den fortsetz-zustand.
                 d00 = 6.0 * s2 - 6.0 * s
                 d10 = 3.0 * s2 - 4.0 * s + 1.0
                 d01 = -6.0 * s2 + 6.0 * s
@@ -365,16 +346,9 @@ def _compute_distance_points_rkn_numba(
             if failure_code != 0.0:
                 break
 
-            # Reststrecke IMMER mitzaehlen. Bisher geschah das nur, wenn
-            # die emissions-schleife regulaer endete; brach sie ab, weil
-            # das punktbudget voll war, ging die restliche strecke des
-            # segments verloren. Fuer einen einmaligen lauf war das
-            # folgenlos (danach bricht auch die aeussere schleife ab und
-            # `accumulated` wird nicht mehr gelesen) -- beim FORTSETZEN
-            # dagegen sass der fortsetz-punkt dann bis zu einer ganzen
-            # schrittweite hinter dem letzten ausgegebenen punkt, und an
-            # der nahtstelle klaffte eine luecke (gemessen 2.6e7 m bei
-            # 1e6 m punktabstand).
+            # Reststrecke IMMER mitzaehlen, auch wenn die emissions-
+            # schleife am vollen punktbudget abbrach -- sonst stimmt
+            # `accumulated` beim FORTSETZEN nicht.
             accumulated += rem_len
 
         px = next_px
@@ -435,11 +409,8 @@ def _compute_distance_points_aspi_numba(
     use_rk4_fallback,
 ):
     # Fuenf spalten wie im rkn-kernel, aber die geschwindigkeit bleibt
-    # NaN: dieser pfad setzt seine punkte LINEAR auf die schrittsehne,
-    # es gibt also gar keine tangente, die sie beschreiben koennte. NaN
-    # sagt dem renderer genau das -- er zeichnet diese abschnitte dann
-    # als geraden statt eine kruemmung zu erfinden, die die punkte nicht
-    # haben.
+    # NaN: dieser pfad setzt seine punkte LINEAR auf die schrittsehne, und
+    # der renderer zeichnet solche abschnitte als geraden.
     out = np.empty((max_points, 5), dtype=np.float64)
     out[0, 0] = init_px
     out[0, 1] = init_py
@@ -738,8 +709,6 @@ def _compute_distance_points_numba(
 
         local_px = px
         local_py = py
-        local_vx = vx
-        local_vy = vy
         rem_dx = seg_dx
         rem_dy = seg_dy
         rem_len = seg_len

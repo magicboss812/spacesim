@@ -27,7 +27,7 @@ from ..theme import ink_on, mix, with_alpha
 from . import chrome
 
 
-def _button_colors(ctx, active, color, hover_t=0.0, press_t=0.0):
+def _button_colors(ctx, active, color, hover_t=0.0):
     """Die gemeinsame zustandsregel. Siehe modul-docstring."""
     palette = ctx.theme.palette
     if active:
@@ -39,7 +39,6 @@ def _button_colors(ctx, active, color, hover_t=0.0, press_t=0.0):
         text = with_alpha(color, 0.80)
         border = palette.edge
     fill = mix(fill, palette.hover, hover_t * 0.6)
-    fill = mix(fill, palette.active, press_t * 0.6)
     return fill, text, border
 
 
@@ -58,7 +57,7 @@ class SegmentBar(Widget):
     def __init__(self, options, value, on_select, color_role='frame',
                  caption=None, role='button_sm', min_option_width=0.0,
                  pad_x=9, pad_y=7, gap=2, container_pad=5, enabled=None,
-                 tab_edge='top', cumulative=False, **kwargs):
+                 cumulative=False, **kwargs):
         kwargs.setdefault('size', (None, None))
         super().__init__(**kwargs)
         self.options = list(options)
@@ -72,7 +71,6 @@ class SegmentBar(Widget):
         self.pad_y = pad_y
         self.gap = gap
         self.container_pad = container_pad
-        self.tab_edge = tab_edge
         # PEGEL statt auswahl: bei cumulative=True bekommen auch alle zellen
         # UNTERHALB der gewaehlten eine (schwaechere) fuellung. Genau so
         # zeigt die vorlage ihre raffung -- als reihe gruener winkel, die
@@ -103,9 +101,8 @@ class SegmentBar(Widget):
     def tab_height(self, ctx):
         """Platz, den der notch-tab AUSSERHALB des rahmens braucht.
 
-        Er wird in measure() mitgezaehlt und in _bar_rect() wieder abgezogen.
-        Ohne diese reservierung ragte der tab in den nachbarn -- an der
-        zeitraffer-leiste verdeckte er die beiden ersten stufen.
+        Er wird in measure() mitgezaehlt und in _bar_rect() wieder abgezogen,
+        damit der tab weder in den nachbarn ragt noch die zellen verdeckt.
         """
         if not self.caption:
             return 0.0
@@ -114,10 +111,8 @@ class SegmentBar(Widget):
     def _bar_rect(self, ctx):
         """Die flaeche des eigentlichen rahmens, ohne das tab-band."""
         tab_h = self.tab_height(ctx)
-        if self.tab_edge == 'top':
-            return (self.rect.x, self.rect.y + tab_h,
-                    self.rect.w, self.rect.h - tab_h)
-        return (self.rect.x, self.rect.y, self.rect.w, self.rect.h - tab_h)
+        return (self.rect.x, self.rect.y + tab_h,
+                self.rect.w, self.rect.h - tab_h)
 
     def _metrics(self, ctx):
         options = self.resolve_options()
@@ -206,9 +201,8 @@ class SegmentBar(Widget):
             )
 
         if self.caption:
-            edge_y = fy if self.tab_edge == 'top' else fy + fh
-            chrome.tab(ctx, self.caption, fx + ctx.px(14), edge_y,
-                       color=color, edge=self.tab_edge)
+            chrome.tab(ctx, self.caption, fx + ctx.px(14), fy,
+                       color=color, edge='top')
 
 
 class WarpBar(SegmentBar):
@@ -335,10 +329,8 @@ class SnapRosette(Widget):
         scale = self._scale()
 
         # Der TRAeGER ist ein oktogon, kein rechteck: eine rosette in einer
-        # kiste sieht aus wie ein raster, das man rund gestellt hat. Der
-        # entwurf von Claude Design hatte hier eine viel zu grosse
-        # hintergrundflaeche -- diese hier umschliesst die vier knoepfe
-        # gerade eben.
+        # kiste sieht aus wie ein raster, das man rund gestellt hat. Die
+        # flaeche umschliesst die vier knoepfe gerade eben.
         span_units = (self.ORBIT + self.TILE * 0.5 + 7.0) * scale * 2.0
         span = ctx.px(span_units)
         chrome.frame(ctx, cx - span * 0.5, cy - span * 0.5, span, span,

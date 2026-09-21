@@ -1,9 +1,6 @@
 """Laden eines Planetensystems aus JSON (`config/solar_system.json`).
 
-Sass frueher zusammen mit dem ConfigLoader in `loader.py`. Die beiden teilen
-nichts ausser dem JSON-modul: der ConfigLoader verteilt spielbare parameter
-auf world/camera/schiff/predictor/renderer (siehe `config/loader.py`), dieser
-hier baut die KOERPER. Deshalb liegen sie jetzt getrennt.
+Baut die KOERPER; die spielbaren parameter verteilt `config/loader.py`.
 
 Zwei durchlaeufe, weil `is_moon_of` auf einen koerper zeigt, der beim ersten
 lesen des eintrags noch nicht existieren muss.

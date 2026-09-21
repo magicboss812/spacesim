@@ -17,13 +17,13 @@ gelesen. Ein knoten jenseits des gezeichneten horizonts hat keinen
 ablesbaren zustand -- die kette bricht dort ab, statt zu raten.
 
 KOSTEN, UND WARUM SIE NEBENHER ANFALLEN. Ein neuaufbau ist eine kette aus
-bis zu fuenf integrationen und kostet gemessen 7-15 ms. Er laeuft nur, wenn
-der plan (`plan.version`), die grundbahn (`predictor._trajectory_version`)
-oder die eingestellte reichweite sich bewegt haben -- und er laeuft in
-einem ARBEITSTHREAD, weil er sonst genau die eingabe bezahlt, die ihn
-ausloest: im hauptthread gerechnet fiel die bildrate beim ziehen eines
-griffs von 100 auf 40. Wer die auftraege stellt und was dabei im
-hauptthread bleiben MUSS, steht an `ManeuverPreview`.
+bis zu fuenf integrationen und kostet mehrere millisekunden. Er laeuft nur,
+wenn der plan (`plan.version`), die grundbahn
+(`predictor._trajectory_version`) oder die eingestellte reichweite sich
+bewegt haben -- und er laeuft in einem ARBEITSTHREAD, weil er sonst genau
+die eingabe bezahlt, die ihn ausloest (das ziehen eines griffs). Wer die
+auftraege stellt und was dabei im hauptthread bleiben MUSS, steht an
+`ManeuverPreview`.
 
 Zeitrechnung: die kernel rechnen LOKAL zur schnappschuss-epoche
 (`snapshot["sim_time"]`), die punktelisten hier aussen tragen ABSOLUTE
@@ -148,11 +148,9 @@ def body_state_at(body, t_abs, h=1.0):
 class ManeuverPreview:
     """Die kette, ihre marker, und der weg, auf dem sie NEBENHER laeuft.
 
-    NEBENLAEUFIG, weil sie sonst die eingabe bezahlt, die sie ausloest. Ein
-    neuaufbau kostet gemessen 7-15 ms; im hauptthread gerechnet fiel die
-    bildrate beim ziehen eines griffs von 100 auf 40. Alle beteiligten
-    kernel sind `nogil=True` -- dieselbe voraussetzung, unter der schon die
-    vorhersagelinie ausgelagert ist (`ship/predictor/jobs.py`).
+    NEBENLAEUFIG, weil sie sonst die eingabe bezahlt, die sie ausloest. Alle
+    beteiligten kernel sind `nogil=True` -- dieselbe voraussetzung, unter der
+    auch die vorhersagelinie ausgelagert ist (`ship/predictor/jobs.py`).
 
     DIE ARBEITSTEILUNG IST DIE GANZE SCHWIERIGKEIT. Im hauptthread
     entsteht der AUFTRAG: schnappschuss, eine kopie der basislinie, je
@@ -163,11 +161,10 @@ class ManeuverPreview:
     an. Ein auftrag zur zeit; das ergebnis wird mit EINER zuweisung
     eingewechselt (`self.points = ...`), also nie halb sichtbar.
 
-    Der riegel ist damit nicht mehr die uhr, sondern der auftrag selbst:
-    solange einer laeuft, wird kein zweiter gestellt. Die auffrischrate ist
-    dadurch 1/rechenzeit und STETIG -- der feste mindestabstand von vorher
-    (0.15 s) rastete gegen die unregelmaessigen versions-spruenge des
-    predictors und liess die linie ungleichmaessig nachziehen.
+    Der riegel ist der auftrag selbst, nicht die uhr: solange einer laeuft,
+    wird kein zweiter gestellt. Die auffrischrate ist dadurch 1/rechenzeit
+    und STETIG; ein fester mindestabstand rastete gegen die unregelmaessigen
+    versions-spruenge des predictors.
     """
 
     def __init__(self, max_points=1500, burn_step_s=0.25, burn_min_steps=16,
@@ -183,11 +180,8 @@ class ManeuverPreview:
         #: linie wandern. Der bogen wird mit hunderten schritten integriert
         #: -- das ist genauigkeit --, aber er ist ein paar sekunden lang und
         #: am schirm eine handbreit lange kruemmung. Alle schritte zu
-        #: zeichnen verbrannte das punktbudget genau dort, wo es nichts
-        #: bringt: gemessen 400 von 1200 punkten fuer einen 12-sekunden-
-        #: bogen, worauf die anschliessende gleitphase zu kurz wurde, um den
-        #: NAECHSTEN knoten noch zu erreichen -- die kette brach nach dem
-        #: ersten glied ab.
+        #: zeichnen verbraucht das punktbudget, das die anschliessende
+        #: gleitphase braucht, um den NAECHSTEN knoten zu erreichen.
         self.burn_draw_points = max(2, int(burn_draw_points))
 
         #: Reichweite der vorschau als VIELFACHES der punktdichte, die der
@@ -219,8 +213,6 @@ class ManeuverPreview:
         self._executor = None
         self._future = None
         self._submitted_key = None
-        self._plan_version = None
-        self._trajectory_version = None
         self._last_wall = -1e18
 
     # ------------------------------------------------------------- reichweite
@@ -240,11 +232,6 @@ class ManeuverPreview:
         return self.length_mult
 
     # ---------------------------------------------------------------- riegel
-
-    def invalidate(self):
-        self._plan_version = None
-        self._trajectory_version = None
-        self._submitted_key = None
 
     def shutdown(self):
         executor = self._executor
@@ -304,8 +291,6 @@ class ManeuverPreview:
         if future is not None:
             try:
                 future.result(timeout)
-            except TypeError:
-                pass
             except Exception:
                 pass
         return self._collect()
@@ -336,7 +321,6 @@ class ManeuverPreview:
                              a_max, ramp_seconds)
         self._last_wall = float(now_wall)
         self._submitted_key = key
-        self._plan_version, self._trajectory_version = key[0], key[1]
 
         if job is None:
             self.points = None
@@ -497,10 +481,8 @@ def _chain(job):
     for entry in job['nodes']:
         # KEIN budget-abbruch hier oben. Die vorige gleitphase hat sich das
         # ganze restbudget genommen und gibt es erst zurueck, wenn sie an
-        # dieser zuendung abgeschnitten wird -- ein test davor sah also
-        # immer null und liess die kette nach dem ersten glied abbrechen,
-        # obwohl reichlich platz da war. Geprueft wird erst unmittelbar vor
-        # der integration.
+        # dieser zuendung abgeschnitten wird; geprueft wird deshalb erst
+        # unmittelbar vor der integration.
         t_node = entry['t_node']
 
         # -- 1. zustand an der knotenzeit, von der bisherigen linie
@@ -588,14 +570,10 @@ def _chain(job):
         # -- 3. weiter gleiten, ab dem brennende
         #
         # MIT DEM VOLLEN RESTBUDGET, und erst hinterher abgeschnitten (siehe
-        # oben). Das budget vorab unter den knoten aufzuteilen war der
-        # naheliegende weg und ist der falsche: eine halbierte gleitphase
-        # reicht zeitlich kuerzer, und ein knoten, der ein paar sekunden
-        # hinter ihrem ende liegt, faellt aus der kette -- gemessen fiel er
-        # bei einem abstand von 65 062 s aus, obwohl die ungeteilte phase
-        # 244 434 s weit reichte. Verbraucht werden ohnehin nur die punkte,
-        # die nach dem abschneiden uebrig bleiben; die integration ist
-        # derselbe eine kernelaufruf.
+        # oben). Ein vorab unter den knoten aufgeteiltes budget reichte
+        # zeitlich kuerzer, und ein knoten kurz hinter ihrem ende fiele aus
+        # der kette. Verbraucht werden nur die punkte, die nach dem
+        # abschneiden uebrig bleiben.
         coast_points = max(16, min(budget, int(job['max_points'])))
         out, used, _stats = _compute_distance_points_rkn_numba(
             float(end[0]), float(end[1]), float(end[3]), float(end[4]),

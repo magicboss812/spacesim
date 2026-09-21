@@ -64,8 +64,8 @@ class DrawMixin:
 
         Dieselbe pipeline und dieselbe abbildung wie `_draw_polyline`, nur
         ohne den zwang, dass alle punkte EINEN zug bilden. Damit gehen
-        mehrere kleine, unverbundene figuren (etwa alle apsis-rauten einer
-        farbe) in einem einzigen draw an die GPU.
+        unverbundene striche (etwa die vier seiten einer apsis-raute) in
+        einem einzigen draw an die GPU.
         """
         n = len(points)
         if n < 2 or self._line_vao is None:
@@ -94,10 +94,9 @@ class DrawMixin:
         self._line_vao.render(moderngl.LINES, vertices=n)
 
     def _draw_ortho_shape(self, points, color, mode, width=1.0):
-        """Zeichnet geometrie in der alten ortho-konvention (y nach oben).
+        """Zeichnet geometrie in der ortho-konvention (y nach oben).
 
-        Ersatz für die früheren immediate-mode-aufrufe unter
-        gluOrtho2D(0, w, 0, h): identische pixel-abbildung, nur via shader.
+        Pixel-abbildung wie gluOrtho2D(0, w, 0, h).
         """
         n = len(points)
         if n < 2 or self._ortho_vao is None:
@@ -132,10 +131,8 @@ class DrawMixin:
         u1 = 0.0
         u2 = 1.0
 
-        # Liang-Barsky gegen die vier kanten. Bewusst ohne zwischen-listen/zip:
-        # diese funktion läuft pro segment jeder spur-, orbit- und vorhersage-
-        # linie und ist damit der meistaufgerufene pro-frame-pfad. die (pi, qi)-
-        # paare sind exakt wie zuvor (links, rechts, oben, unten), nur skalar.
+        # Liang-Barsky gegen die vier kanten (links, rechts, oben, unten),
+        # skalar ohne zwischen-listen: laeuft je segment, wenn numba fehlt.
 
         # links: pi = -dx, qi = x0 - left
         pi = -dx
@@ -223,23 +220,17 @@ class DrawMixin:
         Important: preserve original segment topology. Never connect visible points
         across an offscreen gap.
 
-        `coords` sind dieselben punkte als (sx, sy)-arrays. Liegen sie vor
-        (und ist numba da), laeuft die ganze zustandsmaschine als EIN
-        kernel-aufruf -- vorher war das die teuerste einzelne funktion des
-        frames (gemessen ~15 ms bei 4000 segmenten, praktisch alles
-        Python-schleifen-overhead). Ohne `coords` oder ohne numba bleibt der
-        Python-weg darunter, zeichenweise identisch.
+        `coords` sind dieselben punkte als (sx, sy)-arrays. Mit numba laeuft
+        die ganze zustandsmaschine als EIN kernel-aufruf
+        (`_clip_runs_numba`); ohne numba der Python-weg darunter, zeichenweise
+        identisch.
 
-        Rueckgabe: liste von ``(n, 2)``-float64-arrays. Der ganze
-        linien-zeichenweg rechnet auf arrays weiter; die frueheren listen
-        aus (x, y)-tupeln wurden auf dem weg zur GPU ohnehin wieder in
-        arrays umgewandelt.
+        Rueckgabe: liste von ``(n, 2)``-float64-arrays.
 
         `screen_points` darf ``None`` sein, WENN `coords` vorliegt -- dann
-        sind die spalten die einzige darstellung der punkte und es wird gar
-        keine tupel-liste mehr gebaut.
+        sind die spalten die einzige darstellung der punkte.
         """
-        have_coords = coords is not None and np is not None
+        have_coords = coords is not None
         if screen_points is None:
             if not have_coords:
                 return []
@@ -257,9 +248,8 @@ class DrawMixin:
         coords_match = have_coords and len(coords[0]) == point_count
 
         # Aufrufer ohne spalten (bahnlinien, referenz-spuren) bekommen sie
-        # hier einmalig -- sonst laufen genau die durch den langsamen
-        # Python-klipper, waehrend die vorhersagelinie den kernel nutzt.
-        if not coords_match and np is not None and _LINE_KERNELS_OK:
+        # hier einmalig, damit auch sie den kernel nutzen.
+        if not coords_match and _LINE_KERNELS_OK:
             try:
                 arr = np.asarray(screen_points, dtype=np.float64)
                 if arr.ndim == 2 and arr.shape[1] == 2 and arr.shape[0] == point_count:
@@ -351,8 +341,6 @@ class DrawMixin:
             runs.append(run)
 
         # Einheitliche rueckgabe mit dem kernel-weg: (n, 2)-arrays.
-        if np is None:
-            return runs
         return [np.asarray(r, dtype=np.float64) for r in runs]
 
     def _clipped_runs_from_arrays(self, sx, sy, left, top, right, bottom):
@@ -382,9 +370,8 @@ class DrawMixin:
     def _draw_texture_ortho(self, texture, x, y, width, height, color=(1.0, 1.0, 1.0, 1.0)):
         """Zeichnet eine textur als quad in der ortho-konvention (y nach oben).
 
-        Ersatz für die früheren immediate-mode glTexCoord/glVertex-quads unter
-        gluOrtho2D(0, w, 0, h): (x, y) ist die untere linke ecke, texcoord
-        (0, 0) liegt ebendort (texturen werden vertikal geflippt hochgeladen).
+        (x, y) ist die untere linke ecke, texcoord (0, 0) liegt ebendort
+        (texturen werden vertikal geflippt hochgeladen).
 
         color toent die textur multiplikativ (texquad.frag, u_color). Der
         uniform MUSS gesetzt werden -- GL initialisiert uniforms mit 0, ein
@@ -392,14 +379,11 @@ class DrawMixin:
         """
         if self._texquad_vao is None or texture is None:
             return
-        # AUF DAS PIXELRASTER RASTEN. Die weltabgeleiteten label-positionen
-        # sind subpixelgenau (Erde z. B. bei y=113.7048). Bei LINEAR-filterung
-        # verteilt ein solcher versatz jede glyphenzeile auf ZWEI pixelzeilen:
-        # der text wird weich und bekommt eine schwache kopie darueber/darunter
-        # -- sieht aus wie eine zweite zahl unter der zahl. Gemessen faellt der
-        # anteil voll deckender pixel von 19.5 % auf 9 %.
-        # Das HUD war nie betroffen, weil es ganzzahlige ursprungswerte nutzt.
-        # Die textur wird 1:1 gezeichnet, deshalb genuegt das runden der ecke.
+        # Auf das pixelraster rasten: weltabgeleitete label-positionen sind
+        # subpixelgenau, und bei LINEAR-filterung verteilt ein solcher
+        # versatz jede glyphenzeile auf zwei pixelzeilen (weicher text mit
+        # schwacher doppelkontur). Die textur wird 1:1 gezeichnet, deshalb
+        # genuegt das runden der ecke.
         self._texquad_program['u_rect'].value = (
             round(float(x)), round(float(y)), float(width), float(height)
         )
@@ -419,10 +403,9 @@ class DrawMixin:
 
         Die welt wird top-down gezeichnet (line.vert flippt y), text und
         schiffs-pfeil laufen dagegen ueber die ortho-konvention (y nach oben,
-        ursprung unten links). Ohne diese umrechnung landet alles, was aus
-        weltkoordinaten kommt, an der ueber die BILDSCHIRMMITTE gespiegelten
-        position -- unsichtbar solange das objekt genau mittig steht, und mit
-        wachsendem abstand zur mitte immer weiter daneben.
+        ursprung unten links). Alles, was aus weltkoordinaten kommt, muss
+        hier durch, sonst landet es an der ueber die bildschirmmitte
+        gespiegelten position.
         """
         return float(self.height) - float(y_topdown)
 

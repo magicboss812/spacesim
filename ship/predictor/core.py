@@ -1,12 +1,10 @@
 """Die vorausberechnete bahnlinie des schiffs.
 
-Die REINE ZAHLENARBEIT liegt nicht mehr hier, sondern in `physics/kernels/`:
-integratoren, das Kepler-bahnmodell, die Ap/Pe-suche und die propagation. Das
-waren 2400 der 6800 zeilen dieser datei, und sie gehoeren der physik, nicht dem
-schiff. Was bleibt, ist die BUCHFUEHRUNG: wann wird neu gerechnet, was wird
-gehalten, was gezeichnet.
+Die REINE ZAHLENARBEIT liegt in `physics/kernels/`: integratoren, das
+Kepler-bahnmodell, die Ap/Pe-suche und die propagation. Hier steht die
+BUCHFUEHRUNG: wann wird neu gerechnet, was wird gehalten, was gezeichnet.
 
-Zwei regeln, die beide teuer erkauft sind:
+Zwei regeln:
 
   * EINE PROGNOSEKURVE WIRD VERBRAUCHT, NIE VERSCHOBEN. Der vorausblick ist
     eine eigenschaft der BAHN, nicht des augenblicks. Siehe CLAUDE.md und
@@ -15,108 +13,25 @@ Zwei regeln, die beide teuer erkauft sind:
     `physics/kernels/integrators.py` zu aendern heisst, sie auch in
     `physics/world_kernels.py` zu aendern.
 """
-from physics.vec import Vec2
 import math
-import os
 import time
-from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-from numba import njit
 
-from physics.kernels import (
-    BODY_MEMO_COLUMNS,
-    POINT_COLUMNS,
-    _empty_points,
-    _no_body_memo,
-    _widen_points,
-)
-from physics.kernels.apsis import _find_apsis_markers_numba, _refine_apsis_numba
-from physics.kernels.integrators import (
-    _compute_acc_nearest_numba,
-    _compute_acc_numba,
-    _compute_acc_time_numba,
-    _leapfrog_step_numba,
-    _local_timescale_numba,
-    _rk4_step_numba,
-    _rkn_acc_numba,
-    _rkn_acc_time_numba,
-    _rkn_adaptive_step_numba,
-    _rkn_adaptive_step_time_numba,
-    _rkn4_step_numba,
-    _rkn4_step_time_numba,
-)
-from physics.kernels.kepler import (
-    _body_kepler_constants_numba,
-    _body_position_at_time_numba,
-    _body_scripted_relative_xy_numba,
-)
-from physics.kernels.propagate import (
-    _compute_distance_points_aspi_numba,
-    _compute_distance_points_numba,
-    _compute_distance_points_numba_state,
-    _compute_distance_points_rkn_numba,
-)
+from physics.kernels import _empty_points
 
 from ship.predictor.hold import HoldMixin
 from ship.predictor.compute import ComputeMixin
 from ship.predictor.jobs import JobsMixin
 from ship.predictor.view import ViewMixin
 
-# Predictor ist absichtlich Numba-only
-NUMBA_AVAILABLE = True
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
     """Die vorausberechnete bahnlinie -- zusammengesetzt aus mixins.
 
-    Die klasse war 4280 zeilen. Sie ist jetzt ueber `ship/predictor/` verteilt,
-    bleibt aber EIN objekt: die mixins teilen sich `self` und die felder, die
-    `__init__` hier anlegt. Bewusst keine komposition -- das haette hunderte
-    attributzugriffe in der zweitgroessten datei des projekts umgeschrieben.
+    Ueber `ship/predictor/` verteilt, aber EIN objekt: die mixins teilen sich
+    `self` und die felder, die `__init__` hier anlegt.
 
-    Was hier BLEIBT, ist der kern: der zustand, die integrator-guete und der
+    Hier liegt der kern: der zustand, die integrator-guete und der
     frame-einstieg `update()`, der entscheidet, welcher der vier wege (halt,
     rollend, asynchron, synchron voll) diesen frame gegangen wird.
     """
@@ -182,11 +97,9 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # drift wächst bewusst mit dem intervall. nahe vorbeiflügen bleibt die
         # adaptive kontrolle wirksam. bei/unter base_precision: exakte identität.
         # Off by default: the look-ahead horizon is set by `length`, not by
-        # `precision` (see _get_target_point_cap / get_display_length). Interval
-        # coupling's premise ("coarser spacing => longer horizon => trade
-        # accuracy for cost") no longer holds once the two are decoupled, so
+        # `precision` (see _get_target_point_cap / get_display_length), so
         # coarsening `precision` must stay purely cosmetic — same cost, same
-        # accuracy. Re-enable only for a deliberate fast, low-accuracy preview.
+        # accuracy. Enable only for a deliberate fast, low-accuracy preview.
         self.rkn_interval_coupling = False
         self.rkn_interval_tol_exponent = 8.0
         # Horizon-scaled far-field step size. A long look-ahead over a smooth arc
@@ -204,28 +117,16 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # den ein integrator-schritt hoechstens ueberdecken darf, wenn der
         # horizont die decke anhebt. Siehe _make_snapshot.
         self.rkn_max_dt_timescale_divisor = 30.0
-        # Absolute obergrenze der schrittdecke. Sie war 30000 s, solange die
-        # bahn-klammer GLOBAL war und deshalb auf einer abflugbahn ausfiel --
-        # dann war dies der einzige schutz. Ortlich gerechnet binden bereits
-        # zwei PHYSIKALISCHE schranken (`desired` aus dem horizont und
-        # `t_char_local/30` aus der bahn), und diese dritte, unphysikalische
-        # war nur noch teuer: gemessen auf der Jupiter-abflugbahn bei 128x
-        # 2848 schritte / 103 ms gegen 1280 / 51 ms bei 120000 s, wobei 1280
-        # genau das schrittbudget `rkn_far_field_target_steps` ist -- darueber
-        # bindet `desired` und der wert saettigt (300000 s misst dasselbe).
-        # Der preis gegen eine referenz mit 300-s-decke: 2.501e6 -> 2.665e6 m
-        # auf 1.28e12 m horizont, also **0.0025 -> 0.0027 px**, wenn der ganze
-        # bogen im bild steht. Das NAHFELD ist bit-identisch (leo/ecc/mond bei
-        # 30k gegen 300k: gleiche schrittzahl, groesste abweichung 0.0), weil
-        # die bahn-klammer dort um zwei groessenordnungen tiefer liegt.
+        # Absolute obergrenze der schrittdecke. Die eigentlichen schranken sind
+        # die beiden PHYSIKALISCHEN (`desired` aus dem horizont und
+        # `t_char_local/30` aus der bahn); diese dritte ist nur ein grober
+        # schutz und liegt so hoch, dass sie im fernfeld nicht bindet. Im
+        # NAHFELD liegt die bahn-klammer um groessenordnungen tiefer.
         self.rkn_max_dt_ceiling = 120000.0
-        # ORTLICHE statt globale schrittdecke. False stellt den alten weg her:
-        # `t_char/divisor` EINMAL am schiff gemessen und ueber den ganzen lauf
-        # gelegt. Das ist der A/B-schalter fuer den vergleich (dieselbe rolle
-        # wie `use_body_memo` und `world.use_fast_integrator`) -- mit ihm
-        # zeigt `tests/warp_predictor_test.py` §24, dass beide wege auf jeder
-        # bahn, die IHR REGIME NICHT VERLAESST, bit-identisch rechnen, und dass
-        # der unterschied genau dort auftritt, wo er auftreten soll.
+        # ORTLICHE statt globale schrittdecke. False legt `t_char/divisor`
+        # EINMAL am schiff gemessen ueber den ganzen lauf -- der A/B-schalter
+        # (dieselbe rolle wie `use_body_memo` und `world.use_fast_integrator`)
+        # fuer `tests/warp_predictor_test.py` §24.
         self.use_local_step_ceiling = True
         # Gemessene MITTLERE inverse geschwindigkeit ueber den horizont (s/m):
         # zeitspanne des letzten laufs geteilt durch seine bogenlaenge. 0.0 =
@@ -247,7 +148,7 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # wall-clock duration (ms) of the most recent trajectory compute
         # (_compute_from_snapshot). In async mode this runs on a worker thread,
         # so it reflects the real line-calculation cost even though it overlaps
-        # rendering. Read by the per-frame TIMING line in test.py.
+        # rendering. Read by the per-frame TIMING line in runtime/loop.py.
         self.last_compute_ms = 0.0
         self._trajectory_version = 0
         self._last_seen_px = None
@@ -269,24 +170,12 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # gebraucht werden `rechenzeit / bildzeit` laeufe, damit je bild genau
         # ein ergebnis fertig wird (siehe _target_pipeline_depth). Beim
         # gleitflug bleibt es immer bei einer einzigen rechnung.
-        # 1 = abgeschaltet, wie vor der pipeline.
+        # 1 = abgeschaltet (eine rechnung nach der anderen).
         self.thrust_pipeline_depth = 6
         # Wie viele FERTIGE, noch nicht eingewechselte ergebnisse warten
         # duerfen (siehe _swap_ready_result). Der klassische kompromiss eines
-        # jitter-puffers: mehr puffer = gleichmaessigeres nachziehen, aber
-        # aeltere linie. Gemessen an der periapsis unter vollschub, je 300
-        # bilder, und der abstand der gezeichneten zur synchron gerechneten
-        # linie:
-        #
-        #     0 -> 4 doppelschritte,  alter 2 s,   8.4 px abstand
-        #     1 -> 1 doppelschritt,   alter 4 s,  10.3 px
-        #     2 -> 0 doppelschritte,  alter 6 s,  17.5 px
-        #
-        # Voreinstellung 1: drei viertel der ausreisser weg fuer knapp 2 px.
-        # Die STILLSTAENDE (3 je 300 bilder) bleiben in allen faellen -- sie
-        # sind die andere haelfte derselben sache, denn es kann nie mehr als
-        # ein ergebnis je bild ankommen. Ein stillstand faellt aber kaum auf,
-        # ein doppelsprung schon.
+        # jitter-puffers: mehr puffer = gleichmaessigeres nachziehen (weniger
+        # doppelschritte), aber aeltere linie. 1 ist der kompromiss.
         self.swap_backlog_max = 1
         # Gleitender mittelwert des abstands zwischen zwei update()-aufrufen,
         # also der bildzeit -- der predictor bekommt sie sonst nicht mit.
@@ -294,9 +183,9 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         self._last_update_ts = None
         self._pipeline_depth_used = 1
         # Notizblock fuer koerperpositionen im rkn-kernel. False rechnet jede
-        # kepler-aufstellung wie frueher einzeln -- der A/B-schalter fuer den
+        # kepler-aufstellung einzeln -- der A/B-schalter fuer den
         # bit-vergleich (tests/warp_predictor_test.py §10), nach demselben
-        # muster wie world.use_fast_integrator. Gemessen 61.7 -> 15.8 ms.
+        # muster wie world.use_fast_integrator.
         self.use_body_memo = True
         # A coasting ship's velocity changes by ~|g|*dt each step from gravity
         # alone; only a jump BEYOND that (real thrust) should invalidate the
@@ -307,10 +196,10 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         self.gravity_dv_safety_factor = 4.0
         self.max_async_sim_age = max(2.0 * self.dt, 1.0)
         # Freshness of accepted async results is gated by WALL age (seconds since
-        # the worker finished) rather than sim-time age: sim-time age scales with
-        # sim_dt and horizon and wrongly rejected every result, forcing the
-        # blocking sync path. The per-frame anchor + rebase keep position exact,
-        # so a wall-fresh result is always safe to accept. See _swap_ready_result.
+        # the worker finished) rather than sim-time age, which scales with
+        # sim_dt and horizon and would reject every result under warp. The
+        # per-frame anchor keeps position exact, so a wall-fresh result is
+        # always safe to accept. See _swap_ready_result.
         self.max_async_wall_age = 1.5
         # Throttle redundant async re-submissions to ~this rate (wall seconds).
         # When a compute is cheaper than one frame, recompute_every_update would
@@ -656,20 +545,10 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         self._hold_resume_context = None
         self._resume_context = None
         # WICHTIG: auch den vermerk loeschen, WELCHER zustand die punkte erzeugt
-        # hat. Er wird nur beim einwechseln eines ergebnisses gesetzt, nach dem
-        # reset gibt es aber keins mehr -- er stuende also als luege da.
-        #
-        # Das ist kein aufraeumen, sondern behebt eine selbsterhaltende
-        # blockade: update() vergleicht die schiffsgeschwindigkeit gegen genau
-        # diesen vermerk und wirft die bahn weg, sobald sie abweicht. Bleibt er
-        # alt stehen, weicht sie JEDEN frame weiter ab (im zeitraffer um
-        # ~24 m/s je frame), also wird jeden frame die trajektorien-version
-        # erhoeht und der laufende hintergrund-auftrag verworfen -- der aber
-        # laenger als einen frame braucht. Gemessen nach einem druck auf
-        # '9'/'0'/'+'/'-': 20 frames, 20 auftraege abgeschickt, KEINER
-        # eingewechselt, die linie kam nie zurueck. Ohne linie faellt der
-        # navball auf die geradeaus-tangente zurueck statt auf die gezeichnete
-        # bahn -- das ist das springen der marker.
+        # hat -- er wird nur beim einwechseln eines ergebnisses erneuert.
+        # update() vergleicht die schiffsgeschwindigkeit gegen genau diesen
+        # vermerk; bliebe er alt stehen, wiche sie jeden frame weiter ab, jeder
+        # frame verwuerfe den laufenden auftrag, und die linie kaeme nie zurueck.
         self._last_swapped_snapshot = None
         # Die gemessene bahn-zeitspanne gehoert zu der kurve, die es nicht mehr
         # gibt. Nach einem reparenting/teleport waere sie schlicht falsch.
@@ -707,11 +586,6 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
             return 0, 0.0, 0.0
 
 
-
-
-
-
-
     def _current_reference_body_index(self):
         try:
             if self.reference_body_index is None:
@@ -719,50 +593,6 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
             return int(self.reference_body_index)
         except Exception:
             return -1
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     def initialize(self, ship, world):
@@ -899,15 +729,12 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
 
         # ------------------------------------------------ zeitraffer-halt
         # Der halt uebernimmt den frame VOLLSTAENDIG -- er laeuft vor beiden
-        # rechenwegen und kehrt in jedem fall zurueck. Das ist absicht: der
-        # asynchrone weg wuerde sonst weiterhin jeden frame ein mehrere
-        # frames altes ergebnis einwechseln und `_anchor_first_point`
-        # darauf loslassen, und genau diese starre verschiebung einer
-        # veralteten kurve ist das zittern, das der halt beseitigen soll.
+        # rechenwegen und kehrt in jedem fall zurueck: der asynchrone weg
+        # wechselte sonst jeden frame ein mehrere frames altes ergebnis ein,
+        # und die kurve zitterte.
         #
         # Aufgefrischt wird EINMAL SYNCHRON, wenn der vorrat zur neige geht
-        # (siehe _hold_advance). Das kostet ~6 ms und faellt bei 7d/s etwa
-        # alle 40 frames an -- deterministisch, statt jeden frame ein
+        # (siehe _hold_advance) -- deterministisch, statt jeden frame ein
         # bisschen.
         if self._hold_active():
             # Ein angeforderter stufenwechsel wird eingewechselt, sobald er da
@@ -960,10 +787,8 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
             if self.recompute_every_update:
                 self._compute_full(ship, world)
                 self._anchor_first_point(ship, world)
-                # Die zoom-anforderung ist mit dem vollen neuaufbau erfuellt.
-                # Nur der asynchrone weg hat das flag bisher zurueckgesetzt;
-                # synchron blieb es stehen und haette den zeitraffer-halt
-                # dauerhaft blockiert.
+                # Die zoom-anforderung ist mit dem vollen neuaufbau erfuellt;
+                # ein stehengebliebenes flag blockierte den zeitraffer-halt.
                 self._view_scale_changed = False
                 if self.debug and not getattr(self, "_suppress_dbg_computed", False):
                     try:
@@ -973,7 +798,7 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
                 self._computed_since_last_update = 0
                 return
 
-            removed = self.remove_passed_points(ship)
+            self.remove_passed_points(ship)
             target_points = self._get_target_point_cap()
             if self._points_count() < target_points:
                 self._compute_full(ship, world)
@@ -1122,10 +947,10 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
             self._submit_async_compute(ship, world, target_points)
             self._last_submit_wall = now
 
-        # Keep the drawn line's start glued to the ship every frame (cheap rigid
-        # shift of the whole curve). Between background refreshes the curve then
-        # tracks the ship smoothly instead of lagging and snapping on each swap;
-        # the shape itself refreshes at the worker's cadence.
+        # Keep the drawn line's start on the ship every frame (the curve is
+        # consumed up to now, see _anchor_first_point). Between background
+        # refreshes the line then tracks the ship smoothly; the shape itself
+        # refreshes at the worker's cadence.
         if self._points_count() > 0:
             self._anchor_first_point(ship, world)
 
@@ -1135,23 +960,6 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
             except Exception:
                 pass
         self._computed_since_last_update = 0
-
-
-
-
-
-
-
-
-
-
-
-
-    def advance_state(self, world=None):
-
-        if self.async_compute:
-            self._swap_ready_result(None, world)
-
 
     def close(self):
         self._cancel_pending_job()

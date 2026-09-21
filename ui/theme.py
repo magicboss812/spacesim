@@ -17,9 +17,8 @@ alles, was nach instrument aussehen soll. `text` ist Oxanium: dieselben
 quadratischen grundformen, aber mit weich gerundeten ecken und echter
 kantenglaettung. Sie traegt namen, gemischte schreibung und alles, was
 gelesen statt abgelesen wird. Beide haben bei gleicher nenngroesse
-praktisch dieselbe versalhoehe und dieselbe laufweite (gemessen: 7 bzw.
-8 px versalhoehe und 68 bzw. 64 px vorschub bei groesse 10), lassen sich
-also in einer zeile mischen, ohne dass eine der beiden herausfaellt.
+praktisch dieselbe versalhoehe und dieselbe laufweite, lassen sich also in
+einer zeile mischen, ohne dass eine der beiden herausfaellt.
 
 TYPO-KONTRAST TRAEGT DIE HIERARCHIE, NICHT DIE FARBE: gesperrte
 10-px-beschriftungen gegen 25-30-px-messwerte. Das ist der auffaelligste
@@ -27,14 +26,12 @@ einzelzug der vorlage und der grund, warum dort kaum farbe noetig ist.
 
 DIE PALETTE IST FESTGELEGT. Vier farben, jede mit EINER bedeutung --
 cyan = daten, magenta = zweite achse/ziel, amber = achtung und energie,
-gruen = eingerastet/bereit. Der frueher hier moegliche palettenwechsel ist
-entfallen: eine farbe, die sich neu verteilen laesst, kann nichts bedeuten.
+gruen = eingerastet/bereit. Es gibt keinen palettenwechsel: eine farbe, die
+sich neu verteilen laesst, kann nichts bedeuten.
 
 Alle groessen sind DESIGN-EINHEITEN; die umrechnung auf echte pixel passiert
 ausschliesslich ueber UIContext.px().
 """
-
-import colorsys
 
 # --------------------------------------------------------------- farbhilfen
 
@@ -110,16 +107,6 @@ def ink_on(color, threshold=0.32):
     return rgba('#f2f7fc')
 
 
-def shift_hue(color, degrees):
-    """Farbton drehen, saettigung und helligkeit behalten."""
-    h, l, s = colorsys.rgb_to_hls(color[0], color[1], color[2])
-    h = (h + float(degrees) / 360.0) % 1.0
-    r, g, b = colorsys.hls_to_rgb(h, l, s)
-    return (r, g, b, color[3])
-
-
-
-
 # ----------------------------------------------------------------- palette
 
 #: DIE vier farben. Kein zweiter satz, kein wechselknopf -- siehe modulkopf.
@@ -167,9 +154,8 @@ class Palette:
 
     # ------------------------------------------------------ feste grundierung
 
-    # Flaechen. Deutlich dunkler und BLAEULICHER als zuvor: die vorlage setzt
-    # ihre instrumente auf ein sehr dunkles marineblau, nicht auf neutrales
-    # schwarz -- das ist es, was die cyan-daten darauf leuchten laesst.
+    # Flaechen: ein sehr dunkles marineblau, nicht neutrales schwarz -- das
+    # ist es, was die cyan-daten darauf leuchten laesst.
     ground = rgba('#04070c')
     panel = rgba('#080f18', 0.88)
     panel_pill = rgba('#0a1420', 0.92)
@@ -191,7 +177,6 @@ class Palette:
     text_muted = rgba('#8fa8bc')
     text_dim = rgba('#6f8698')
     text_dimmer = rgba('#4c5f70')
-    text_inverse = rgba('#04070c')
 
     # Interaktionszustaende.
     hover = rgba('#a8d8ea', 0.10)
@@ -202,10 +187,7 @@ class Palette:
 
     # Aliase, die die allgemeinen widgets aus ui/widgets/ erwarten.
     panel_raised = rgba('#101d2c', 0.94)
-    divider = rgba('#7fb4cc', 0.14)
     border = edge
-    border_strong = edge_strong
-    warning = rgba('#eda63c')
     danger = rgba('#ff5f6b')
 
     def set_colors(self, colors):
@@ -226,18 +208,12 @@ class Palette:
             return role[name]
         raise AttributeError(name)
 
-    def raw_of(self, role):
-        """Ungehellte farbe -- fuer flaechen, nie fuer schrift."""
-        return self.raw.get(role, self.colors[0])
-
     def glow(self, role, intensity=0.6):
         """Der farbige schein hinter einem block -- ein schlagschatten mit
         versatz null und weiter weichzeichnung.
 
-        DEUTLICH SCHWAECHER als frueher (0.28 -> 0.13): der schein war das,
-        was die alte oberflaeche nach "jedes element schwebt einzeln"
-        aussehen liess. Er soll einen block vom sternenfeld abheben, nicht
-        ihn zum leuchtobjekt machen.
+        Bewusst schwach: er soll einen block vom sternenfeld abheben, nicht
+        ihn zum einzeln schwebenden leuchtobjekt machen.
         """
         return with_alpha(self.role.get(role, self.colors[0]), 0.13 * float(intensity))
 
@@ -281,11 +257,6 @@ class Role:
         self.tracking = float(tracking)   # in em
         self.bold = bool(bold)
         self.family = str(family)
-
-    @property
-    def mono(self):
-        """Rueckwaertskompatibler alias -- die pixelschrift IST dicktengleich."""
-        return self.family == 'display'
 
 
 class TypeScale:
@@ -361,14 +332,9 @@ class Spacing:
     """Abstands-leiter. Grob gestuft, damit nicht jedes widget seinen
     eigenen wert erfindet."""
 
-    none = 0
-    xs = 3
     sm = 5
     md = 8
     lg = 11
-    xl = 15
-    xxl = 22
-    section = 30
 
 
 class Radius:
@@ -376,28 +342,21 @@ class Radius:
 
     NEGATIV = FASE, positiv = rundung (siehe modulkopf und
     shaders/ui_rect.frag). Die oberflaeche benutzt bis auf echte kreise
-    ausschliesslich fasen -- durchgaengige rundung war der staerkste
-    einzelne "das hat eine maschine entworfen"-hinweis der alten fassung.
+    ausschliesslich fasen -- durchgaengige rundung liest sich als
+    maschinell entworfen.
     """
 
-    none = 0
     #: Kleine fase an knoepfen und kacheln.
     cut_sm = -4
     #: Regelfase an panels und rahmen.
     cut = -7
-    #: Grosse fase an den tragenden bloecken.
-    cut_lg = -11
     #: Sanfte rundung -- nur dort, wo etwas ausdruecklich weich sein soll.
     sm = 3
     md = 5
-    #: Vollkreis; wird im shader auf die halbe kante geklemmt.
-    pill = 999
 
-    # Alte namen, damit die allgemeinen widgets weiterlaufen. Sie zeigen
-    # jetzt auf FASEN -- eine rundung soll nirgends mehr versehentlich
-    # zurueckkommen.
+    # Der panel-radius der allgemeinen widgets (ui/widgets/panel.py) ist
+    # ebenfalls eine FASE.
     lg = -7
-    xl = -11
 
 
 def cut_corners(size, top_left=True, top_right=True,
@@ -423,7 +382,6 @@ class Motion:
     RATEN, keine dauern -- framerate-unabhaengig, wie das kamera-easing.
     """
 
-    instant = 0.0
     fast = 22.0
     normal = 14.0
     slow = 8.0
@@ -447,7 +405,6 @@ class Theme:
     # Standard-metriken.
     control_height = 24
     control_height_sm = 18
-    control_height_lg = 32
     panel_padding = 12
     panel_width = 190
     border_width = 1.0
@@ -463,18 +420,9 @@ class Theme:
     #: Oxanium -- quadratisch mit weichen ecken.
     font_family_text = ('Oxanium', 'Chakra Petch', 'Segoe UI', 'DejaVu Sans')
 
-    # Rueckwaertskompatible namen.
-    font_family = font_family_text
-    font_family_mono = font_family_display
-
     def palette_sets(self):
-        """Nur noch der EINE satz -- der wechselknopf ist entfallen."""
+        """Der EINE farbsatz (siehe modulkopf)."""
         return ((SCHEME_NAME, SCHEME),)
-
-    def set_palette_colors(self, colors, name=None):
-        self.palette.set_colors(colors)
-        if name:
-            self.palette.name = name
 
     def glow(self, role):
         return self.palette.glow(role, self.glow_intensity)

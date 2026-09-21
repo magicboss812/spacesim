@@ -8,14 +8,7 @@ import time
 
 import numpy as np
 
-from physics.vec import Vec2
-from physics.kernels import (
-    BODY_MEMO_COLUMNS,
-    POINT_COLUMNS,
-    _empty_points,
-    _no_body_memo,
-    _widen_points,
-)
+from physics.kernels import _empty_points, _no_body_memo
 from physics.kernels.propagate import (
     _compute_distance_points_aspi_numba,
     _compute_distance_points_numba,
@@ -350,29 +343,21 @@ class ComputeMixin:
         eff_max_dt = float(self.rkn_max_dt)
         if self.rkn_adaptive_far_maxdt and float(self.rkn_far_field_target_steps) > 0.0:
             horizon_arc = float(max_points) * float(effective_precision)
-            # Wieviel ZEIT deckt dieser bogen ab? Genau das braucht die
-            # schrittzahl-schaetzung -- und genau das darf NICHT aus der
-            # momentangeschwindigkeit kommen. Auf einer exzentrischen bahn ist
-            # sie im perihel das MAXIMUM und im aphel das MINIMUM der ganzen
-            # bahn, der fehler geht also in beide richtungen und ausgerechnet
-            # im perihel nach unten: die schaetzung faellt zu kurz aus, die
-            # schrittweite wird zu klein gedeckelt und der lauf kostet ein
-            # vielfaches. Gemessen auf Pe 29 Gm / Ap 129 Gm bei 32x horizont:
-            # 6663 schritte / 256 ms im perihel gegen 1160 / 43 ms im aphel --
-            # dieselbe bahn, derselbe bogen, 6x. Genau das ist das stocken der
-            # linie am perihel (die auffrischung faellt unter die bildrate)
-            # und genau deshalb ist am aphel nichts davon zu merken.
+            # Wieviel ZEIT deckt dieser bogen ab? Das darf NICHT aus der
+            # momentangeschwindigkeit kommen: auf einer exzentrischen bahn ist
+            # sie im perihel das maximum und im aphel das minimum, die
+            # schaetzung faellt im perihel zu kurz aus und die schrittweite
+            # wird zu klein gedeckelt.
             #
             # Die ehrliche groesse ist die MITTLERE inverse geschwindigkeit
-            # ueber den bogen, und die kennt der letzte lauf bereits exakt:
-            # seine zeitspanne durch seine bogenlaenge. Als verhaeltnis
-            # gespeichert ueberlebt sie auch ein '+'/'-' auf den horizont.
-            # Rueckkopplung ohne ruecklauf: die zeitspanne ist eine eigenschaft
-            # der bahn, nicht der schrittweite -- ein groesseres max_dt
-            # verandert sie nicht, es gibt also keinen regelkreis.
+            # ueber den bogen, und die kennt der letzte lauf exakt: seine
+            # zeitspanne durch seine bogenlaenge. Als verhaeltnis gespeichert
+            # ueberlebt sie auch ein '+'/'-' auf den horizont. Kein
+            # regelkreis: die zeitspanne ist eine eigenschaft der bahn, nicht
+            # der schrittweite.
             time_per_arc = float(getattr(self, "_horizon_time_per_arc", 0.0) or 0.0)
             if time_per_arc <= 0.0:
-                # Erster lauf: nichts gemessen, also der alte schaetzer.
+                # Erster lauf: nichts gemessen, also die momentangeschwindigkeit.
                 speed = math.hypot(float(ship.velocity.x), float(ship.velocity.y))
                 if speed > 1.0:
                     time_per_arc = 1.0 / speed
@@ -381,32 +366,21 @@ class ComputeMixin:
                 ceiling = float(self.rkn_max_dt_ceiling)
                 # DIE DECKE DARF DIE BAHN NICHT UEBERSPRINGEN.
                 #
-                # `desired` kennt nur den horizont, nicht die bahn. Bei vielen
-                # '+'-druecken wird sie deshalb groesser als ein nennenswerter
-                # bruchteil der umlaufzeit -- und dann liegt die schrittweite
-                # nicht mehr an der fehlerkontrolle, sondern an der decke.
-                # Gemessen in einer erdumlaufbahn (rp 2e7 m, e = 0.6, T = 97 h)
-                # bei 64x horizont: die linie weicht gegen dieselbe rechnung
-                # mit fester decke (1500 s) um bis zu **6.0e7 m** ab, mehr als
-                # die bahn selbst gross ist -- die vorhersage zeigt dann
-                # schlicht eine andere bahn.
+                # `desired` kennt nur den horizont, nicht die bahn. Bei langem
+                # horizont wird sie groesser als ein nennenswerter bruchteil
+                # der umlaufzeit, und dann bestimmt die decke statt der
+                # fehlerkontrolle die schrittweite -- die linie zeigte eine
+                # andere bahn.
                 #
                 # Dieselbe schranke, die schon der zeitraffer benutzt:
                 # `sqrt(r_dominant/|g|)`, fuer eine kreisbahn genau T/2pi.
-                # Im FERNFELD (heliozentrisch, t_char ~ 5e6 s) ist sie um
-                # groessenordnungen groesser als die decke und aendert nichts
-                # -- der fernfeld-gewinn bleibt also unangetastet.
+                # Im FERNFELD ist sie um groessenordnungen groesser als die
+                # decke und aendert nichts.
                 #
-                # SIE WIRD HIER NICHT MEHR EINGERECHNET, SONDERN IM KERNEL JE
-                # SCHRITT. Hier war sie EINE zahl fuer den ganzen lauf, gemessen
-                # am schiff, wie es beim anlegen des schnappschusses stand --
-                # und damit falsch fuer jede bahn, die ihr regime verlaesst. Auf
-                # einer abflugbahn (Erdorbit -> Jupiter) galt die zeitskala der
-                # ERDE fuer die ganzen 2.85 jahre reiseflug: 24 633 schritte /
-                # 899 ms statt 1 276 / 56 ms. Der kernel wertet dieselbe formel
-                # jetzt am jeweiligen ORT aus (`_local_timescale_numba`), womit
-                # die klammer im nahfeld unveraendert greift und sich erst
-                # oeffnet, wenn das schiff den koerper wirklich verlassen hat.
+                # Normalerweise rechnet sie der KERNEL je schritt am jeweiligen
+                # ORT (`_local_timescale_numba`), damit eine bahn, die ihr
+                # regime verlaesst (abflug Erde -> Jupiter), nicht die zeitskala
+                # des startorts behaelt. Hier nur der globale A/B-weg.
                 if not self.use_local_step_ceiling:
                     t_char = self._characteristic_timescale(world, ship)
                     if t_char is not None and t_char > 0.0:
@@ -974,7 +948,7 @@ class ComputeMixin:
             self._compute_full_rolling(ship, world)
             self._view_scale_changed = False
         else:
-            removed = self.remove_passed_points(ship)
+            self.remove_passed_points(ship)
 
             target_points = self._get_target_point_cap()
             missing = target_points - self._points_count()

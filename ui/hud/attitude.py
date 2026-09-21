@@ -26,13 +26,12 @@ from ..theme import with_alpha
 # Der entwurf ist in einer 220er viewBox gezeichnet; alle rohmasse unten
 # stehen in diesen einheiten und werden mit size/220 skaliert.
 _VIEWBOX = 220.0
-_CENTER = 110.0
 _TICK_RADIUS = 92.0
 _OUTER_RADIUS = 103.0
 # Radien wie im entwurf. Die beschriftung MUSS auf 68 bleiben: weiter innen
 # laeuft sie in den mittleren messwertblock (die kurs-plakette sitzt bei
 # y+38..+58), weiter aussen in die teilung. Dass marker und beschriftung sich
-# gelegentlich treffen, wird stattdessen in _draw_tick_labels abgefangen.
+# gelegentlich treffen, faengt _draw_tick_labels ab.
 _LABEL_RADIUS = 68.0
 _MARKER_RADIUS = 76.0
 # Ab dieser winkeldifferenz verdeckt ein marker eine himmelsrichtung.
@@ -83,12 +82,11 @@ class AttitudeRing(Widget):
     den rastenden autopiloten arbeiten.
 
     Beim loslassen gibt der ring die steuerung vollstaendig zurueck (siehe
-    on_mouse_up); ein hier haengengebliebener sollwert sperrt sonst die
+    on_mouse_up); ein haengengebliebener sollwert sperrte sonst die
     pfeiltasten aus.
     """
 
-    def __init__(self, telemetry, ship_control=None, size=(212, 212),
-                 hub_only=False, **kwargs):
+    def __init__(self, telemetry, ship_control=None, size=(212, 212), **kwargs):
         super().__init__(size=size, **kwargs)
         self.telemetry = telemetry
         self.ship_control = ship_control
@@ -96,10 +94,6 @@ class AttitudeRing(Widget):
         self._manual_heading = None
         self._drag_offset = 0.0
         self._display_heading = 0.0
-        # Im navball-block steht der kurs in einer plakette UEBER der kugel
-        # (so wie in der vorlage); die ringmitte traegt dann nur noch eine
-        # kleine nabe, die das innerste stueck der nadel abdeckt.
-        self.hub_only = bool(hub_only)
 
     # --------------------------------------------------------------- geometrie
 
@@ -114,13 +108,10 @@ class AttitudeRing(Widget):
     def hit_test(self, ctx, x, y):
         """RUND, nicht quadratisch.
 
-        Das widget ist ein quadrat, der ring darin ein kreis -- die vier
-        ecken des quadrats sind leer, gehoerten der trefferpruefung aber
-        trotzdem. Da der ring im navball-block VOR den zellenbogen liegt,
-        verschluckte er damit genau die klicks auf deren obere und untere
-        enden: der schub liess sich in seinem oberen drittel nicht stellen,
-        obwohl der bogen sichtbar frei lag. Eine ecke, die nichts zeichnet,
-        darf auch nichts fangen.
+        Das widget ist ein quadrat, der ring darin ein kreis. Die leeren
+        ecken des quadrats duerfen nichts fangen: der ring liegt im
+        navball-block VOR den zellenbogen, deren obere und untere enden in
+        diese ecken ragen.
         """
         if not self.visible:
             return False
@@ -151,8 +142,7 @@ class AttitudeRing(Widget):
             pass
         # GEGRIFFEN WIRD DER RING, NICHT DIE NASE. Die teilung wird bei
         # (deg - heading) gezeichnet, ein kurs steigt also, wenn sich der
-        # ring GEGEN den uhrzeigersinn dreht. Wer den ring anfasst und im
-        # uhrzeigersinn zieht, sah ihn deshalb rueckwaerts laufen.
+        # ring GEGEN den uhrzeigersinn dreht.
         #
         # Festgehalten wird der ringpunkt unter dem cursor: der kurswert
         # dort ist (cursor + heading) und bleibt waehrend des ziehens
@@ -174,13 +164,10 @@ class AttitudeRing(Widget):
     def on_mouse_up(self, ctx, x, y, button):
         """Loslassen gibt das schiff SOFORT wieder frei.
 
-        Ohne das blieb _manual_heading stehen und update() rief weiter
-        orient_towards_angle() auf. Das ist nicht bloss ein weiterlaufender
-        sollwert: sobald der kurs erreicht ist, setzt orient_towards_angle
-        intern _snap_locked und heftet theta danach JEDEN frame auf den
-        zielwert. Die pfeiltasten schrieben theta zwar noch, der wert wurde
-        aber im selben frame wieder ueberschrieben -- das schiff liess sich
-        nach einem einzigen zieh-vorgang nur noch ueber den ring steuern.
+        _manual_heading faellt weg, damit update() nicht weiter
+        orient_towards_angle() aufruft, und clear_snap() hebt die
+        _snap_locked-heftung auf, die orient_towards_angle bei erreichtem
+        kurs setzt -- sonst ueberschriebe sie die pfeiltasten jeden frame.
         """
         if button != 1:
             return True
@@ -398,10 +385,8 @@ class AttitudeRing(Widget):
             return
         # MASSSTAB AUS DER BAHN, nicht fest: die nadel misst gegen das
         # kreisbahn- und das fluchttempo AN DIESEM ORT (siehe
-        # Telemetry.orbital_speed_scale). Vorher stand hier ein fester
-        # vollausschlag von 2600 m/s, der zu keinem koerper gehoerte -- im
-        # Erdorbit klebte die nadel am anschlag, um einen kleinen mond
-        # schlug sie gar nicht aus.
+        # Telemetry.orbital_speed_scale), damit dieselbe nadellaenge an jedem
+        # koerper dasselbe bedeutet.
         span = self.telemetry.velocity_fraction()
         if span is None:
             # Kein bezugskoerper: die richtung stimmt trotzdem, also wird
@@ -425,40 +410,18 @@ class AttitudeRing(Widget):
         ctx.draw.circle(x, y, 5.0 * scale, fill=palette.velocity)
 
     def _draw_readout(self, ctx, cx, cy, scale):
-        """Nur noch die kurs-plakette, mittig als nabe des rings.
+        """Die nabe in der ringmitte.
 
-        Der GESCHWINDIGKEITSWERT sass hier urspruenglich (so wie im entwurf),
-        wurde aber von der geschwindigkeitsnadel ueberschrieben: die nadel
-        laeuft aus der mitte heraus und legt sich damit je nach kurs quer
-        ueber die dreissig pixel grosse zahl. Im entwurf faellt das nicht auf,
-        weil dort nur ein einziger kurs abgebildet ist. Der wert steht jetzt
-        in VelocityReadout unterhalb des rings.
-
-        Die plakette wird NACH der nadel gezeichnet und deckt deren innerstes
-        stueck ab -- das liest sich als nabe, nicht als fehler.
+        Der kurs steht in einer plakette im navball-block UEBER dem ring; die
+        mitte traegt nur eine kleine nabe. Sie wird NACH der nadel gezeichnet
+        und deckt deren innerstes stueck ab -- das liest sich als nabe, nicht
+        als fehler.
         """
         palette = ctx.theme.palette
-        if self.hub_only:
-            # Nur die nabe. Der kurs steht im navball-block darueber.
-            ctx.draw.circle(cx, cy, 7.0 * scale, fill=palette.ring_face,
-                            border_color=with_alpha(palette.ring, 0.7),
-                            border_width=max(1.0, 1.4 * scale))
-            ctx.draw.circle(cx, cy, 2.2 * scale, fill=palette.ring)
-            return
-        pill_w = 92.0 * scale
-        pill_h = 22.0 * scale
-        pill_x = cx - pill_w * 0.5
-        pill_y = cy - pill_h * 0.5
-        ctx.draw.rect(
-            pill_x, pill_y, pill_w, pill_h,
-            fill=palette.panel_popup, radius=-6.0 * scale,
-            border_color=with_alpha(palette.frame, 0.5),
-            border_width=ctx.theme.border_width,
-        )
-        ctx.text.draw(
-            f"HDG {self.telemetry.text_heading()}", cx, cy,
-            role='hdg', color=palette.frame, align='center', valign='middle',
-        )
+        ctx.draw.circle(cx, cy, 7.0 * scale, fill=palette.ring_face,
+                        border_color=with_alpha(palette.ring, 0.7),
+                        border_width=max(1.0, 1.4 * scale))
+        ctx.draw.circle(cx, cy, 2.2 * scale, fill=palette.ring)
 
     def _draw_nose(self, ctx, cx, cy, scale, outer):
         """Die schiffsnase steht FEST oben -- der ring dreht sich darunter.
@@ -479,70 +442,3 @@ class AttitudeRing(Widget):
         ctx.draw.line(cx - half, tip_y + height, cx + half, tip_y + height,
                       palette.ship, width=max(1.5, 2.4 * scale), cap='round')
 
-
-class VelocityReadout(Widget):
-    """Die geschwindigkeitsanzeige als eigene plakette unter dem ring.
-
-    Im entwurf steht der wert in der ringmitte. Das geht dort auf, weil nur
-    EIN kurs abgebildet ist -- im spiel wandert die geschwindigkeitsnadel
-    ueber den vollen kreis und schneidet dabei zwangslaeufig durch die
-    dreissig pixel hohe zahl. Ausgelagert bleibt beides jederzeit lesbar,
-    und der ring behaelt seine nabe (die kurs-plakette).
-
-    Die zahlenspalte ist auf eine FESTE breite reserviert. Ohne das wuerde
-    die plakette bei jedem stellenwechsel (999 -> 1 000 m/s) ihre breite
-    aendern, und weil sie mittig verankert ist, zuckte sie dabei seitlich.
-    """
-
-    #: Reservierte zahlenbreite -- die breiteste realistisch auftretende
-    #: zeichenfolge. Die mono-rolle haelt alle ziffern gleich breit.
-    _WIDTH_SAMPLE = '000 000'
-
-    def __init__(self, telemetry, size=(None, 44), **kwargs):
-        super().__init__(size=size, **kwargs)
-        self.telemetry = telemetry
-
-    def _parts(self, ctx):
-        caption = f"{self.telemetry.view_mode_label()} VELOCITY"
-        return caption, self.telemetry.text_speed(), self.telemetry.text_speed_unit()
-
-    def measure(self, ctx):
-        caption, _speed, unit = self._parts(ctx)
-        pad = ctx.px(18)
-        gap = ctx.px(12)
-        width = (pad * 2.0 + gap * 2.0
-                 + ctx.text.measure(caption, 'ring_caption')[0]
-                 + ctx.text.measure(self._WIDTH_SAMPLE, 'readout')[0]
-                 + ctx.text.measure(unit, 'ring_unit')[0])
-        return (width, ctx.px(44))
-
-    def draw(self, ctx):
-        palette = ctx.theme.palette
-        caption, speed, unit = self._parts(ctx)
-        height = self.rect.h
-        middle = self.rect.center_y
-        pad = ctx.px(18)
-        gap = ctx.px(12)
-
-        ctx.draw.rect(
-            self.rect.x, self.rect.y, self.rect.w, height,
-            fill=palette.panel_pill, radius=height * 0.5,
-            border_color=palette.edge, border_width=ctx.theme.border_width,
-            shadow=ctx.theme.glow('velocity'),
-            shadow_offset=(0.0, 0.0), shadow_softness=ctx.px(24.0),
-        )
-
-        cursor = self.rect.x + pad
-        ctx.text.draw(caption, cursor, middle, role='ring_caption',
-                      color=palette.text_dim, valign='middle')
-        cursor += ctx.text.measure(caption, 'ring_caption')[0] + gap
-
-        # Rechtsbuendig in die reservierte spalte: die zahl waechst damit
-        # nach links und der einheiten-text bleibt stehen.
-        column = ctx.text.measure(self._WIDTH_SAMPLE, 'readout')[0]
-        ctx.text.draw(speed, cursor + column, middle, role='readout',
-                      color=palette.velocity, align='right', valign='middle')
-        cursor += column + gap
-
-        ctx.text.draw(unit, cursor, middle, role='ring_unit',
-                      color=palette.text_muted, valign='middle')

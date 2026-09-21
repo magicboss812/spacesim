@@ -97,8 +97,8 @@ class TextMixin:
                 except Exception:
                     pass
         self._label_texture_cache = {}
-        # Der pool haelt texturen der ALTEN schriftgroesse -- nach einem
-        # font-wechsel passt keine davon mehr, also mit weg.
+        # Der pool haelt texturen der vorigen schriftgroesse; nach einem
+        # font-wechsel passt keine davon.
         for bucket in getattr(self, '_label_texture_pool', {}).values():
             for texture in bucket:
                 try:
@@ -209,11 +209,8 @@ class TextMixin:
         return surface
 
     def _get_label_texture(self, text, font, antialias=True, tracking=0.0):
-        # DIE SCHRIFT GEHOERT IN DEN SCHLUESSEL, NICHT NUR IHRE HOEHE. Seit
-        # die koerpernamen ueber eine zweite schriftdatei laufen, koennen
-        # zwei fonts dieselbe hoehe melden -- der cache haette dann die
-        # gerasterten glyphen der einen unter dem namen der anderen
-        # ausgeliefert.
+        # Die schrift selbst gehoert in den schluessel, nicht nur ihre hoehe:
+        # zwei fonts (HUD, koerpernamen) koennen dieselbe hoehe melden.
         key = (text, id(font), font.get_height(), bool(antialias),
                round(float(tracking), 2))
         entry = self._label_texture_cache.get(key)
@@ -277,9 +274,7 @@ class TextMixin:
         self._draw_texture_ortho(texture, x, y, w, h, color=color)
 
     def _draw_body_label(self, name, screen_pos, radius):
-        # Label mit gecachten GL-Texturen zeichnen, um pro-Frame GL-Allocationen zu vermeiden.
-        # Label horizontal zentrieren und über dem Körper platzieren, um
-        # Fehlausrichtungen beim Zoomen oder bei Radiusänderungen zu vermeiden.
+        # Label horizontal zentriert ueber dem koerper, aus dem textur-cache.
         text, font, antialias, tracking = self._body_label_style(name)
         try:
             entry = self._get_label_texture(text, font, antialias=antialias,
@@ -295,7 +290,7 @@ class TextMixin:
         except Exception:
             pass
 
-        # Fallback: previous heuristic
+        # Fallback ohne textur-masse: rechts neben dem koerper.
         label_x = screen_pos[0] + radius + 2
         label_y = screen_pos[1] - 8
         self._blit_text_topdown(text, label_x, label_y, font,

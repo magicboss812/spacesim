@@ -15,7 +15,7 @@ Aufbau:
     draw.py     zeichen-primitive auf EINEM SDF-shader
     core.py     rechtecke, verankerung, widget-basis, eingabe-routing
     state.py    beobachtbarer ansichts-zustand (bezugsrahmen, overlays)
-    widgets/    schaltflaechen, schalter, regler, aufklappmenues, panels
+    widgets/    schaltflaechen, schalter, regler, panels
     hud/        die konkreten HUD-elemente
 
 ALLE groessen in widget-code sind DESIGN-EINHEITEN. Die umrechnung auf echte

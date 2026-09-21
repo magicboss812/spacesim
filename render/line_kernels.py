@@ -2,8 +2,8 @@
 
 Min-step-verdichtung, RDP-vereinfachung, fenster-clipping und verdichtung.
 Wort-fuer-wort dieselbe arithmetik wie die Python-methoden in
-`render/prediction.py` -- die bleiben als referenz und fallback erhalten;
-ohne numba aendert sich exakt nichts ausser der geschwindigkeit.
+`render/prediction.py` und `render/draw.py` -- die sind referenz und
+fallback; ohne numba aendert sich exakt nichts ausser der geschwindigkeit.
 
 `tests/prediction_projection_test.py` §1 zieht dieselbe linie durch den
 batch- und den skalar-weg und verlangt 0.000e+00 px unterschied. Nach jeder
@@ -14,10 +14,6 @@ import math
 import numpy as np
 
 
-# Numba-fassungen der reinen zahlenschleifen im linien-zeichenweg
-# (min-step-verdichtung und RDP-vereinfachung). Wort-fuer-wort dieselbe
-# arithmetik wie die Python-methoden darunter -- die bleiben als referenz
-# und fallback erhalten; ohne numba aendert sich exakt nichts.
 try:
     from numba import njit as _njit
 
@@ -281,8 +277,8 @@ try:
     def _max_gap_refine_numba(keep_idx, xs, ys, max_seg):
         """Zu weit auseinanderliegende RDP-punkte wieder auffuellen.
 
-        Dieselbe schleife wie die Python-fassung in
-        `_runs_from_screen_points`, inklusive der bankier-rundung von
+        Dieselbe schleife wie die Python-fassung
+        `_max_gap_refine_indices`, inklusive der bankier-rundung von
         Pythons `round()` -- ein um eins verschobener stuetzindex waere
         eine andere linie.
         """
@@ -387,14 +383,10 @@ try:
 
     _LINE_KERNELS_OK = True
 except Exception:
-    # OHNE NUMBA MUESSEN DIE NAMEN TROTZDEM EXISTIEREN.
-    #
-    # Solange diese kerne mit dem Renderer in EINER datei lagen, genuegte das
-    # flag: die aufrufstellen sind alle mit `if _LINE_KERNELS_OK:` bewacht, und
-    # ein nie ausgewerteter name stoert nicht. Als eigenes modul werden sie
-    # jedoch mit `from render.line_kernels import ...` geholt -- und ein
-    # fehlender name laesst dann schon den IMPORT scheitern, also den ganzen
-    # renderer, statt nur den schnellpfad. Deshalb hier platzhalter.
+    # Ohne numba muessen die namen trotzdem existieren: sie werden per
+    # `from render.line_kernels import ...` geholt, und ein fehlender name
+    # liesse den import des ganzen renderers scheitern. Die aufrufstellen
+    # sind alle mit `if _LINE_KERNELS_OK:` bewacht.
     _LINE_KERNELS_OK = False
     _compact_min_step_numba = None
     _rdp_keep_numba = None

@@ -1,12 +1,11 @@
 """Das zeichnen des schiffs und seiner orientierungsvektoren.
 
 Die vektor-geometrie selbst liegt in `ship/art.py` (reines numpy); hier steht
-nur der weg auf den schirm. Die gezeichneten orbital-vektoren sind die EINZIGE
+nur der weg auf den schirm. `orbital_frame_directions` ist die EINZIGE
 quelle der wahrheit fuer den rast-autopiloten -- siehe
 .claude/rules/camera-input.md.
 """
 import math
-import os
 
 import moderngl
 
@@ -18,58 +17,20 @@ from ship import art as ship_art
 
 
 class ShipDrawMixin:
-    """Das schiff: sprite, pfeil, fahne, schubvektor und die orientierung.
+    """Das schiff: sprite, pfeil, fahne und die orientierung.
 
     `_apply_orientation_snap` laeuft INNERHALB von render(), unmittelbar bevor
     der pfeil gezeichnet wird -- mit demselben rahmen und derselben rahmenzeit
     wie die gezeichneten prograde/normal-vektoren. Nur so landet die nase exakt
     auf dem vektor, unabhaengig von sim_dt und drehrate des rahmens."""
 
-    def draw_ship_thrust_vector(self, ship, camera):
-        if ship is None:
-            return
-
-        try:
-            direction = getattr(ship, "last_thrust_direction", None)
-            if direction is None:
-                return
-
-            vx = float(direction.x)
-            vy = float(direction.y)
-
-            frame = self._active_frame()
-            try:
-                vx, vy = frame.to_this_frame_vector_xy(self._frame_time_s, vx, vy)
-            except Exception:
-                pass
-
-            mag = math.hypot(vx, vy)
-            if mag <= 1e-12:
-                return
-
-            vx /= mag
-            vy /= mag
-
-            sx, sy = self._world_to_screen_xy(float(ship.position.x), float(ship.position.y), camera)
-            length_px = 45.0
-            ex = sx + vx * length_px
-            ey = sy - vy * length_px
-
-            self._draw_polyline([(sx, sy), (ex, ey)], color=(1.0, 0.5, 0.1, 0.95), width=2.0)
-        except Exception:
-            return
-
-    def active_plotting_frame(self):
-        """Public accessor for the frame the ship control uses to hold a snap."""
-        return self._active_frame()
-
     def orbital_frame_directions(self, ship, reference_body=None, prediction_points=None):
-        """The frame-space orbital directions used to draw the overlay vectors.
+        """The frame-space orbital directions of the ship.
 
-        Single source of truth for both the debug vectors and the orientation
-        snap: prograde/normal_in are the tangent/inward of the *drawn* predictor
-        line in the active plotting frame; retrograde/antinormal are their
-        opposites. Evaluated at the renderer's current ``_frame_time_s`` — the
+        Single source of truth for the orientation snap and the HUD
+        (`ui/hud/telemetry.py`): prograde/normal_in are the tangent/inward of
+        the *drawn* predictor line in the active plotting frame;
+        retrograde/antinormal are their opposites. Evaluated at the renderer's current ``_frame_time_s`` — the
         same instant the ship arrow is drawn.
         """
         frame = self._active_frame()
@@ -134,106 +95,6 @@ class ShipDrawMixin:
         except Exception:
             return
 
-    def draw_ship_orientation_debug_vectors(self, ship, camera, reference_body=None,
-                                            prediction_points=None):
-        """Debug overlay: always draws prograde (green) + normal-inward (magenta).
-
-        Directions come from ``apparent_orbital_directions`` fed the actual
-        predictor polyline (``prediction_points``) — i.e. the tangent of the
-        drawn line as it appears in the active plotting frame — so they already
-        live in frame space and only need the screen y-flip, exactly like the
-        drawn trajectory. This keeps them glued to the predictor line as it
-        changes shape, including in rotating/translating frames.
-        """
-        if ship is None:
-            return
-
-        try:
-            frame, directions = self.orbital_frame_directions(
-                ship, reference_body, prediction_points
-            )
-
-            sx, sy = self._world_to_screen_xy(float(ship.position.x), float(ship.position.y), camera)
-            length_px = 55.0
-
-            for key, color in (
-                ("prograde", (0.2, 1.0, 0.35, 0.95)),
-                ("normal_in", (0.9, 0.3, 1.0, 0.95)),
-            ):
-                d = directions.get(key)
-                if d is None:
-                    continue
-                ex = sx + float(d.x) * length_px
-                ey = sy - float(d.y) * length_px
-                # Stash the ACTUAL drawn pixel direction of each vector so the
-                # diagnostic can compare raw screen geometry (non-derived).
-                if key == "normal_in":
-                    self._last_normal_screen_dir = (ex - sx, ey - sy)
-                elif key == "prograde":
-                    self._last_prograde_screen_dir = (ex - sx, ey - sy)
-                self._draw_polyline([(sx, sy), (ex, ey)], color=color, width=2.0)
-
-            self._debug_orientation_angles(ship, camera, frame, directions, sx, sy)
-        except Exception:
-            return
-
-    def _debug_orientation_angles(self, ship, camera, frame, directions, sx, sy):
-        """Env-guarded (SPACESIM_DEBUG_ORIENT=1) screen-space angle report.
-
-        Prints, in one common screen convention, the heading of: the actual
-        predictor orbit line, my green prograde, the blue velocity vector, and
-        the ship nose. Whichever one disagrees is the culprit for the reported
-        45 deg offset. Behavior-neutral: only prints, throttled.
-        """
-        if os.environ.get("SPACESIM_DEBUG_ORIENT", "0").strip().lower() in ("0", "", "false", "off", "no"):
-            return
-        self._debug_orient_counter = getattr(self, "_debug_orient_counter", 0) + 1
-        if self._debug_orient_counter % 30 != 1:
-            return
-
-        def sdeg(dx, dy):
-            # Screen-space heading: vectors are drawn as (dx, -dy), so the
-            # on-screen angle of a frame-space direction is atan2(-dy, dx).
-            return math.degrees(math.atan2(-dy, dx))
-
-        parts = []
-
-        # RAW drawn pixel angles (from the actual vertices, y-down screen space).
-        def rawdeg(v):
-            if v is None:
-                return None
-            return math.degrees(math.atan2(v[1], v[0]))
-
-        norm_v = getattr(self, "_last_normal_screen_dir", None)
-        arrow_v = getattr(self, "_last_arrow_screen_dir", None)
-        norm_deg = rawdeg(norm_v)
-        # DISPLAYED arrow angle: the arrow renders under gluOrtho2D bottom-up
-        # while vectors render via the line shader top-down, so the arrow's
-        # on-screen y is the negation of its input y.
-        arrow_deg = None if arrow_v is None else math.degrees(math.atan2(-arrow_v[1], arrow_v[0]))
-
-        if norm_deg is not None:
-            parts.append(f"magenta_raw={norm_deg:8.3f}")
-        if arrow_deg is not None:
-            parts.append(f"arrow_raw={arrow_deg:8.3f}")
-
-        # Per-sample rotation of each, so co-rotation vs counter-rotation is
-        # directly visible (this is the user's actual complaint).
-        prev = getattr(self, "_dbg_prev_raw", None)
-        if prev is not None and norm_deg is not None and arrow_deg is not None:
-            dmag = (norm_deg - prev[0] + 180.0) % 360.0 - 180.0
-            darr = (arrow_deg - prev[1] + 180.0) % 360.0 - 180.0
-            sense = "SAME" if (dmag * darr) >= 0 else "OPPOSITE"
-            parts.append(f"d_mag={dmag:+7.3f} d_arrow={darr:+7.3f} [{sense}]")
-        if norm_deg is not None and arrow_deg is not None:
-            self._dbg_prev_raw = (norm_deg, arrow_deg)
-            gap = (arrow_deg - norm_deg + 180.0) % 360.0 - 180.0
-            parts.append(f"gap={gap:+7.3f}")
-
-        mode = getattr(getattr(self, "_dbg_ship_control", None), "snap_mode", None)
-        frame_label = getattr(frame, "label", frame.__class__.__name__)
-        print(f"ORIENT_DBG: snap={mode} " + "  ".join(parts) + f"  frame='{frame_label}'")
-
     def _ship_relative_speed_m_s(self, ship, reference_body=None):
         if ship is None:
             return None
@@ -289,16 +150,6 @@ class ShipDrawMixin:
         except Exception:
             return None
 
-    def _format_speed_label(self, speed_m_s):
-        if speed_m_s is None:
-            return ""
-
-        speed_m_s = float(speed_m_s)
-        if speed_m_s >= 1000.0:
-            return f"{speed_m_s / 1000.0:.2f} km/s"
-
-        return f"{speed_m_s:.1f} m/s"
-
     def _ship_zoom_shrink_factor(self, camera_scale):
         """Massstabs-faktor des schiffs fuer die aktuelle zoomstufe.
 
@@ -328,7 +179,7 @@ class ShipDrawMixin:
             return 1.0
         if not (start > 0.0 and end > 0.0 and end < start):
             # Unbrauchbar konfiguriert (vertauscht oder gleich): lieber die
-            # alte feste groesse als eine division durch null.
+            # volle feste groesse als eine division durch null.
             return 1.0
         if scale >= start:
             return 1.0
@@ -354,7 +205,8 @@ class ShipDrawMixin:
         """Halbe hoehe der gezeichneten schiffs-grafik in bildschirm-pixeln.
 
         Bezugsgroesse fuer alles, was NEBEN dem schiff sitzt (labels). Faellt
-        auf die halbe breite des alten pfeils zurueck, wenn die grafik aus ist.
+        auf die halbe breite des fallback-pfeils zurueck, wenn die grafik aus
+        ist.
         """
         geo = self._ship_geometry() if self.ship_sprite_enabled else None
         if geo is None:
@@ -378,7 +230,7 @@ class ShipDrawMixin:
     def _ship_plume_intensity(self, body, real_dt):
         """Helligkeit der abgasfahne, weich zwischen leerlauf und schub.
 
-        `body.last_thrust_direction` wird in test.py je frame geleert und von
+        `body.last_thrust_direction` wird je frame geleert und von
         `schiffcontrol` gesetzt, sobald schub anliegt -- es ist also ein
         echtes "brennt gerade"-signal. Nur schub NACH VORN zuendet die
         hauptduese: beim rueckwaerts-schub (pfeil ab) sitzen die duesen an
@@ -424,9 +276,6 @@ class ShipDrawMixin:
 
         # Die grafik laeuft ueber die ORTHO-pipeline (y nach oben), die
         # uebergebene position kommt aber aus _world_to_screen_xy (top-down).
-        # Ohne diese umrechnung landet das schiff an der ueber die
-        # bildschirmmitte gespiegelten stelle -- exakt mittig faellt das nicht
-        # auf, abseits der mitte steht es weit neben seiner bahn.
         y = self._ortho_y(y)
 
         # `theta` ist im UHRZEIGERSINN gemessen: schiff.apply_thrust schiebt
@@ -434,9 +283,6 @@ class ShipDrawMixin:
         # nase. Die grafik muss also ebenfalls (cos, -sin) zeigen.
         hx = math.cos(theta)
         hy = -math.sin(theta)
-        # Stash the ACTUAL drawn nose screen-direction so diagnostics can compare
-        # the real ship pixels against the drawn vectors (non-circular check).
-        self._last_arrow_screen_dir = (hx, hy)
 
         scale = self._ship_length_px() / geo.length
 
@@ -483,7 +329,7 @@ class ShipDrawMixin:
             )
 
     def _draw_ship_arrow(self, body, x, y, r, g, b, theta_override=None):
-        """Der alte dreiecks-pfeil.
+        """Der dreiecks-pfeil.
 
         Rueckfallweg, wenn `ship_sprite_enabled` aus ist oder `ship_art` sich
         nicht bauen liess -- bis auf die grafik identisch zu
@@ -503,23 +349,15 @@ class ShipDrawMixin:
 
         # Der pfeil laeuft ueber die ORTHO-pipeline (y nach oben), die
         # uebergebene position kommt aber aus _world_to_screen_xy (top-down).
-        # Ohne diese umrechnung wird der pfeil an der ueber die bildschirmmitte
-        # gespiegelten stelle gezeichnet: exakt mittig faellt das nicht auf,
-        # abseits der mitte steht das schiff weit neben seiner bahn.
         y = self._ortho_y(y)
 
         # `theta` ist im UHRZEIGERSINN gemessen: schiff.apply_thrust schiebt
         # entlang Vec2(cos theta, -sin theta), das ist die weltrichtung der
         # nase. Der pfeil muss also ebenfalls (cos, -sin) zeigen.
-        # Die positions-korrektur oben aendert daran nichts -- eine
-        # verschiebung dreht keine richtung.
         hx = math.cos(theta)
         hy = -math.sin(theta)
         nx = -hy
         ny = hx
-        # Stash the ACTUAL drawn nose screen-direction so diagnostics can compare
-        # the real arrow pixels against the drawn vectors (non-circular check).
-        self._last_arrow_screen_dir = (hx, hy)
 
         # ursprung anpassen damit der dreiecks-schwerpunkt an (x, y) liegt.
         # der schwerpunkt des dreiecks aus nase und schwanz-ecken liegt

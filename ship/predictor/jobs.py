@@ -10,17 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
-from physics.vec import Vec2
-from physics.kernels import POINT_COLUMNS, _empty_points, _widen_points
-
 
 class JobsMixin:
     """Die asynchrone rechen-pipeline.
 
     Mehrere rechnungen laufen VERSETZT nebeneinander, der durchsatz ist
-    deshalb hoeher als 1/rechenzeit -- das ist der grund, warum die linie unter
-    schub nicht einfriert, obwohl ein voller neuaufbau ~60 ms kostet und ein
-    180-fps-frame 5.6 ms hat.
+    deshalb hoeher als 1/rechenzeit -- so zieht die linie unter schub nach,
+    obwohl ein voller neuaufbau laenger dauert als ein frame.
 
     `_swap_ready_result` ist der heikle teil: ein fertiges ergebnis darf nur
     eingewechselt werden, wenn es zu einem NEUEREN schiffszustand gehoert als
@@ -32,15 +28,12 @@ class JobsMixin:
         # Beim GLEITFLUG laeuft hier genau eine rechnung; die tiefe wird nur
         # unter schub ausgereizt (siehe _request_thrust_recompute).
         #
-        # Warum ueberhaupt mehrere: eine vorhersage dauert ~17 ms, ein bild
-        # ~7 ms. Nacheinander gerechnet kann die linie also hoechstens jedes
-        # dritte bild neu sein -- das ist das ruckeln waehrend eines burns.
-        # Die dauer EINER rechnung laesst sich nicht weiter druecken, ihr
-        # DURCHSATZ aber schon: mehrere zeitversetzt gestartete laeufe geben
-        # alle ~17/tiefe ms ein ergebnis. Erlaubt ist das, weil alle kernel
-        # `nogil=True` sind -- sie laufen wirklich nebenlaeufig und nehmen dem
-        # hauptthread nichts weg (gemessen: gleiche hauptthread-arbeit 0.25 ms
-        # bei leerlaufendem gegen 0.27 ms bei ausgelastetem worker).
+        # Warum ueberhaupt mehrere: eine vorhersage dauert laenger als ein
+        # bild, nacheinander gerechnet waere die linie waehrend eines burns
+        # nur jedes zweite oder dritte bild neu. Mehrere zeitversetzt
+        # gestartete laeufe geben alle rechenzeit/tiefe ein ergebnis. Erlaubt
+        # ist das, weil alle kernel `nogil=True` sind -- sie laufen wirklich
+        # nebenlaeufig und nehmen dem hauptthread nichts weg.
         # Der pool wird auf die OBERGRENZE ausgelegt; wie viele davon
         # tatsaechlich beschaeftigt sind, entscheidet _target_pipeline_depth
         # bild fuer bild aus rechenzeit/bildzeit. Leerlaufende threads kosten
@@ -104,10 +97,6 @@ class JobsMixin:
                     count += 1
         return count
 
-    def _async_job_in_flight(self):
-        """Rechnet ueberhaupt ein auftrag? (bequemlichkeit fuer altes verhalten)"""
-        return self._async_jobs_in_flight() > 0
-
     def _pipeline_depth_cap(self):
         """Obergrenze: konfiguration und verfuegbare kerne."""
         cap = int(max(1, getattr(self, "thrust_pipeline_depth", 1)))
@@ -121,20 +110,16 @@ class JobsMixin:
     def _target_pipeline_depth(self):
         """So viele gleichzeitige laeufe, dass je BILD eines fertig wird.
 
-        Die dauer einer vorhersage laesst sich nicht unter die bildzeit
-        druecken -- sie haengt am horizont (17 ms bei der grundeinstellung,
-        ~74 ms bei vierfachem horizont) und ein bild dauert 11 ms. Wie oft
-        sich die linie erneuert, haengt aber nicht an dieser dauer, sondern am
-        DURCHSATZ: bei `n` zeitversetzt gestarteten laeufen wird alle
-        rechenzeit/n ein ergebnis fertig. Gebraucht werden also
+        Die dauer einer vorhersage haengt am horizont und liegt ueber der
+        bildzeit. Wie oft sich die linie erneuert, haengt aber am DURCHSATZ:
+        bei `n` zeitversetzt gestarteten laeufen wird alle rechenzeit/n ein
+        ergebnis fertig. Gebraucht werden also
 
             n = rechenzeit / bildzeit
 
         laeufe (aufgerundet, plus einer als puffer gegen schwankungen), damit
-        in jedem bild genau einer ankommt. Eine feste zahl kann das nicht
-        leisten: sie ist beim kurzen horizont verschwenderisch und beim langen
-        zu klein -- genau das war bei vierfachem horizont noch sichtbar
-        (3 laeufe / 74 ms = 40 erneuerungen je sekunde bei 90 bildern).
+        in jedem bild genau einer ankommt. Eine feste zahl waere beim kurzen
+        horizont verschwenderisch und beim langen zu klein.
 
         Die bildzeit misst der predictor selbst am abstand seiner eigenen
         aufrufe; die rechenzeit ist der letzte messwert aus
@@ -161,23 +146,18 @@ class JobsMixin:
         """Schub-neuberechnung ANFORDERN statt sie im hauptthread zu erzwingen.
 
         Waehrend eines brennmanoevers reisst der schub die geschwindigkeit in
-        JEDEM frame ueber die toleranz. Der alte weg hat daraufhin jedes mal
-        `_compute_full` synchron laufen lassen: gemessen mit dem vollen
-        sonnensystem **0.12 ms im gleitflug gegen 59 ms unter schub**, also
-        ~14 fps, solange die pfeiltaste gedrueckt ist. Ausserdem wurde die
-        laufende asynchrone rechnung jedes mal verworfen und die linie
-        geleert -- unter dauerschub kam also nie ein ergebnis durch.
+        JEDEM frame ueber die toleranz. Ein synchrones `_compute_full` je
+        frame waere teuer, und ein jedes mal verworfener auftrag kaeme unter
+        dauerschub nie durch.
 
-        Statt dessen wird die anforderung ZUSAMMENGEFASST: laeuft schon ein
-        auftrag, passiert nichts (er ist ohnehin schon aktueller als die
-        gezeichnete linie); laeuft keiner, wird genau einer abgeschickt. Die
-        alte linie bleibt sichtbar und wird wie immer per
-        `_anchor_first_point` ans schiff geheftet, bis das neue ergebnis da
-        ist. Damit erneuert sich die vorhersage waehrend des brennens etwa
-        alle 60 ms (statt gar nicht) und der hauptthread bleibt frei.
+        Die anforderung wird deshalb ZUSAMMENGEFASST: laufen schon genug
+        auftraege, passiert nichts (sie sind ohnehin aktueller als die
+        gezeichnete linie); sonst wird genau einer abgeschickt. Die
+        vorhandene linie bleibt sichtbar und wird per `_anchor_first_point`
+        ans schiff geheftet, bis das neue ergebnis da ist.
 
         Rueckgabe: True = zusammengefasst, der aufrufer laesst die vorhandene
-        linie stehen. False = der aufrufer muss den alten, harten weg gehen
+        linie stehen. False = der aufrufer muss den harten weg gehen
         (kein async, rolling-modus, oder es gibt gar keine linie, die man
         behalten koennte -- dann gilt weiterhin die zusicherung, dass
         update() synchron eine baut).
@@ -212,18 +192,11 @@ class JobsMixin:
 
         Dasselbe muster wie `_request_thrust_recompute`, fuer den anderen
         ausloeser: den WECHSEL DER ZEITRAFFER-STUFE. Die stufe bestimmt ueber
-        `predictor_warp_length_mult()` den horizont (1x/4x/16x/64x ab 7d/s),
-        jeder wechsel ruft `set_length()`, und der halt-zweig in `update()`
-        hat das bisher mit einem synchronen `_compute_full` beantwortet.
-        Gemessen mit dem vollen sonnensystem bei 180 fps, gegen 0.3-0.5 ms in
-        den nachbar-frames:
-
-            7d/s -> 30d/s     47.6 ms      1y/s  -> 100d/s   30.6 ms
-            30d/s -> 100d/s   31.1 ms      100d/s -> 30d/s   48.2 ms
-            100d/s -> 1y/s    40.6 ms      30d/s  -> 7d/s    14.9 ms
-
-        Das ist der ruckler beim umschalten -- und er ist unnoetig, denn die
-        gehaltene kurve ist zu diesem zeitpunkt nicht falsch. Sie ist bloss
+        `warp_length_mult()` (ship/horizon.py) den horizont (1x/4x/16x/64x ab
+        7d/s), und jeder wechsel ruft `set_length()`. Ein synchrones
+        `_compute_full` waere dort ein ruckler beim umschalten -- und
+        unnoetig, denn die gehaltene kurve ist zu diesem zeitpunkt nicht
+        falsch. Sie ist bloss
         zu kurz (hoch) oder zu lang (runter). Zu kurz heisst nur, dass sie
         frueher nachgerechnet werden muss; bis dahin zeigt sie dieselbe bahn.
         Zu lang heisst gar nichts -- `set_display_length()` zeichnet ohnehin
@@ -251,21 +224,17 @@ class JobsMixin:
                 return False
         except Exception:
             return False
-        # WICHTIG: den fortsetzungs-zustand der ALTEN kurve festhalten, nicht
-        # wegwerfen. Ohne ihn kann `_hold_extend_tail` waehrend der wartezeit
-        # nicht mehr nachlegen, die gehaltene kurve wird also nur noch von
-        # vorn verbraucht -- gemessen 10 000 -> 6 075 punkte ueber 16 frames
-        # beim wechsel 7d/s -> 30d/s, also eine um 39 % kuerzere linie, die
-        # beim einwechseln zurueckspringt. Genau dieses pulsieren beseitigt
-        # `_hold_extend_tail` ja.
+        # WICHTIG: den fortsetzungs-zustand der ALTEN kurve festhalten. Ohne
+        # ihn kann `_hold_extend_tail` waehrend der wartezeit nicht
+        # nachlegen, und die gehaltene kurve schrumpft, bis das ergebnis
+        # eingewechselt ist.
         #
         # Er wird GESONDERT gehalten, weil der worker `self._resume_context`
-        # schon beim fertigwerden ueberschreibt -- also ein bis zwei frames
-        # bevor das ergebnis eingewechselt ist. Mit dem waere der schwanz mit
-        # dem NEUEN punktabstand angesetzt worden, waehrend der rest noch den
-        # alten traegt; ein solcher sprung im abstand macht sowohl den
-        # index-anteil in `_display_point_count` als auch die mindest-sehne
-        # der tangente falsch (beide setzen festen abstand voraus).
+        # schon beim fertigwerden ueberschreibt -- ein bis zwei frames bevor
+        # das ergebnis eingewechselt ist. Der schwanz wuerde sonst mit dem
+        # NEUEN punktabstand angesetzt, waehrend der rest noch den alten
+        # traegt; `_display_point_count` und die mindest-sehne der tangente
+        # setzen beide festen abstand voraus.
         self._hold_resume_context = getattr(self, '_resume_context', None)
         try:
             self._submit_async_compute(
@@ -283,11 +252,9 @@ class JobsMixin:
             if len(pending) > 0:
                 return
         elif self._async_jobs_in_flight() >= max_in_flight:
-            # Gezaehlt wird, was RECHNET. `len(pending)` waere falsch: darin
-            # stehen auch schon fertige, nur noch nicht eingewechselte
-            # ergebnisse, und die haben keinen worker mehr belegt. Sie
-            # mitzuzaehlen haette den nachschub genau in den bildern
-            # blockiert, in denen gerade eines fertig geworden ist.
+            # Gezaehlt wird, was RECHNET, nicht `len(pending)`: darin stehen
+            # auch fertige, noch nicht eingewechselte ergebnisse, die keinen
+            # worker mehr belegen.
             return
 
         snapshot = self._make_snapshot(ship, world, max_points)
@@ -348,23 +315,13 @@ class JobsMixin:
             # GLEICHMAESSIG einwechseln -- ein ergebnis je bild, das AELTESTE
             # zuerst.
             #
-            # Immer das neueste zu nehmen liegt nahe (es ist ja das aktuellste),
-            # macht das nachziehen aber ruckartig: die laeufe werden zwar
-            # gleichmaessig gestartet, aber nicht ganz gleichmaessig fertig.
-            # In einem bild wird keines fertig, im naechsten zwei -- und
-            # "neuestes zuerst" macht daraus einen stillstand gefolgt von einem
-            # DOPPELSCHRITT. Gemessen unter vollschub an der periapsis: der
-            # sprung der kurvenform ist in so einem bild doppelt so gross wie in
-            # seinen nachbarn, und das alter des gezeigten zustands faellt dabei
-            # von 6 auf 4 sekunden. Rund 2 % der bilder waren betroffen, also
-            # etwa jede sekunde eines -- das ist das stockende, "wie hohe
-            # netzwerk-latenz" wirkende nachziehen. Eine gleichmaessig zu
-            # langsame bildrate sieht man nicht, einen ausreisser alle 90 bilder
-            # schon.
+            # Die laeufe werden gleichmaessig gestartet, aber nicht ganz
+            # gleichmaessig fertig: in einem bild keines, im naechsten zwei.
+            # "Neuestes zuerst" machte daraus einen stillstand gefolgt von
+            # einem sichtbaren DOPPELSCHRITT der kurvenform.
             #
-            # Die abhilfe ist dieselbe wie bei genau diesem netzwerk-problem:
-            # ein kleiner puffer, aus dem in gleichmaessigen schritten
-            # entnommen wird. Schwankende ankunft wird so zu gleichmaessiger
+            # Deshalb ein kleiner jitter-puffer, aus dem in gleichmaessigen
+            # schritten entnommen wird. Schwankende ankunft wird so zu gleichmaessiger
             # ausgabe, bezahlt mit etwas mehr, aber KONSTANTER verzoegerung.
             # `swap_backlog_max` begrenzt, wie viele fertige ergebnisse warten
             # duerfen; darueber hinaus wird uebersprungen, damit die
@@ -448,10 +405,6 @@ class JobsMixin:
                 dvx = cur_vx - svx
                 dvy = cur_vy - svy
                 delta_speed = math.hypot(dvx, dvy)
-                cur_speed = math.hypot(cur_vx, cur_vy)
-                allowed_speed = self._allowed_velocity_delta(cur_speed)
-
-
                 spx = float(snapshot.get("ship_px", 0.0))
                 spy = float(snapshot.get("ship_py", 0.0))
                 cur_px = float(current_ship.position.x)
@@ -469,14 +422,10 @@ class JobsMixin:
                     except Exception:
                         sim_age = None
 
-                allowed_pos = float(self.snapshot_position_abs_tol)
-
-
                 # Veraltet ist ein ergebnis erst, wenn der zoom die WIRKSAME
-                # punktdichte veraendert hat -- der rohe view-scale-vergleich
-                # verwarf ergebnisse auch dann, wenn die dichte durch
-                # _horizon_spacing_floor() ohnehin festgeklemmt ist und die
-                # linie identisch waere (siehe set_view_scale).
+                # punktdichte veraendert hat -- ist die dichte durch
+                # _horizon_spacing_floor() festgeklemmt, waere die linie
+                # identisch (siehe set_view_scale).
                 is_stale_view = False
                 try:
                     snap_eff = snapshot.get("eff_precision", None)
@@ -508,9 +457,8 @@ class JobsMixin:
                 max_wall_age = float(getattr(self, "max_async_wall_age", 1.5))
 
                 # Freshness is gated by WALL age (seconds since the worker
-                # finished) — sim-time age scales with sim_dt and horizon and
-                # wrongly rejected every result, forcing the blocking sync path.
-                # Thrust since the snapshot is already caught by the
+                # finished), not sim-time age, which scales with sim_dt and
+                # horizon. Thrust since the snapshot is already caught by the
                 # trajectory_version check above; zoom / frame changes by the
                 # view / reference checks. The per-frame anchor + whole-curve
                 # rebase correct for the ship's motion during compute, so any
@@ -545,15 +493,12 @@ class JobsMixin:
                 # for motion during compute). The per-frame anchor in update()
                 # keeps the start glued to the ship between swaps.
                 #
-                # UNTER DEM HALT NICHT. Dort ist genau diese starre
-                # verschiebung der fehler, den der halt beseitigt: bei 30 d/s
-                # rueckt das schiff waehrend der rechnung um ~1.3 tage bahn
-                # vor, und die kurve um diesen sehnen-vektor quer zu schieben
-                # legt sie neben die bahn. Richtig ist, sie in absoluter lage
-                # UND zeit stehen zu lassen -- `_hold_advance` wirft danach
-                # die punkte weg, deren zeit vergangen ist, und stellt dem
-                # rest das schiff als kopf voran. Das ist dieselbe mechanik,
-                # die den halt ueberhaupt traegt.
+                # NICHT bei allow_rebase=False (halt, echtzeit-update): im
+                # zeitraffer rueckt das schiff waehrend der rechnung weit vor,
+                # und die kurve um diesen sehnen-vektor quer zu schieben legte
+                # sie neben die bahn. Sie bleibt in absoluter lage UND zeit
+                # stehen; danach werden die punkte weggeworfen, deren zeit
+                # vergangen ist, und das schiff wird als kopf vorangestellt.
                 needs_rebase = (allow_rebase and pos_delta > 1e-9
                                 and math.isfinite(pos_delta))
                 if needs_rebase:
@@ -594,29 +539,16 @@ class JobsMixin:
             self._synthetic_head = False
             # NEUE kurve -> abgeleitete zwischenergebnisse (apsis-marker) sind
             # nicht bloss verschoben, sondern gehoeren zu einer anderen
-            # geometrie. Ohne das reichte der weiche weg im halt bis zu
-            # `apsis_hold_rescan_s` lang die marker der ALTEN kurve weiter --
-            # gemessen ein Pe/Ap-marker mit r = 3.71e7 m, waehrend das schiff
-            # bei 3.79e7 m stand und der abstand noch stieg. Auf dem schirm
-            # ist das die fahne, die fuer einen frame beim schiff auftaucht
-            # und wieder verschwindet.
+            # geometrie; der weiche weg im halt darf die marker der ALTEN
+            # kurve nicht weiterreichen.
             self._invalidate_derived_caches()
             self.initialized = True
             self._last_swapped_job_id = finished_job_id
             self._jobs_swapped += 1
             self._last_swapped_snapshot = snapshot
             self._apply_rkn_stats(rkn_stats)
-            if self.debug:
-                try:
-                    cnt = points.shape[0] if (np is not None and hasattr(points, "shape")) else len(points)
-                except Exception:
-                    cnt = 0
-                if snapshot is not None:
-                    svx = float(snapshot.get("ship_vx", 0.0))
-                    svy = float(snapshot.get("ship_vy", 0.0))
-                    stime = snapshot.get("time", 0.0)
             return True
-        except Exception as exc:
+        except Exception:
             return False
 
     def _get_target_point_cap(self):

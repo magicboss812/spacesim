@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """Die POSITIONS-MARKE eines koerpers -- das icon beim herauszoomen.
 
-Nicht zu verwechseln mit `body_style.py`: das ist die oberflaechen-optik des
+Nicht zu verwechseln mit `bodies/style.py`: das ist die oberflaechen-optik des
 grossen koerpers. Hier geht es um die marke, die ihn vertritt, sobald er unter
-`renderer.body_icon_min_radius_px` schrumpft. Frueher war das eine flache scheibe
-in koerperfarbe -- bei systemzoom also 27 gleiche punkte.
+`renderer.body_icon_min_radius_px` schrumpft. Das gesaete muster haelt die
+koerper auch dann auseinander, wenn sie (fast) dieselbe farbe tragen.
 
 Zwei varianten, beide aus EINEM 32-bit-seed:
 
@@ -63,7 +63,7 @@ TIER_ALPHA = (0.0, 0.55, 0.85, 1.0)
 _GROUND = (8.0, 13.0, 21.0)
 _WHITE = (255.0, 255.0, 255.0)
 
-#: Seed-mischung. BEWUSST anders als in `body_style.py`, sonst korrelierte die
+#: Seed-mischung. BEWUSST anders als in `bodies/style.py`, sonst korrelierte die
 #: marke eines koerpers mit seiner oberflaeche.
 _SEED_MIX = 2654435761
 _SEED_ADD = 12345
@@ -100,20 +100,17 @@ def _ring_positions(radius):
 # Die beiden entwuerfe
 # --------------------------------------------------------------------------
 
-# > **Gewuerfelt wird je ZELLE, nicht aus einem Rauschfeld.** Ein FBM-Feld
-# > wurde probiert, weil es zusammenhaengende Flecken statt Koernung gibt --
-# > und war der falsche Weg: mit dem radialen Abfall, den die Marke braucht,
-# > damit sie eine Scheibe bleibt, wurde aus jedem Koerper dieselbe Scheibe
-# > mit hellem Kern. Genau die Eigenschaft, um die es hier geht, ging dabei
-# > verloren. Der Zellwurf ist der des abgenommenen Entwurfs und bleibt.
+# Gewuerfelt wird je ZELLE, nicht aus einem Rauschfeld: ein Rauschfeld mit
+# dem radialen Abfall, den die Marke braucht, macht aus jedem Koerper
+# dieselbe Scheibe mit hellem Kern -- und die Koerper auseinanderzuhalten ist
+# der ganze Zweck.
 
 
 def _rosette(rng, grid):
     """Entwurf A -- die Scheibe wird durchgehend gewuerfelt, radial gewichtet.
 
-    Kein fester Kern. Ein solcher war zweimal falsch: fuenf feste Zellen sind
-    bei 15x15 ein Punkt, und ein mitwachsender Kern ist eine glatte Scheibe,
-    die genau die Textur auffrisst, um die es hier geht. Statt dessen haengen
+    Kein fester Kern: ein fester ist bei grossem Raster nur ein Punkt, ein
+    mitwachsender eine glatte Scheibe ohne Textur. Statt dessen haengen
     die WAHRSCHEINLICHKEITEN am Radius -- innen fast nur helle Zellen, nach
     aussen immer mehr leere. Das gibt einen dichten, hellen Kern mit
     unregelmaessigem Rand und einen ausfransenden Saum, und beides bleibt bei
@@ -150,11 +147,9 @@ def _rosette(rng, grid):
 def _signature(rng, grid):
     """Entwurf D -- Kern plus 2-4 gesaete Zacken.
 
-    Die Zacken sitzen auf DEMSELBEN kreisfoermigen Ring wie `_ring_positions`.
-    Ein frueherer Entwurf liess sie diagonal bis (2,2) laufen: noch im
-    N x N-Kasten, aber der Umkreis stieg damit auf 3.54 Zellen, waehrend der
-    Kern nur 1.5 braucht. Nach der Normierung auf den Einheitskreis blieb vom
-    Kern ein 30-%-Puenktchen mit weit abgesprengten Flecken uebrig.
+    Die Zacken sitzen auf dem kreisfoermigen Ring aus `_ring_positions`,
+    nicht in den Ecken des N x N-Kastens: sonst waechst der Umkreis, und nach
+    der Normierung auf den Einheitskreis bliebe vom Kern nur ein Puenktchen.
     """
     radius = (grid - 1) // 2
     core = max(1.0, radius * 0.34)
@@ -201,9 +196,6 @@ class IconCells(object):
     """Das gepackte zellfeld einer marke."""
 
     __slots__ = ('grid', 'words', 'unit', 'seed', 'variant', 'count')
-
-    #: So viele uint32 traegt die packung -- fest, damit der uniform im
-    #: shader eine feste laenge hat.
 
     def __init__(self, grid, words, unit, seed, variant, count):
         self.grid = int(grid)
@@ -268,8 +260,7 @@ def cells_array(icon):
 
     Zeile 0 ist die UNTERSTE (y nach oben), wie im einheitskreis.
     """
-    radius = (icon.grid - 1) // 2
-    out = np.zeros((icon.grid, icon.grid), dtype=np.int8)
+    out =np.zeros((icon.grid, icon.grid), dtype=np.int8)
     for index in range(icon.grid * icon.grid):
         tier = (icon.words[index >> 4] >> ((index & 15) * 2)) & 3
         out[index // icon.grid, index % icon.grid] = tier
