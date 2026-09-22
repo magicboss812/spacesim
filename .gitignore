@@ -1,3 +1,10 @@
 tests/energy_test.py
 tests/hamiltonian_diag.py
 __pycache__/
+.claudian/
+.makemd/
+.obsidian/
+docs/.space/
+.trash/
+docs/.claude/
+orbital-mechanics-notes-main

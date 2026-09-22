@@ -269,7 +269,15 @@ paths:
 >
 > Gebaut in `OrbitLineSet._recompute` (`full_track`, `full_track_t`,
 > `full_track_len`) auf einem **eigenen zeitgitter je körper** — jeder hat eine
-> andere periode. Gezeichnet in `_draw_orbit_lines` **vor** der hellen spur, mit
+> andere periode, also ein SOLO-durchlauf samt elternkette statt des einen
+> stapels, den alle spuren teilen. Deshalb steht davor derselbe riegel wie vor
+> dem zeichen-gitter: **`_line_will_be_drawn()`** — sonst ist die umlaufzeit
+> (`full_max_span_s`) die einzige bedingung, und die trifft auf jeden inneren
+> planeten und jeden mond zu. Gemessen ohne den riegel: **21 gebaute volllinien
+> für die 1–4, die der renderer zeichnet, 6.38 der 8.47 ms einer
+> neuberechnung**; `orbit_lines_ms` fiel mit dem riegel von 9.02 auf 4.56 ms im
+> mittel und von **26.9 auf 10.5 ms im p95**. Gezeichnet in `_draw_orbit_lines`
+> **vor** der hellen spur, mit
 > `alpha = spur_alpha · orbit_line_full_alpha_mult`, **alle stichproben
 > projiziert** (kein stride: `full_track_len` ist die welt-bogenlänge, über eine
 > ganze periode trägt die eltern-heliozentrik das ~100-fache der plot-frame-
@@ -287,6 +295,17 @@ paths:
 > `orbit_line_full_max_span_s` (7.5e7 s ≈ 810 d) kappt ab Jupiter: dort ist die
 > periode so lang, dass die 3-punkt-schätzung der knotenzahl im rotierenden
 > frame aliast.
+>
+> **`_line_will_be_drawn()` braucht BEIDE zeitstände, und das ist der ganze
+> witz.** `_recompute` läuft VOR `_retarget`/`_ease`: `entry.miss` ist damit
+> frisch, `entry.reveal` aber der stand des vorigen bildes. Der frische wert
+> fängt das EINblenden ab (die linie muss da sein, bevor sie sichtbar wird),
+> der alte das AUSblenden (sonst verschwände sie mitten in der blende). Wer
+> nur einen der beiden prüft, bekommt ein aufblitzen an genau einem ende der
+> blende. Referenz- und auswahlkörper (`is_focus`) haben in `_retarget`
+> bedingungslos `reveal_target = 1.0` und müssen deshalb immer durch.
+> Gegenprobe: über 400 bilder mit wechselndem referenzkörper hatte **jede**
+> volllinie, die der renderer gezeichnet hätte, ihr `full_track` (800 fälle).
 >
 > **Die WELTbahn eines mondes schliesst sich nicht** — die Erde trägt ihn über
 > 27 tage ~4.5e10 m um die Sonne. Nur der elternrelative offset ist die

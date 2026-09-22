@@ -88,27 +88,6 @@ back inside `render()`.
 `WINDOWSIZECHANGED` in `runtime/loop.py` calls `Renderer.resize()` (viewport, FXAA target
 rebuild, text-cache invalidation) and updates `camera.width/height`.
 
-**Borderless windowed** (`window.borderless` in `config.json`, default off).
-It is a plain **window**, never fullscreen: `runtime/window.py` makes a
-`NOFRAME` pygame window pinned to `(0,0)` via `SDL_VIDEO_WINDOW_POS` (set
-before `set_mode`, or SDL centres the screen-sized window and half hangs off).
-Deliberately **no** `pygame.FULLSCREEN` and **no** `SDL_SetWindowFullscreen` —
-both make the GPU driver re-sync the monitor output (the black flash at
-startup) even when the resolution is unchanged.
-
-Two gotchas it works around:
-- The window is `desktop_h + 1` tall, not `desktop_h`. A borderless window
-  that covers the monitor *exactly* is picked up by Windows/NVIDIA "Fullscreen
-  Optimizations" and treated as real fullscreen — bringing back the very
-  re-sync this mode avoids. One row of overscan (invisible, below the screen
-  edge) keeps it a genuine window.
-- The Windows taskbar stays drawn over the bottom strip while the game lacks
-  exclusive focus. That is inherent to any non-fullscreen window and was
-  accepted on purpose.
-
-`Window` reads `self.width/height` back from `screen.get_size()` afterwards
-(so the extra row and any DPI rounding are included) and skips `RESIZABLE`.
-
 > **moderngl `ctx.screen` never learns the new size.** It detects its size once,
 > at context creation, and every `ctx.screen.use()` restores *viewport and
 > scissor* from that stale value. `render()` calls `ctx.screen.use()` after the

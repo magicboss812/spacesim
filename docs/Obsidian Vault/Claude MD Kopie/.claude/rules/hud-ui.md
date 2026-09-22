@@ -130,10 +130,28 @@ paths:
 > `tests/ui_hud_test.py` §11 checks that, and also that the raw font is
 > *not* monospaced — otherwise the section would prove nothing.
   - `ui/text.py` — `TextRenderer`: role-based fonts (`match_font`, or a TTF
-    dropped into `ui/assets/`), label-texture cache with FIFO eviction **over
+    dropped into `ui/assets/`), label-texture cache with **LRU** eviction **over
     a pool of retired textures** (see the GL-allocation note in
     `.claude/rules/rendering.md`), tinted blitting, `defer()`/`flush()` for anything that must land
     after FXAA.
+
+> **Der label-cache ist LRU, nicht FIFO — die reihenfolge muss die des
+> ZUGRIFFS sein.** Als reines dict war sie die des EINFÜGENS, und ein treffer
+> hat nichts umsortiert. Die statischen beschriftungen (`DIST`, `CLOSEST`,
+> `SATURNV`, …) werden im ersten bild eingetragen und danach nur noch
+> getroffen — sie standen damit für immer ganz vorn und wurden als **erste**
+> verworfen, verdrängt von den wechselnden zahlen, die den deckel überhaupt
+> erst reissen und hinten überlebten. Der deckel warf also genau die falschen
+> weg. Gemessen über 300 bilder: **2237 fehlgriffe, davon 843 (38 %) an texten,
+> die schon einmal da waren**; jedes statische label wurde 9× neu gerastert.
+> Mit `OrderedDict` + `move_to_end()` im trefferfall: **264 (16 %)**, und die
+> statischen labels verschwinden ganz aus der liste — was übrig bleibt, sind
+> wechselnde zahlen, also pflicht-fehlgriffe. `ui_calc` fiel um 0.9 ms je bild.
+>
+> **Den deckel dafür NICHT anzuheben.** 256 → 1024 bringt nur 264 → 229
+> fehlgriffe für die vierfache texturmenge; die LRU-reihenfolge hat den
+> gewinn bereits geholt. `renderer.label_texture_cache_max` speist beide
+> caches (HUD über `bootstrap.py`, welt-labels über den renderer).
 
 > **Text is rasterised white and tinted via `u_color`** (`texquad.frag`). One
 > white texture per string then serves any colour — were colour part of the

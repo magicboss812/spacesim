@@ -37,7 +37,7 @@ parts of one object sharing one `self`, not separate components.
 | folder | what lives there |
 |---|---|
 | `main.py` | the entry point — 27 lines: config → `bootstrap` → `loop` |
-| `runtime/` | `window` (display/GL/DPI/clock, `window.borderless` = borderless windowed, no mode-set), `gl_device` (FXAA, present, resize), `bootstrap` (builds everything — **the construction order is load-bearing**), `loop` (the frame loop + `TIMING:`), `input` (keymap, click gesture), `system_loader` |
+| `runtime/` | `window` (display/GL/DPI/clock), `gl_device` (FXAA, present, resize), `bootstrap` (builds everything — **the construction order is load-bearing**), `loop` (the frame loop + `TIMING:`), `input` (keymap, click gesture), `system_loader` |
 | `physics/` | `world` (adaptive RKN4, `update_planets`/`update_dynamics`, `step`), `world_kernels` (the Numba fast path, **bit-identical** to the Python reference), `vec` (`Vec2`, `G`), `reference_frames` (Principia-style plot frames; **largest file, 1733**), `kernels/` (the predictor's `@njit` maths: `kepler`, `integrators`, `apsis`, `propagate`) |
 | `bodies/` | `body` (`body`/`schiff` + `kepler_relative_xy()`, the **one** scripted-orbit model), `style`, `icon`, `orbit_lines`. Pure numpy — **no GL here** |
 | `ship/` | `control` (`schiffcontrol`), `camera` (world↔screen, zoom, follow, `sim_dt`/warp), `art`, `horizon` (`HorizonPolicy`), `predictor/` (`core`, `hold`, `compute`, `jobs`, `view`), `maneuver/` (`profile` — **die** brenndauer, `plan`, `preview`, `executor`) |
@@ -66,6 +66,14 @@ touching its files.
 | `.claude/rules/devui.md` | the ImGui dev panel and its timing ring buffer |
 | `.claude/rules/config-loader.md` | `config.json` sections, typed accessors, `solar_system.json` |
 | `.claude/rules/tests.md` | what every test file asserts, and the known pre-existing failures |
+| `.claude/rules/paper.md` | die Seminararbeit in `spacesim/docs/`: Ordnerrollen, Quellen lesen (Curtis-Seitenversatz, Apollo-OCR), Zitierweise, deutscher Stil, KI-Protokoll |
+
+## The paper — `spacesim/docs/`
+
+The Seminararbeit, an **Obsidian vault**: chapters in `Obsidian Vault/Evaluation/_Arbeit/`,
+sources in `_Arbeit/Quellen/`, raw notes in `Evaluation/*.md`. **Everything written
+for the paper is German**; every AI-assisted text change gets a row in
+`Evaluation/KI-Nutzung.md`. Full ruleset: `.claude/rules/paper.md`.
 
 ## Keeping these files current
 
@@ -91,15 +99,12 @@ moment a note moves.
 anything only true while working inside one module belongs in that module's
 rule file, not here.
 
-## graphify
+## Codebase navigation — graphify first
 
-This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
-
-Rules:
-- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
-- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
-- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
-- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+A pre-built knowledge graph lives in `graphify-out/` (`GRAPH_REPORT.md` first,
+then `graph.html` / `graph.json`) — for **cross-module** questions; read code
+directly for narrow lookups. **STALE since the 2026-09-03 restructure** —
+re-run `/graphify` first.
 
 ## Git — never on your own
 
@@ -182,20 +187,10 @@ them for *shape*, and get every number from a measurement instead.
 
 ## Controls
 
-| key | action |
-|---|---|
-| `WASD` | pan camera (**arrow keys no longer pan**) |
-| mouse | wheel = zoom (anchored on screen centre), middle/right-drag = pan |
-| left-click | select a body; a second click flies there; empty space deselects |
-| `Home` | return to the ship |
-| `←` `→` | rotate ship. `↑` `↓` — nose thrust forward/backward |
-| `I` `K` `J` `L` | latched orientation hold: prograde / retrograde / normal-in / antinormal-out |
-| `P` | toggle predictor. `O` — orbit lines. `E` — epicycle (Ptolemaic) mode |
-| `R` | cycle reference body. `1` — non-rotating frame. `2` — body-direction frame. `T` — target overlay |
-| `+` `-` | predictor horizon ×2 / ÷2. `9` `0` — predictor precision finer / coarser |
-| `N` | set a maneuver node. `Shift+N` — delete the selected one. `X` — arm / abort the burn |
-| `PageUp` `PageDown` | sim_dt up / down |
-| `F1` | ImGui developer tools. `Esc` — quit |
+The full key table lives in `.claude/rules/camera-input.md`. The essentials:
+`WASD` pans (**arrow keys drive the ship, not the camera**), `←` `→` rotate,
+`↑` `↓` thrust, `I` `K` `J` `L` orientation hold, `R` / `1` / `2` reference
+frame, `N` / `X` maneuver node / arm burn, `PageUp` `PageDown` sim_dt, `F1` devui.
 
 Warp steps run `1m/s … 1y/s`; those the orbit cannot resolve are greyed out.
 **Thrust is real-time only** (an armed node drops the warp itself); rotation

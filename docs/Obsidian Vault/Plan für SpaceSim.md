@@ -1,3 +1,6 @@
+---
+sticker: lucide//brain-circuit
+---
 Funktionen, Bug-Fixes, UI und UX Erweiterungen sind hier aufgelistet. Die werden mithilfe von `claude` in der Implementierung hinzugefügt.
 
 ☑Fertig
