@@ -6,6 +6,10 @@
 [7] NASA: Basics of Space Flight - Orbits https://science.nasa.gov/learn/basics-of-space-flight/chapter5-1/ bis `/chapter5-4/`, zuletzt 13.09.2026
 [8] Mass, Force, and Newton’s Law of Gravitation https://orbital-mechanics.space/intro/mass-force-and-newtons-law-of-gravitation.html, zuletzt 13.09.2026
 [9] Isaac Newton https://www.grin.com/document/98650?srsltid=AfmBOopFzVjiPbgYUQCi_TeiDSCVXXV56N8HRTOQd1Qdw8bQeJ9nI88v, zuletzt 13.09.2026
+[10] Elliptical Orbits https://orbital-mechanics.space/the-orbit-equation/elliptical-orbits.html, zuletzt 24.09.2026
+[11] Nomenklatur https://orbital-mechanics.space/the-orbit-equation/orbital-nomenclature.html, zuletzt 24.09.2026
+[12] Kreisbahnen https://orbital-mechanics.space/the-orbit-equation/circular-orbits.html, zuletzt 24.09.2026
+[13] Parabolische Bahnen https://orbital-mechanics.space/the-orbit-equation/parabolic-trajectories.html, zuletzt 24.09.2026
 
 ---
 ## Literatur / Papers
