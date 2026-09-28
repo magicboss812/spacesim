@@ -10,12 +10,25 @@
 [11] Nomenklatur https://orbital-mechanics.space/the-orbit-equation/orbital-nomenclature.html, zuletzt 24.09.2026
 [12] Kreisbahnen https://orbital-mechanics.space/the-orbit-equation/circular-orbits.html, zuletzt 24.09.2026
 [13] Parabolische Bahnen https://orbital-mechanics.space/the-orbit-equation/parabolic-trajectories.html, zuletzt 24.09.2026
+[14] Relativbewegung im Zweikörperproblem https://orbital-mechanics.space/the-n-body-problem/two-body-relative-motion.html, zuletzt 25.09.2026
+[15] Drehimpulserhaltung https://orbital-mechanics.space/constants-of-orbital-motion/angular-momentum-is-conserved.html, zuletzt 26.09.2026
+[16] Bahngleichung https://orbital-mechanics.space/the-orbit-equation/the-orbit-equation.html, zuletzt 26.09.2026
+[17] Planetare Parameter https://orbital-mechanics.space/reference/planetary-parameters.html, zuletzt 26.09.2026
+[18] Gravitation und Kugelsymmetrie https://orbital-mechanics.space/reference/gravity-and-spherical-symmetry.html, zuletzt 26.09.2026
+[19] Klassische Bahnelemente https://orbital-mechanics.space/classical-orbital-elements/classical-orbital-elements.html, zuletzt 26.09.2026
+[20] Energieerhaltung https://orbital-mechanics.space/constants-of-orbital-motion/energy-is-conserved-in-orbital-motion.html, zuletzt 28.09.2026
+[21] Hyperbolische Bahnen https://orbital-mechanics.space/the-orbit-equation/hyperbolic-trajectories.html, zuletzt 28.09.2026
 
 ---
 ## Literatur / Papers
 [2] [[Obsidian Vault/Evaluation/_Arbeit/Quellen/Literatur/nasa apollo 11 flight report.pdf]] Apollo 11 Mission Report, Houston 1969, verfügbar über "https://ntrs.nasa.gov/citations/19700008096" 
 [Curtis] [[orbital-mechanics-for-engineering-students-fourth-edition-9780081021330-008102133x_compress.pdf]] "Orbital Mechanics for engineering students, 4th edition" von Howard D. Curtis
+[22] Blanco, P. R.; Mungan, C. E.: "Rocket Propulsion, Classical Relativity, and the Oberth Effect", The Physics Teacher 57 (2019), S. 439–441, verfügbar über https://www.usna.edu/Users/physics/mungan/_files/documents/Publications/TPT46.pdf, zuletzt 28.09.2026
 
 ---
 ## Bildquellen
+Abb. 1 Waagerechter Abschuss nach Newtons Gedankenexperiment: KI-erstellt (Claude), siehe KI-Nutzung
+Abb. 2 Geometrie einer Ellipsenbahn: aus [10], Bryan Weber, Orbital Mechanics & Astrodynamics, Lizenz CC BY-SA 4.0
+Abb. 3 Exzentrizität bei verschiedenen Abstandsverhältnissen: KI-erstellt (Claude)
+Abb. 4 Bahnelemente einer Bahn im Raum: KI-erstellt (Claude), Inhalt nach [19]
 

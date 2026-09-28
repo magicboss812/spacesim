@@ -15,15 +15,15 @@ Funktion der Leitfrage: Sie macht das Spiel zum **Untersuchungsgegenstand** stat
 
 Basis: 15 Seiten Fließtext. Prozentwerte skalieren, falls der Umfang anders ausfällt.
 
-| Kap. | Titel | Seiten | Anteil |
-|---|---|---|---|
-| 1 | Einleitung | 1,0 | 7 % |
-| 2 | Physikalische Grundlagen | 3,0 | 20 % |
-| 3 | Näherung und Navigation: Apollo bis heute | 2,0 | 13 % |
-| 4 | Bahnmanöver: Transfers und Swing-by | 3,5 | 23 % |
-| 5 | Entwicklung der Simulation | 3,5 | 23 % |
-| 6 | Validierung: Wie genau ist die Simulation? | 1,5 | 10 % |
-| 7 | Fazit und Ausblick | 0,5 | 4 % |
+| Kap. | Titel                                      | Seiten | Anteil |
+| ---- | ------------------------------------------ | ------ | ------ |
+| 1    | Einleitung                                 | 1,0    | 7 %    |
+| 2    | Physikalische Grundlagen                   | 3,0    | 20 %   |
+| 3    | Näherung und Navigation: Apollo bis heute  | 2,0    | 13 %   |
+| 4    | Bahnmanöver: Transfers und Swing-by        | 3,5    | 23 %   |
+| 5    | Entwicklung der Simulation                 | 3,5    | 23 %   |
+| 6    | Validierung: Wie genau ist die Simulation? | 1,5    | 10 %   |
+| 7    | Fazit und Ausblick                         | 0,5    | 4 %    |
 
 Astronomischer Anteil (2, 3, 4, 6): 10 Seiten, 66 %.
 Eigenanteil-Dokumentation (5): 3,5 Seiten, 33 %.
