@@ -32,7 +32,10 @@ Status marks: `[ ]` open, `[x]` done, `[!]` blocked (reason in its Result).
    through the typed accessors in `config/loader.py`, never hardcoded.
 7. **Close out**: flip the task to `[x]` and fill its Result (what changed,
    the measurement that proves it, what the next task must know; 3 to 8
-   lines). Blocked: mark `[!]` and write why.
+   lines). Blocked: mark `[!]` and write why. A task too large for one
+   session (Task 1 may be): commit the finished parts, leave it `[ ]`, write
+   in its Result what is done and what remains, and stop. The next session
+   continues it.
 8. **Commit and push** to the branch this session was given. Working a task
    from this file is the user's request to commit and push that task.
    Screenshots never go into the repo.
@@ -108,7 +111,9 @@ xvfb-run -a -s "-screen 0 2560x1440x24" \
 **Goal.** Find and remove every CPU and GPU cost that changes neither what
 the player sees nor what the physics computes. The accuracy bar is absolute:
 no loss of visual detail, precision, line smoothness, marker placement or
-physical correctness.
+physical correctness. Two parts: **A**, the per-frame cost of the game loop;
+**B**, the predictor's cost on long transfer horizons and its lag during
+burns. Do A first; B has its own acceptance check below.
 
 **Read first:** `.claude/rules/rendering.md`, `predictor.md`,
 `orbit-lines.md`, `reference-frames.md`, `hud-ui.md`, `background.md`,
@@ -121,6 +126,9 @@ physical correctness.
 - Work may leave the main thread only if its result is ready for the frame
   that shows it. No result arrives a frame late, nothing drawn lags the state
   it depicts, and the displayed output is identical to the synchronous path.
+  The one existing exception is the predictor's async pipeline, which is one
+  compute behind by design; Part B is about shrinking that lag, not adding
+  more of it elsewhere.
 - Culling off-screen **drawing** is allowed. Culling off-screen **state** that
   anything else reads is not: HUD telemetry, `renderer.apsis_marker_hits`, the
   tooltip, orbit-line reveal/fade state, predictor caches.
@@ -128,6 +136,8 @@ physical correctness.
   Kepler model, one `BurnProfile`, SI units, the two Y conventions).
 - Every change is backed by a before/after measurement (median and p95 of
   `frame` or of the specific sub-timing) and a visual A/B.
+
+### Part A: per-frame cost
 
 **Baseline** (this container, 2026-09-29, 1280×800, default start, 900
 frames; TIMING means over the last 300 frames, call counts per frame over
@@ -180,14 +190,107 @@ all 900; llvmpipe inflates everything GPU-side):
 10. **Predictor:** steady state is the hold path (`hold.py`:
     `_handle_trajectory_branch_change`, `_hold_advance`, `_hold_extend_tail`,
     `view.py::interpolation_error_floor`, `get_apsis_markers` twice per
-    frame). Look for redundant per-frame work there and for redundant full
-    recomputes under zoom, warp changes and thrust; async route and warp hold
-    keep their semantics (`predictor.md`).
+    frame). Look for redundant per-frame work there; async route and warp
+    hold keep their semantics (`predictor.md`). Compute cost and burn lag
+    belong to Part B.
 11. Whatever else the profiles show. Also profile the zoomed-out solar system
     (`--zoom 1e-9`: many orbit lines and body icons), a maneuver node
     (`--node 800,0`) and a high warp step.
 
-**Verification.**
+### Part B: long-horizon predictor cost and burn responsiveness
+
+**The report.** With the horizon long enough for transfers to Saturn and
+beyond, one prediction compute takes **70 to 90 ms** on the user's machine
+(about 17 ms at the default horizon). During a transfer burn the async line
+then refreshes less often than the frame rate and trails the ship by about
+one compute, so it feels laggy. Both are to be solved as far as the physics
+allows.
+
+**The accuracy requirement comes first.** The Ap/Pe markers of a transfer
+(position, time, the HUD distance and countdown) must stay where the ship
+actually arrives. Warping to the apoapsis at Saturn must show the ship
+reaching the point the marker showed right after burnout, and the markers
+must not drift on screen or in their numbers during the warp. No speed-up
+may make this measurably worse. The world is never approximated to make the
+prediction agree with it; the prediction has to agree with the exact world.
+`CLAUDE.md` → "Predictor and World share kernels" applies to any integrator
+change.
+
+**Acceptance check** (build it first, run it before and after every change;
+a headless script that builds the app like `tools/game_shot.py` does, may be
+committed as `tools/transfer_bench.py`):
+1. Ship in the default Erde parking orbit; burn prograde to a Hohmann
+   transfer toward Saturn, once as an executed maneuver node and once as
+   manual full throttle; repeat toward Neptun. Raise the horizon until the Ap
+   marker at the target's distance exists.
+2. Right after burnout record the predicted Ap: world position, `t_abs`,
+   distance to Sonne, and the compute time and step count.
+3. Warp the world to that time through the real step pattern (`world.step`
+   with the loop's per-frame `sim_step` at the warp steps the HUD offers) and
+   find the ship's actual extremum of distance to Sonne near `t_abs`. Record
+   the position and time error, and the marker's screen position and
+   displayed numbers sampled along the warp (drift).
+4. Pass: the Ap error and the drift are not larger than before (within the
+   noise of two baseline runs). Report metres, seconds, and px at the zoom
+   where the Ap region fills the screen.
+
+**Where the time goes today.** Measure before choosing a lead: step count and
+where the steps concentrate (parking orbit at departure, heliocentric
+cruise, the target's SOI with its moons; `_local_timescale_numba` binds
+there), body placement against the ship integration, emitted point count
+(`apply_predictor_horizon` scales `num_points` up to `max_num_points` 40 000),
+apsis scan, main-thread swap, and the per-compute slowdown when six run at
+once (`predictor.md` measured 67 → 87 ms from memory bandwidth). Read
+`predictor.md` first: body memo, step ceiling sized by the horizon's time
+span, local orbit clamp, point budget, pipeline depth, paced consumption.
+Several obvious ideas were already done and measured there.
+
+**Leads for the compute cost.**
+1. Steps that buy no apsis accuracy (e.g. a cruise segment pinned by a
+   ceiling rather than by the error control) are candidates; steps near the
+   departure, the apsis and flybys are not.
+2. All 28 bodies are placed at every stage. Grouping a far planet with its
+   moons into one source, or a tabulated ephemeris over the horizon instead
+   of per-stage Kepler solves, changes the numbers against the world: allowed
+   only if the acceptance check shows no measurable change.
+3. Full recomputes that an extension of the held line could replace
+   (horizon slider, warp step changes, burnout).
+4. Output cost: 40 000 points, the apsis scan over all of them, the copy on
+   swap.
+
+**Leads for the burn lag.** Today (`predictor.md` → "Under thrust the line
+is refreshed by THROUGHPUT" and "Results are consumed at a PACE"): at most
+`thrust_pipeline_depth` (6) computes run at once, one started per frame, one
+swapped per frame, each result one compute old. At 80 ms per compute and
+180 fps that cannot be fresh every frame, and the lag stays one compute.
+1. **Latency compensation.** Start each job from the state the ship will
+   have when its result is displayed (now plus the expected latency), carried
+   through the known thrust: exact for an executor burn (`BurnProfile` is
+   deterministic), the held input for manual thrust (when the input changes,
+   the error is what today's lag already is). The line then meets the ship
+   instead of trailing it. The short arc between the live ship and the job's
+   start state must still join the head, and the curve stays consumed, never
+   translated.
+2. **Executor burns already know their result.** The preview chain
+   (`ship/maneuver/preview.py`) computes coast, burn and coast with the same
+   `BurnProfile` the executor flies. During an autopilot burn its post-burn
+   line and apsides could be shown and only corrected by the predictor when
+   the flown state leaves a tolerance. Measure preview against flown at
+   burnout first (kick-then-drift vs the RK4 arc, `maneuver.md`).
+3. **Near field fresh, far field at pipeline rate**: only if both come from
+   the same snapshot and the seam is invisible; otherwise drop the idea.
+4. Everything that cuts the compute cost raises the refresh rate directly.
+   The frame rate must not drop (the pool leaves a core free,
+   `_ensure_executor`).
+
+**Burn acceptance**, at the Saturn-transfer horizon under full throttle and
+an executor burn: share of frames with a fresh line, displayed snapshot age
+in ms, deviation of the drawn line from a synchronous reference in px (the
+`predictor.md` tables are the format), fps unchanged; at burnout the line
+settles on the exact coasting line with an Ap marker jump below 1 px, and
+the acceptance check above still passes.
+
+### Verification (both parts)
 - Run every test in `tests/` before the first change (record the failures)
   and after the last. No new failure.
 - Visual A/B with `tools/game_shot.py` at 2560×1440 for at least: default
@@ -205,7 +308,9 @@ all 900; llvmpipe inflates everything GPU-side):
   Explain or revert any difference above the noise floor, and look at the
   images.
 - The Result holds a before/after table per scenario: `frame`, `rend_calc`,
-  `ui_calc`, `pred_draw`, draw calls; median and p95.
+  `ui_calc`, `pred_draw`, draw calls; median and p95. For Part B: compute
+  time and steps at the Saturn and Neptun horizons, the burn metrics, and
+  the acceptance check's Ap error and drift, before and after.
 
 **Result:** _open_
 
