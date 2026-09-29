@@ -86,7 +86,9 @@ Neben dem Drehimpuls bleibt bei der Relativbewegung eine zweite Größe erhalten
 $$\varepsilon = \frac{v^2}{2} - \frac{\mu}{r}\tag{10}$$
 ^eq-energie
 
-Multipliziert man Gl. [[#^eq-zweikoerper|(4)]] skalar mit $\dot{\vec{r}}$, heben sich die Beiträge gegenseitig auf, sodass $\varepsilon$ entlang der gesamten Bahn konstant bleibt [20]. Wegen des negativen Vorzeichens der potentiellen Energie muss Energie zugeführt werden, damit sich ein Körper vom Zentralkörper entfernt. Auf einer Ellipse wandelt sich deshalb fortlaufend Lageenergie in Bewegungsenergie um und wieder zurück. Das Raumfahrzeug ist nahe der Periapsis schnell und nahe der Apoapsis langsam, während die Summe beider Anteile gleich bleibt.
+Der Nullpunkt der potentiellen Energie ist frei wählbar, da physikalisch nur Energieänderungen eine Rolle spielen [20]. Legt man ihn in unendliche Entfernung, ist die potentielle Energie überall sonst negativ. Nach Gl. [[#^eq-energie|(10)]] gewinnt ein Körper, der aus großer Entfernung auf den Zentralkörper zufällt, Bewegungsenergie und verliert im selben Maß Lageenergie, die deshalb unter null sinkt. Aus diesem Grund kann auch $\varepsilon$ negativ werden, obwohl die kinetische Energie selbst nie negativ ist.
+
+Multipliziert man Gl. [[#^eq-zweikoerper|(4)]] skalar mit $\dot{\vec{r}}$, lässt sich die linke Seite als zeitliche Ableitung von $v^2/2$ und die rechte als zeitliche Ableitung von $\mu/r$ schreiben. Daraus folgt $\mathrm{d}\varepsilon/\mathrm{d}t = 0$, sodass $\varepsilon$ entlang der gesamten Bahn konstant bleibt [20]. Mit wachsendem Abstand nimmt die potentielle Energie $-\mu/r$ zu, sodass die kinetische Energie im selben Maß abnimmt. Das Raumfahrzeug ist deshalb an der Periapsis am schnellsten und an der Apoapsis am langsamsten.
 
 Da $\varepsilon$ überall denselben Wert hat, genügt es, sie an einem einzigen Punkt der Bahn auszuwerten. An der Periapsis steht die Geschwindigkeit senkrecht auf $\vec{r}$, sodass sich Gl. [[#^eq-drehimpuls|(5)]] zu $h = r_p v_p$ vereinfacht. Aus Gl. [[#^eq-bahngleichung|(6)]] folgt für $\nu = 0°$ zudem $h^2 = \mu\,r_p(1+e)$. Eingesetzt in Gl. [[#^eq-energie|(10)]] ergibt sich
 
@@ -99,7 +101,7 @@ $$\varepsilon = -\frac{\mu}{2a}\tag{11}$$
 
 Die Energie einer Bahn hängt damit allein von ihrer großen Halbachse ab und ist von der Exzentrizität unabhängig [10]. Eine Kreisbahn und eine stark gestreckte Ellipse mit gleichem $a$ besitzen also dieselbe Energie, so wie sie nach Gl. [[#^eq-umlaufzeit|(9)]] auch dieselbe Umlaufzeit haben. Umgekehrt lässt sich $a$ nur verändern, indem die Energie der Bahn verändert wird. Jede Vergrößerung oder Verkleinerung einer Bahn ist somit ein Energiewechsel, und auf diesem Zusammenhang bauen die Transferrechnungen in Kapitel 3 auf.
 
-Gl. [[#^eq-energie|(10)]] wird auch als Vis-viva-Gleichung bezeichnet [20]. Setzt man sie mit Gl. [[#^eq-energie-halbachse|(11)]] gleich und löst nach $v$ auf, erhält man die Geschwindigkeit an jedem Punkt einer Bahn aus dem Abstand zum Zentralkörper und der großen Halbachse:
+Die Energiegleichung [[#^eq-energie|(10)]] wird auch als Vis-viva-Gleichung bezeichnet [20]. Meist ist damit die Form gemeint, die sich ergibt, wenn man sie mit Gl. [[#^eq-energie-halbachse|(11)]] gleichsetzt und nach $v$ auflöst. Sie liefert die Geschwindigkeit an jedem Punkt einer Bahn aus dem Abstand zum Zentralkörper und der großen Halbachse:
 
 $$v^2 = \mu\left(\frac{2}{r} - \frac{1}{a}\right)\tag{12}$$
 ^eq-visviva
@@ -114,16 +116,59 @@ Lässt man $a$ gegen unendlich gehen, strebt $\varepsilon$ gegen null, und das R
 $$v_{esc} = \sqrt{\frac{2\mu}{r}} = \sqrt{2}\,v_k\tag{14}$$
 ^eq-flucht
 
-Über das Vorzeichen von $\varepsilon$ lassen sich auch die Kegelschnitte aus Abschnitt 2.1 einordnen. Für $\varepsilon < 0$ ist der Körper gebunden und bewegt sich auf einer Ellipse oder einem Kreis, $\varepsilon = 0$ entspricht der Parabel [13], und für $\varepsilon > 0$ verläuft die Bahn als Hyperbel [21]. Auf einer Hyperbel besitzt der Körper auch in unendlicher Entfernung noch eine Restgeschwindigkeit, die **hyperbolische Exzessgeschwindigkeit** $v_\infty$. Da dort der Term $\mu/r$ verschwindet, folgt aus Gl. [[#^eq-energie|(10)]] [21]:
+![[Obsidian Vault/Evaluation/Grafiken & Bilder/energiediagramm.png|450]]
+*Abb. 5, Energiediagramm mit der potentiellen Energie $-\mu/r$ und der Bahnenergie $\varepsilon$ für die drei Bahnformen. Der senkrechte Abstand zur Kurve ist die kinetische Energie. Der Umkehrpunkt gibt nur eine Obergrenze des Abstands an, da die Bewegung quer zum Radius vernachlässigt ist – KI-erstellt (Claude)*
+
+In Abschnitt 2.1 wurden die Kegelschnitte über die Exzentrizität unterschieden. Dieselbe Einteilung ergibt sich über das Vorzeichen von $\varepsilon$ (Abb. 5), das zusätzlich zeigt, ob der Körper dem Zentralkörper entkommen kann. In unendlicher Entfernung wäre die potentielle Energie null, und da die kinetische Energie nicht negativ sein kann, hätte ein Körper, der dort ankommt, stets $\varepsilon \geq 0$. In Abb. 5 entspricht die kinetische Energie an jedem Ort dem senkrechten Abstand zwischen der waagerechten Linie für $\varepsilon$ und der Kurve $-\mu/r$, der nie negativ werden darf. Ist $\varepsilon$ negativ, reicht die Bewegungsenergie deshalb an keinem Punkt der Bahn aus, um das Unendliche zu erreichen. Der Körper bleibt gebunden und bewegt sich auf einer Ellipse oder einem Kreis, was mit Gl. [[#^eq-energie-halbachse|(11)]] übereinstimmt, die für jedes endliche $a$ einen negativen Wert liefert. Für $\varepsilon = 0$ erreicht er, wie bei der Fluchtgeschwindigkeit, gerade noch unendliche Entfernung und kommt dort zur Ruhe, die Bahn ist eine Parabel [13]. Für $\varepsilon > 0$ bleibt ihm auch im Unendlichen Bewegungsenergie übrig, und die Bahn verläuft als Hyperbel [21]. Zählt man $a$ bei der Hyperbel als positive Länge, kehrt sich in Gl. [[#^eq-energie-halbachse|(11)]] und [[#^eq-visviva|(12)]] das Vorzeichen des Terms mit $a$ um, sodass dort $\varepsilon = \mu/(2a)$ gilt [21]. Die Geschwindigkeit, die im Unendlichen übrig bleibt, heißt **hyperbolische Exzessgeschwindigkeit** $v_\infty$. Da dort der Term $\mu/r$ verschwindet, folgt aus Gl. [[#^eq-energie|(10)]] [21]:
 
 $$v_\infty^2 = 2\,\varepsilon\tag{15}$$
 ^eq-exzess
 
-Für die Gravitationsmanöver in Kapitel 4 ist $v_\infty$ die entscheidende Größe, da ein Vorbeiflug an einem Planeten ihren Betrag relativ zum Planeten unverändert lässt und lediglich ihre Richtung dreht.
+Bei einem Vorbeiflug ohne Schub bleibt der Betrag von $v_\infty$ relativ zum Planeten erhalten, lediglich ihre Richtung wird gedreht [23]. Damit wird $v_\infty$ zur entscheidenden Größe für die Gravitationsmanöver in Kapitel 4.
 
-Offen bleibt, wie sich die Energie einer Bahn verändern lässt. Nach Gl. [[#^eq-energie|(10)]] ist das an einem festen Ort nur über die Geschwindigkeit möglich. Erfolgt ein Schub in Flugrichtung so kurz, dass sich $r$ währenddessen praktisch nicht ändert, wächst die kinetische Energie von $v^2/2$ auf $(v+\Delta v)^2/2$, die Bahnenergie also um
+Die Bahn eines Raumfahrzeugs lässt sich folglich nur verändern, indem sich seine Energie ändert. Nach Gl. [[#^eq-energie|(10)]] ist das an einem festen Ort allein über die Geschwindigkeit möglich. Wie eine solche Geschwindigkeitsänderung beschrieben und als Aufwand gemessen wird, behandelt Abschnitt 2.3.
 
-$$\Delta\varepsilon = v\,\Delta v + \frac{\Delta v^2}{2}\tag{16}$$
+## 2.3 Geschwindigkeitsaufwand als Maß
+Um die Geschwindigkeit eines Raumfahrzeugs zu ändern, werden seine Triebwerke gezündet. Dauert der Brennvorgang nur kurz im Vergleich zur Zeit, in der das Raumfahrzeug antriebslos fliegt, spricht man von einem **impulsiven Manöver**. Dabei wird angenommen, dass sich der Geschwindigkeitsvektor in Betrag und Richtung schlagartig ändert, während der Ort des Raumfahrzeugs unverändert bleibt [24]. Diese Idealisierung erspart es, die Bewegungsgleichung mit dem Schub der Triebwerke zu lösen, und ist zulässig, solange sich das Raumfahrzeug während des Brennvorgangs kaum weiterbewegt, wie bei Triebwerken mit hohem Schub und kurzer Brenndauer [Curtis, Abschn. 6.2, S. 287]. Die Änderung der Geschwindigkeit wird als Vektor angegeben [24]:
+
+$$\Delta\vec{v} = \vec{v}_2 - \vec{v}_1\tag{16}$$
+^eq-deltav
+
+Dabei ist $\vec{v}_1$ die Geschwindigkeit unmittelbar vor und $\vec{v}_2$ unmittelbar nach dem Manöver. Abb. 6 zeigt links einen Schub in Flugrichtung, der eine Kreisbahn in eine Ellipse überführt, und rechts den allgemeinen Fall eines Schubs schräg zur Flugrichtung.
+
+![[Obsidian Vault/Evaluation/Grafiken & Bilder/impulsives_manoever.png|700]]
+*Abb. 6, Impulsives Manöver: Übergang von einer Kreisbahn auf eine Ellipse durch Schub in Flugrichtung (links) und Zusammensetzung der Geschwindigkeiten bei beliebiger Schubrichtung (rechts) – KI-erstellt (Claude)*
+
+Besteht eine Mission aus mehreren Manövern, werden die Beträge der einzelnen Geschwindigkeitsänderungen addiert [24]:
+
+$$\Delta v_{ges} = \sum_i \left|\Delta\vec{v}_i\right|\tag{17}$$
+^eq-deltav-ges
+
+Diese Summe wird als **Geschwindigkeitsaufwand** $\Delta v$ einer Mission bezeichnet. Sie ergibt sich allein aus den Bahnen vor und nach jedem Manöver und hängt deshalb nicht von Masse oder Triebwerk des Raumfahrzeugs ab. Ein Beispiel für eine Überführung aus zwei Manövern ist die **Hohmann-Transferbahn**, eine Ellipse, deren Periapsis auf der Ausgangsbahn und deren Apoapsis auf der Zielbahn liegt und die mit besonders wenig Treibstoff auskommt [6]. Ihre Berechnung folgt in Kapitel 3.
+
+Welche Energieänderung ein Manöver bewirkt, hängt vom Ort ab, an dem es ausgeführt wird. Erfolgt der Schub in Flugrichtung, wächst die kinetische Energie von $v^2/2$ auf $(v+\Delta v)^2/2$, während $r$ und damit die potentielle Energie beim impulsiven Manöver gleich bleiben. Nach Gl. [[#^eq-energie|(10)]] steigt die Bahnenergie also um
+
+$$\Delta\varepsilon = v\,\Delta v + \frac{\Delta v^2}{2}\tag{18}$$
 ^eq-oberth
 
-Derselbe Geschwindigkeitszuwachs $\Delta v$ bringt demnach umso mehr Energie, je schneller das Raumfahrzeug bereits ist. Ein Schub ist deshalb dort am wirksamsten, wo die Geschwindigkeit am größten ist, auf einer Ellipse also an der Periapsis. Dieser Zusammenhang wird als **Oberth-Effekt** bezeichnet [22]. Erfolgt der Schub tangential an einer Apside, bleibt der Brennort eine Apside, und nach Gl. [[#^eq-halbachse|(8)]] verschiebt sich allein die gegenüberliegende, wie am Ende von Abschnitt 2.1 beschrieben. Wie groß der dafür nötige Geschwindigkeitsaufwand ist und wie er mit dem Treibstoffverbrauch zusammenhängt, behandelt Abschnitt 2.3.
+Derselbe Geschwindigkeitszuwachs bringt demnach umso mehr Energie, je schneller das Raumfahrzeug bereits ist. Ein Schub ist deshalb dort am wirksamsten, wo die Geschwindigkeit am größten ist, auf einer Ellipse also an der Periapsis. Dieser Zusammenhang wird als **Oberth-Effekt** bezeichnet [22]. Mit $\Delta\varepsilon$ ändert sich nach Gl. [[#^eq-energie-halbachse|(11)]] die große Halbachse. Erfolgt der Schub tangential an einer Apside, bleibt der Ort des Schubs eine Apside, und nach Gl. [[#^eq-halbachse|(8)]] verschiebt sich allein die gegenüberliegende. In Abb. 6 wird der Ort des Schubs so zur neuen Periapsis, während die Apoapsis nach außen rückt.
+
+Wie viel Treibstoff ein bestimmter Geschwindigkeitsaufwand erfordert, beschreibt die Raketengrundgleichung. Ein Triebwerk stößt Masse mit der effektiven Austrittsgeschwindigkeit $v_e$ aus. Sinkt die Masse des Raumfahrzeugs dabei von der Masse $m_0$ vor dem Brennvorgang, die den Treibstoff einschließt, auf die Masse $m_1$ nach dem Brennvorgang, gewinnt es ohne äußere Kräfte die Geschwindigkeit [5]
+
+$$\Delta v = v_e \ln\frac{m_0}{m_1}\tag{19}$$
+^eq-raketengleichung
+
+Statt $v_e$ wird meist der spezifische Impuls $I_{sp}$ eines Triebwerks angegeben, der über $v_e = I_{sp}\,g_0$ mit der Normfallbeschleunigung $g_0 = 9{,}81\ \mathrm{m/s^2}$ zusammenhängt [5]. Für Triebwerke mit flüssigem Sauerstoff und Wasserstoff liegt er bei etwa $455\ \mathrm{s}$ [Curtis, Abschn. 6.2, S. 288]. Nach Gl. [[#^eq-raketengleichung|(19)]] wächst das Massenverhältnis $m_0/m_1$ exponentiell mit $\Delta v$ (Abb. 7). Mit einem solchen Triebwerk beträgt die benötigte Treibstoffmasse bei $\Delta v = 4\ \mathrm{km/s}$ etwa das 1,5-Fache der Masse nach dem Brennvorgang, bei $8\ \mathrm{km/s}$ bereits etwa das 5-Fache. Die verbrauchte Treibstoffmasse ist dabei jeweils $m_0 - m_1$.
+
+![[Obsidian Vault/Evaluation/Grafiken & Bilder/massenverhaeltnis_raketengleichung.png|462]]
+*Abb. 7, Massenverhältnis nach der Raketengrundgleichung für einen spezifischen Impuls von 455 s – KI-erstellt (Claude)*
+
+Bei aufeinanderfolgenden Manövern addieren sich die Geschwindigkeitsänderungen, während sich die Massenverhältnisse nach Gl. [[#^eq-raketengleichung|(19)]] multiplizieren. Der Geschwindigkeitsaufwand einer Mission muss deshalb sorgfältig geplant werden, um die mitgeführte Treibstoffmasse zugunsten der Nutzlast gering zu halten [Curtis, Abschn. 6.2, S. 288]. In dieser Arbeit dient $\Delta v$ daher als Maß, an dem die Missionsvarianten verglichen werden.
+
+Dauert ein Brennvorgang länger, bewegt sich das Raumfahrzeug währenddessen merklich weiter, und die Annahme des impulsiven Manövers trifft nicht mehr zu. Die Bahn lässt sich dann nicht mehr geschlossen angeben und wird durch numerische Integration der Bewegungsgleichung mit Schub bestimmt [Curtis, Abschn. 6.1, S. 287]. Auf diese Weise berechnet auch die verwendete Simulation ihre Brennvorgänge. Manöver werden dort über Manöverknoten auf der vorausberechneten Bahn geplant, von denen jeder eine Geschwindigkeitsänderung in Flugrichtung und eine senkrecht dazu trägt. Die Anzeige gibt daraus den Betrag $\Delta v$ und die Brenndauer an. Das Triebwerk zündet um die halbe Brenndauer vor dem Knoten, sodass der Knoten in der Mitte des Brennvorgangs liegt und dem Ort des impulsiven Manövers entspricht. Masse und Treibstoff bildet die Simulation nicht ab. Der Schub wird direkt als Beschleunigung vorgegeben, und der Aufwand eines Manövers wird unmittelbar in $\Delta v$ gemessen.
+
+%%
+Screenshot (Abb. 8) folgt: Manöverknoten an der Periapsis einer Erdbahn, rein prograde Δv, Vorschaulinie mit angehobener Apoapsis, MANEUVER-Block mit DV und Brenndauer lesbar, ohne Ausschnitt. Bildunterschrift und Eintrag unter Bildquellen danach ergänzen.
+%%
+
+Alle bisherigen Beziehungen gelten für einen einzelnen Zentralkörper. Auf einer interplanetaren Mission wirken jedoch Sonne und Planeten gleichzeitig auf das Raumfahrzeug, womit sich Abschnitt 2.4 befasst.

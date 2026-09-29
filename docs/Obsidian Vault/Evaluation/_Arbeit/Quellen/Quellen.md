@@ -1,4 +1,4 @@
-## Beitragsquellen
+	## Beitragsquellen
 [1] NASA: Basics of Space Flight - Gravitation und Mechanik  https://science.nasa.gov/learn/basics-of-space-flight/chapter3-1/ bis `/chapter3-4`, zuletzt 13.09.2026
 [4] "NASA: Voyager. The Grand Tour of Big Science": https://www.nasa.gov/history/SP-4219/Chapter11.html zuletzt 07.09.2026
 [5] "NASA Glenn Research Center: Ideal Rocket Equation": https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/ideal-rocket-equation/ zuletzt 07.09.2026
@@ -18,6 +18,8 @@
 [19] Klassische Bahnelemente https://orbital-mechanics.space/classical-orbital-elements/classical-orbital-elements.html, zuletzt 26.09.2026
 [20] Energieerhaltung https://orbital-mechanics.space/constants-of-orbital-motion/energy-is-conserved-in-orbital-motion.html, zuletzt 28.09.2026
 [21] Hyperbolische Bahnen https://orbital-mechanics.space/the-orbit-equation/hyperbolic-trajectories.html, zuletzt 28.09.2026
+[23] Planetarer Vorbeiflug https://orbital-mechanics.space/interplanetary-maneuvers/planetary-arrival-flyby.html, zuletzt 29.09.2026
+[24] Impulsive Manöver https://orbital-mechanics.space/orbital-maneuvers/impulsive-maneuvers.html, zuletzt 29.09.2026
 
 ---
 ## Literatur / Papers
@@ -31,4 +33,7 @@ Abb. 1 Waagerechter Abschuss nach Newtons Gedankenexperiment: KI-erstellt (Claud
 Abb. 2 Geometrie einer Ellipsenbahn: aus [10], Bryan Weber, Orbital Mechanics & Astrodynamics, Lizenz CC BY-SA 4.0
 Abb. 3 Exzentrizität bei verschiedenen Abstandsverhältnissen: KI-erstellt (Claude)
 Abb. 4 Bahnelemente einer Bahn im Raum: KI-erstellt (Claude), Inhalt nach [19]
+Abb. 5 Energiediagramm der Bahnformen: KI-erstellt (Claude), Inhalt nach [20] und [21]
+Abb. 6 Impulsives Manöver: KI-erstellt (Claude), Inhalt nach [24]
+Abb. 7 Massenverhältnis nach der Raketengrundgleichung: KI-erstellt (Claude), berechnet nach [5] mit $I_{sp}$ aus [Curtis]
 
