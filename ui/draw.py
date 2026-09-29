@@ -41,18 +41,27 @@ class UIDraw:
         self._quad_vbo = None
         # Zuletzt gesetzte uniform-werte, siehe flush().
         self._last = {}
+        # Der beschriftungs-atlas des TextRenderers (siehe text_quad) und die
+        # nummer des gerade gesammelten stapels -- sie steigt bei jedem
+        # flush(), ein label mit derselben nummer steht also noch aus.
+        self.atlas = None
+        self.serial = 0
         self._init_pipeline()
 
     # Per-instanz-layout, muss zu den i_*-attributen in ui_rect.vert passen:
     # rect(4) expand(1) rotation(1) radius(4) fill(4) fill2(4) gradient(1)
     # border_color(4) border_width(1) shadow_color(4) shadow_offset(2)
-    # shadow_softness(1) arc(2) = 33 floats.
-    _INSTANCE_FLOATS = 33
-    _INSTANCE_FORMAT = '4f 1f 1f 4f 4f 4f 1f 4f 1f 4f 2f 1f 2f/i'
+    # shadow_softness(1) arc(2) tex(4) = 37 floats.
+    #
+    # `tex` = (atlas-x, atlas-y, textur-schalter, 0): eine TEXT-instanz liest
+    # ihre pixel aus dem beschriftungs-atlas statt eine form zu rechnen, siehe
+    # text_quad(). Formen tragen dort nullen.
+    _INSTANCE_FLOATS = 37
+    _INSTANCE_FORMAT = '4f 1f 1f 4f 4f 4f 1f 4f 1f 4f 2f 1f 2f 4f/i'
     _INSTANCE_NAMES = (
         'i_rect', 'i_expand', 'i_rotation', 'i_radius', 'i_fill', 'i_fill2',
         'i_gradient', 'i_border_color', 'i_border_width', 'i_shadow_color',
-        'i_shadow_offset', 'i_shadow_softness', 'i_arc',
+        'i_shadow_offset', 'i_shadow_softness', 'i_arc', 'i_tex',
     )
 
     def _init_pipeline(self):
@@ -75,6 +84,9 @@ class UIDraw:
             self._vao = None
             self._ensure_capacity(256)
             self._last = {}
+            # Der atlas liegt beim zeichnen auf einheit 0 (siehe flush()).
+            if 'u_atlas' in program:
+                program['u_atlas'].value = 0
         except Exception as exc:
             print(f"UI DRAW WARNING: ui_rect-pipeline nicht verfuegbar ({exc})")
             self._program = None
@@ -257,6 +269,45 @@ class UIDraw:
             shadow_color[0], shadow_color[1], shadow_color[2], shadow_color[3],
             shadow_offset[0], shadow_offset[1], shadow_softness,
             arc_params[0], arc_params[1],
+            0.0, 0.0, 0.0, 0.0,
+        )
+        self._instance_count = n + 1
+
+    def text_quad(self, ortho_x, ortho_y, width, height, atlas_x, atlas_y,
+                  color):
+        """Eine beschriftung aus dem atlas in den stapel legen.
+
+        Text war ein eigener draw je label, und jeder davon musste vorher den
+        rechteck-stapel ausleeren, damit die schichtung stimmt -- ein HUD-bild
+        zerfiel so in gut hundert draws. Als instanz DESSELBEN stapels liegt
+        der text genau an seiner aufrufstelle zwischen den formen, und das
+        ganze HUD geht in einem draw raus.
+
+        Die pixel sind die des alten texquad-wegs: dieselben quad-ecken
+        (ganzzahlig, 1:1, keine vergroesserung), `texelFetch` liest genau das
+        texel, das dort unter NEAREST bzw. LINEAR an der pixelmitte laege, und
+        der farbwert ist wie in texquad.frag `texel * farbe`.
+
+        (ortho_x, ortho_y) ist die UNTERE linke ecke in ortho-pixeln, bereits
+        auf das pixelraster gerundet.
+        """
+        n = self._instance_count
+        if n >= self._instance_capacity:
+            self._ensure_capacity(n + 1)
+        r, g, b, a = color
+        offset = n * self._INSTANCE_FLOATS
+        self._instance_flat[offset:offset + self._INSTANCE_FLOATS] = (
+            ortho_x, ortho_y, width, height, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0,
+            r, g, b, a,
+            r, g, b, a,
+            0.0,
+            0.0, 0.0, 0.0, 0.0,
+            0.0,
+            0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            0.0, _TAU,
+            atlas_x, atlas_y, 1.0, 0.0,
         )
         self._instance_count = n + 1
 
@@ -266,6 +317,10 @@ class UIDraw:
         if count <= 0 or self._vao is None:
             return
         self._instance_count = 0
+        # Ab hier darf der atlas die slots dieses stapels wieder vergeben.
+        self.serial += 1
+        if self.atlas is not None:
+            self.atlas.use(location=0)
         viewport = (float(self.width), float(self.height))
         if self._last.get('u_viewport') != viewport:
             self._last['u_viewport'] = viewport

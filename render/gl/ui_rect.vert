@@ -33,6 +33,7 @@ in vec4 i_shadow_color;
 in vec2 i_shadow_offset;
 in float i_shadow_softness;
 in vec2 i_arc;
+in vec4 i_tex;             // atlas-x, atlas-y, textur-schalter (>0.5 = TEXT), 0
 
 uniform vec2 u_viewport;
 
@@ -48,6 +49,8 @@ flat out vec4 v_shadow_color;
 flat out vec2 v_shadow_offset;
 flat out float v_shadow_softness;
 flat out vec2 v_arc;
+flat out vec4 v_tex;
+flat out vec2 v_origin;    // untere linke ecke des rechtecks, ortho-pixel
 
 void main() {
     vec2 half_size = i_rect.zw * 0.5;
@@ -69,6 +72,8 @@ void main() {
     v_shadow_offset = i_shadow_offset;
     v_shadow_softness = i_shadow_softness;
     v_arc = i_arc;
+    v_tex = i_tex;
+    v_origin = i_rect.xy;
 
     float c = cos(i_rotation);
     float s = sin(i_rotation);

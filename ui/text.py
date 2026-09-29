@@ -38,8 +38,92 @@ _ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 from render import GL_DIR as _SHADER_DIR
 
 
+class _ShelfAtlas:
+    """Regal-packer fuer den beschriftungs-atlas (reines python, kein GL).
+
+    Ein regal je ZEILENHOEHE: die HUD-texte kommen in einer handvoll
+    rollen, jede mit fester schrifthoehe, also passen gleich hohe labels
+    luekenlos nebeneinander. Freigegebene plaetze werden wiederverwendet
+    (kleinster, der passt); ein platz am regalende gibt den cursor zurueck.
+    Reicht nichts mehr, liefert `alloc` None -- dann wird der ganze atlas
+    geleert (TextRenderer._atlas_slot).
+    """
+
+    def __init__(self, width, height):
+        self.width = int(width)
+        self.height = int(height)
+        self.reset()
+
+    def reset(self):
+        self._by_height = {}   # hoehe -> [regal]
+        self._by_y = {}        # y -> regal
+        self._top = 0
+        self.used = 0
+
+    def alloc(self, w, h):
+        w = int(w)
+        h = int(h)
+        if w <= 0 or h <= 0 or w > self.width or h > self.height:
+            return None
+        for shelf in self._by_height.get(h, ()):
+            free = shelf['free']
+            best = -1
+            for index, (_fx, fw) in enumerate(free):
+                if fw >= w and (best < 0 or fw < free[best][1]):
+                    best = index
+            if best >= 0:
+                fx, fw = free.pop(best)
+                if fw > w:
+                    free.append((fx + w, fw - w))
+                self.used += w * h
+                return (fx, shelf['y'])
+            if shelf['cursor'] + w <= self.width:
+                x = shelf['cursor']
+                shelf['cursor'] = x + w
+                self.used += w * h
+                return (x, shelf['y'])
+        if self._top + h > self.height:
+            return None
+        shelf = {'y': self._top, 'h': h, 'cursor': w, 'free': []}
+        self._top += h
+        self._by_height.setdefault(h, []).append(shelf)
+        self._by_y[shelf['y']] = shelf
+        self.used += w * h
+        return (0, shelf['y'])
+
+    def free(self, x, y, w, h):
+        shelf = self._by_y.get(int(y))
+        if shelf is None:
+            return
+        self.used -= int(w) * int(h)
+        x = int(x)
+        w = int(w)
+        free = shelf['free']
+        if x + w == shelf['cursor']:
+            # Am regalende: den cursor zuruecknehmen, und mit ihm alle
+            # freien plaetze, die dadurch ans ende ruecken.
+            cursor = x
+            moved = True
+            while moved:
+                moved = False
+                for index, (fx, fw) in enumerate(free):
+                    if fx + fw == cursor:
+                        cursor = fx
+                        free.pop(index)
+                        moved = True
+                        break
+            shelf['cursor'] = cursor
+        else:
+            free.append((x, w))
+
+
 class TextRenderer:
     """Font-verwaltung, label-textur-cache und texturiertes blitten."""
+
+    #: Kantenlaenge des beschriftungs-atlas in texeln. Gemessen belegen die
+    #: bis zu `cache_max` (256) labels des HUDs bei 2560x1440 einen bruchteil
+    #: davon; laeuft er doch voll, wird er geleert und neu befuellt.
+    ATLAS_SIZE = 2048
 
     def __init__(self, ctx, width, height, theme=DEFAULT_THEME,
                  ui_scale=1.0, cache_max=256):
@@ -56,7 +140,15 @@ class TextRenderer:
         self._fonts = {}            # rolle -> pygame.Font
         # LRU, NICHT FIFO -- die reihenfolge ist die des letzten ZUGRIFFS,
         # nicht die des einfuegens (siehe _texture_for).
-        self._cache = OrderedDict()  # (text, font_key) -> (texture, w, h)
+        # Eintrag: [slot, w, h, stapel] -- slot ist (x, y) im atlas oder,
+        # ohne atlas, eine eigene textur; `stapel` ist UIDraw.serial beim
+        # letzten zeichnen (siehe _evict).
+        self._cache = OrderedDict()
+        # Der stapel, in den text als instanz geht (UIDraw, von UIContext
+        # gesetzt ueber attach_batch), und der atlas, aus dem er liest.
+        self.batch = None
+        self._atlas = None
+        self._atlas_alloc = None
         self._font_paths = None
         self._digit_widths = {}
         # Freigegebene texturen nach groesse, siehe _acquire_texture.
@@ -96,6 +188,34 @@ class TextRenderer:
             print(f"UI TEXT WARNING: texquad-pipeline nicht verfuegbar ({exc})")
             self._program = None
             self._vao = None
+
+    def attach_batch(self, draw):
+        """Text ab jetzt als INSTANZ in den rechteck-stapel von `draw` legen.
+
+        Jedes label war ein eigener draw, und jeder davon musste vorher den
+        stapel der rechtecke ausleeren, damit die schichtung der
+        aufruf-reihenfolge entspricht: gemessen ~77 text-draws plus ~35
+        erzwungene flushes je HUD-bild. Liegen die texte in EINEM atlas, sind
+        sie gewoehnliche instanzen desselben stapels (UIDraw.text_quad), und
+        das ganze HUD ist ein draw. Die schichtung bleibt die aufruf-
+        reihenfolge, weil die instanz-reihenfolge es ist.
+        """
+        if self._atlas is None:
+            try:
+                size = (self.ATLAS_SIZE, self.ATLAS_SIZE)
+                self._atlas = self.ctx.texture(size, 4)
+                self._atlas.filter = (moderngl.NEAREST, moderngl.NEAREST)
+                self._atlas_alloc = _ShelfAtlas(*size)
+            except Exception as exc:
+                print(f"UI TEXT WARNING: kein beschriftungs-atlas ({exc})")
+                self._atlas = None
+                self._atlas_alloc = None
+                return
+        # Vorhandene eintraege sind eigene texturen -- verwerfen, damit ab
+        # hier jeder eintrag im atlas liegt.
+        self.clear_cache()
+        self.batch = draw
+        draw.atlas = self._atlas
 
     # --------------------------------------------------------------- fonts
 
@@ -314,12 +434,20 @@ class TextRenderer:
             pass
 
     def clear_cache(self):
+        # Noch ausstehende text-instanzen zeigen in den atlas: erst zeichnen,
+        # dann die plaetze freigeben.
+        if self.batch is not None:
+            self.batch.flush()
         for entry in list(self._cache.values()):
+            if isinstance(entry[0], tuple):
+                continue
             try:
                 entry[0].release()
             except Exception:
                 pass
         self._cache = OrderedDict()
+        if self._atlas_alloc is not None:
+            self._atlas_alloc.reset()
         for bucket in self._texture_pool.values():
             for texture in bucket:
                 try:
@@ -348,12 +476,6 @@ class TextRenderer:
             )
             data = pygame.image.tostring(surface, 'RGBA', True)
             w, h = surface.get_size()
-            # Die pixelschrift wird NEAREST gefiltert. _blit zeichnet zwar
-            # 1:1 und auf ganze pixel gerastet, wo LINEAR dasselbe ergaebe --
-            # aber eine harte rasterung, die von der genauigkeit der
-            # texturkoordinaten abhaengt, ist ein unnoetiges risiko.
-            # (Den filter setzt _acquire_texture, auch bei wiederverwendung.)
-            texture = self._acquire_texture((w, h), data, antialias)
         except Exception:
             return None
 
@@ -365,15 +487,64 @@ class TextRenderer:
         # frame getroffen, stehen dadurch immer unter den juengsten und
         # bleiben; verworfen werden die wechselnden zahlen.
         if len(self._cache) >= self.cache_max:
-            for old_key in list(self._cache.keys())[: max(1, self.cache_max // 4)]:
-                try:
-                    old = self._cache.pop(old_key)
-                    self._retire_texture(old[0], (int(old[1]), int(old[2])))
-                except Exception:
-                    pass
+            self._evict(list(self._cache.keys())[: max(1, self.cache_max // 4)])
 
-        self._cache[key] = (texture, w, h)
-        return self._cache[key]
+        try:
+            slot = self._atlas_slot(w, h, data) if self.batch is not None else None
+            if slot is None:
+                # Ohne atlas (oder zu gross dafuer): eine eigene textur, die
+                # _blit einzeln zeichnet.
+                slot = self._acquire_texture((w, h), data, antialias)
+        except Exception:
+            return None
+        entry = [slot, w, h, -1]
+        self._cache[key] = entry
+        return entry
+
+    def _atlas_slot(self, w, h, data):
+        """Platz im atlas belegen und die pixel hineinschreiben.
+
+        None, wenn der text groesser ist als der atlas (dann eigene textur).
+        Ist der atlas VOLL, wird er ganz geleert: vorher geht der stapel
+        raus, denn dessen text-instanzen lesen genau diese plaetze.
+        """
+        alloc = self._atlas_alloc
+        if alloc is None or w > alloc.width or h > alloc.height:
+            return None
+        slot = alloc.alloc(w, h)
+        if slot is None:
+            self.clear_cache()
+            slot = alloc.alloc(w, h)
+            if slot is None:
+                return None
+        self._atlas.write(data, viewport=(slot[0], slot[1], w, h))
+        return slot
+
+    def _evict(self, keys):
+        """Eintraege verwerfen; ihre atlas-plaetze werden wieder frei.
+
+        Liegt einer davon noch als instanz im UNGEZEICHNETEN stapel, wuerde
+        ein neuer text seinen platz ueberschreiben, bevor er gezeichnet ist --
+        dann zuerst den stapel ausleeren.
+        """
+        batch = self.batch
+        if batch is not None:
+            serial = batch.serial
+            for key in keys:
+                entry = self._cache.get(key)
+                if entry is not None and entry[3] == serial:
+                    batch.flush()
+                    break
+        for key in keys:
+            entry = self._cache.pop(key, None)
+            if entry is None:
+                continue
+            slot, w, h = entry[0], int(entry[1]), int(entry[2])
+            if isinstance(slot, tuple):
+                if self._atlas_alloc is not None:
+                    self._atlas_alloc.free(slot[0], slot[1], w, h)
+            else:
+                self._retire_texture(slot, (w, h))
 
     def _render_tracked(self, text, font, tracking, antialias=True,
                         tabular=False):
@@ -471,7 +642,7 @@ class TextRenderer:
         entry = self._texture_for(text, role)
         if entry is None:
             return (float(x), float(y), 0.0, 0.0)
-        texture, w, h = entry
+        texture, w, h = entry[0], entry[1], entry[2]
 
         left = float(x)
         if align == 'center':
@@ -485,7 +656,18 @@ class TextRenderer:
         elif valign == 'bottom':
             top -= h
 
-        self._blit(texture, left, top, w, h, color)
+        batch = self.batch
+        if batch is not None and isinstance(texture, tuple):
+            # Als instanz in den stapel -- dieselbe rasterung wie _blit.
+            entry[3] = batch.serial
+            batch.text_quad(
+                round(left), round(float(self.height) - top - float(h)),
+                float(w), float(h), float(texture[0]), float(texture[1]),
+                (float(color[0]), float(color[1]), float(color[2]),
+                 float(color[3])),
+            )
+        else:
+            self._blit(texture, left, top, w, h, color)
         return (left, top, float(w), float(h))
 
     def _blit(self, texture, left, top, w, h, color):
@@ -530,7 +712,8 @@ class TextRenderer:
 
     def release(self):
         self.clear_cache()
-        for obj in (self._vao, self._quad_vbo, self._program):
+        self.batch = None
+        for obj in (self._vao, self._quad_vbo, self._program, self._atlas):
             try:
                 if obj is not None:
                     obj.release()
@@ -539,3 +722,5 @@ class TextRenderer:
         self._vao = None
         self._quad_vbo = None
         self._program = None
+        self._atlas = None
+        self._atlas_alloc = None

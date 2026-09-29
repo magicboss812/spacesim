@@ -108,7 +108,8 @@ class HoldMixin:
         residual_speed = delta_speed
         if world is not None:
             try:
-                g = world.acceleration_at(ship, ship.position, cur_time)
+                fast = getattr(world, 'acceleration_at_fast', None)
+                g = (fast or world.acceleration_at)(ship, ship.position, cur_time)
                 gx = float(g.x)
                 gy = float(g.y)
                 span = max(dt_age, 0.0)

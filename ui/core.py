@@ -124,6 +124,9 @@ class UIContext:
         # flush) exakt der aufruf-reihenfolge entspricht, muss vor jedem
         # text-draw der rechteck-stapel raus.
         self.text.rect_flush = self.draw.flush
+        # Text geht als INSTANZ in denselben stapel wie die rechtecke (ein
+        # draw fuer das ganze HUD), siehe TextRenderer.attach_batch.
+        self.text.attach_batch(self.draw)
 
         # Eingabezustand des aktuellen frames.
         self.mouse_x = 0.0

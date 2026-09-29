@@ -29,6 +29,11 @@ flat in vec4 v_shadow_color;
 flat in vec2 v_shadow_offset;  // pixel, ortho-konvention (y nach oben)
 flat in float v_shadow_softness;
 flat in vec2 v_arc;            // startwinkel, ueberstrichener winkel (radiant); >= TAU = volle form
+flat in vec4 v_tex;            // atlas-x, atlas-y, textur-schalter, 0
+flat in vec2 v_origin;         // untere linke ecke des rechtecks, ortho-pixel
+
+// Der beschriftungs-atlas (ui/text.py). Nur TEXT-instanzen lesen ihn.
+uniform sampler2D u_atlas;
 
 out vec4 fragColor;
 
@@ -105,6 +110,18 @@ vec4 over(vec4 src, vec4 dst) {
 }
 
 void main() {
+    // TEXT-INSTANZ: die beschriftung liegt 1:1 im atlas, das quad sitzt auf
+    // ganzen pixeln. gl_FragCoord ist die pixelmitte, der abstand zur ecke
+    // also exakt das texel, das texquad.frag dort unter NEAREST wie LINEAR
+    // gelesen haette -- und die farbe ist dieselbe toenung `texel * farbe`.
+    // Kein discard: bei alpha 0 ist das blending ohnehin wirkungslos, genau
+    // wie im alten weg.
+    if (v_tex.z > 0.5) {
+        ivec2 texel = ivec2(v_tex.xy) + ivec2(floor(gl_FragCoord.xy - v_origin));
+        fragColor = texelFetch(u_atlas, texel, 0) * v_fill;
+        return;
+    }
+
     const float AA = 0.5;
 
     float mask = arc_mask(v_local);

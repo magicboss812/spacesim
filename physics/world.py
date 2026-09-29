@@ -206,6 +206,39 @@ class world:
 
         return acc
 
+    def acceleration_at_fast(self, target_body, position, time_s=None):
+        """`acceleration_at`, ueber den numba-zwilling `_wk._acceleration_at`.
+
+        Fuer aufrufer AUSSERHALB des integrators, die g einmal je frame
+        brauchen (der schub-detektor des praediktors). Die python-fassung loest
+        dafuer 27 koerper einzeln per `position_at_time` -- gemessen 0.8 ms je
+        frame. Der kernel rechnet dieselbe summe in derselben koerper-
+        reihenfolge mit demselben Kepler-modell (`_body_pos_at_time`, siehe
+        die bit-gleichheits-notiz in .claude/rules/physics-world.md), das
+        ergebnis ist also bit-gleich.
+
+        `acceleration_at` selbst bleibt reines python: es ist die kraft des
+        REFERENZ-integrators, gegen den der kernel geprueft wird.
+        """
+        if time_s is None:
+            time_s = self.time
+        if _KERNELS_OK and getattr(self, "use_fast_integrator", True):
+            try:
+                packed = self._serialize_for_kernel(())
+                if packed is not None:
+                    (bx, by, bm, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
+                     k_ref_time, k_mu) = packed[:11]
+                    index_of = self._kernel_static_cache[1]
+                    target = index_of.get(id(target_body), -1)
+                    ax, ay = _wk._acceleration_at(
+                        target, float(position.x), float(position.y),
+                        float(time_s), bx, by, bm, k_has, k_a, k_e, k_arg,
+                        k_parent, k_ref_theta, k_ref_time, k_mu, float(self.G))
+                    return Vec2(ax, ay)
+            except Exception:
+                pass
+        return self.acceleration_at(target_body, position, time_s)
+
     def _rkn4_step_body_state(self, body, p0, v0, t0, h):
         """
         One explicit RKN4-style step for r'' = a(r, t).
