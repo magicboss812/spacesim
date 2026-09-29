@@ -232,8 +232,9 @@ Fonts are **re-rasterised** at the new pixel size on every scale change
 >    still write every change, so the output is unchanged. `resize()` calls
 >    `_invalidate_gl_state_cache()` — `u_viewport` hangs off the window size,
 >    and that is the one value the cache would otherwise be stale about.
->    `ui/text.py::_blit` does the same for its two uniforms and drops the
->    cache in `resize()`.
+>    The HUD's text no longer writes per-label uniforms at all: it is part of
+>    the instanced UI batch (`.claude/rules/hud-ui.md`, 2026-09-29). Per frame
+>    **261 → 120** uniform writes and **190 → 80** GL draws.
 > 2. **Texture pooling.** The expensive part of a *new* label is not the
 >    rasterising but the GL allocation — measured **~0.3 ms per
 >    `ctx.texture(...)`**, and the labels that carry a number (speed,
@@ -241,9 +242,11 @@ Fonts are **re-rasterised** at the new pixel size on every scale change
 >    textures almost always fit the next one, since a digit more or less does
 >    not change the line height, so they are collected by size and refilled
 >    with `write()` instead of released: `Renderer._acquire_label_texture` /
->    `_retire_label_texture` (cap 64) and the same pair in `ui/text.py`
->    (cap 96). **A font rebuild must drop the pool** — those textures carry
->    the old size and none of them fits any more.
+>    `_retire_label_texture` (cap 64) for the world labels. The HUD's
+>    `ui/text.py` keeps its labels in one atlas instead and writes new ones
+>    into a freed slot; its pool (cap 96) serves only the oversize fallback.
+>    **A font rebuild must drop the pool** — those textures carry the old
+>    size and none of them fits any more.
 >
 > The Ap/Pe diamonds are four unconnected strokes drawn through
 > `_draw_line_segments` (`GL_LINES`). They used to be batched one draw per
@@ -251,9 +254,15 @@ Fonts are **re-rasterised** at the new pixel size on every scale change
 > fades it by the orbit's on-screen size — `dist·camera.scale`, the apsis radius
 > in pixels — between `apsis_marker_fade_min_px` and `_full_px`, so Pe/Ap don't
 > stack onto the ship/Erde markers when the conic is small on screen). That is
-> one draw per marker again, which is fine: real orbits show 1 Pe + 1 Ap, rarely
-> two each. The label fades with it via `_blit_text_topdown(..., color=)` →
-> `texquad.frag`'s `u_color` alpha.
+> one draw per marker again. The label fades with it via
+> `_blit_text_topdown(..., color=)` → `texquad.frag`'s `u_color` alpha.
+>
+> **It is not 1 Pe + 1 Ap.** The default parking orbit fits ~8 revolutions
+> into the horizon: measured **16 markers per frame**, i.e. 16 line draws and
+> 16 label draws, ~0.8 ms median. They stay separate on purpose: diamond,
+> label, diamond, label is the paint order, and merging the diamonds into one
+> draw would put marker *k+1* under label *k* wherever they overlap — stacked
+> revolutions are exactly where they do.
 
 ## `render/gl/`
 
@@ -261,7 +270,8 @@ Fonts are **re-rasterised** at the new pixel size on every scale change
 y flipped in the vert shader), `ortho.vert` (bottom-up ortho convention —
 ship arrow, debug crosses; replicates the old fixed-function
 `gluOrtho2D(0,w,0,h)` mapping), `texquad.{vert,frag}` (textured quads for
-labels/HUD, ortho convention), `ui_rect.{vert,frag}` (the UI SDF shader).
+world labels, ortho convention), `ui_rect.{vert,frag}` (the UI SDF shader,
+plus a `texelFetch` branch that draws HUD text from the label atlas).
 `body_surface.{vert,frag}` + `body_line.{vert,frag}` draw the procedural
 body art (see `bodies/style.py`). FXAA lives inline in `render/renderer.py`.
 
@@ -270,7 +280,7 @@ body art (see `bodies/style.py`). FXAA lives inline in `render/renderer.py`.
 > baking the colour into `font.render` would put it in the cache key and
 > give every hover state its own GL texture. **GL initialises uniforms to 0,
 > so a caller that skips `u_color` draws nothing.** Both call sites
-> (`Renderer._draw_texture_ortho`, `ui/text.py`) always set it.
+> (`Renderer._draw_texture_ortho`, `ui/text.py::_blit`) always set it.
 
 > `ui_rect.frag` is one SDF that covers ~90% of the UI: rounded rects with
 > per-corner radii, borders, drop shadows, vertical gradients — plus

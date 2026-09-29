@@ -121,8 +121,8 @@ class TextRenderer:
     """Font-verwaltung, label-textur-cache und texturiertes blitten."""
 
     #: Kantenlaenge des beschriftungs-atlas in texeln. Gemessen belegen die
-    #: bis zu `cache_max` (256) labels des HUDs bei 2560x1440 einen bruchteil
-    #: davon; laeuft er doch voll, wird er geleert und neu befuellt.
+    #: labels eines HUD-bilds bei 2560x1440 74 131 texel, 1.8 % davon; laeuft
+    #: er doch voll, wird er geleert und neu befuellt (_atlas_slot).
     ATLAS_SIZE = 2048
 
     def __init__(self, ctx, width, height, theme=DEFAULT_THEME,

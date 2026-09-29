@@ -716,7 +716,9 @@ anchoring, `points[0]` is the ship's position at `world.time`.**
 > | apoapsis (39.7 Mm) | 0.000 m/s | 6.67 m/s |
 >
 > The 1 m/s tolerance now sits ~290× above the coasting noise and ~7× below
-> the thrust signal, everywhere. It also catches a case the old rule missed
+> the thrust signal, everywhere. `g` comes from `world.acceleration_at_fast`,
+> the numba twin of `acceleration_at` (bit-identical, 0.144 → 0.028 ms per
+> frame; `.claude/rules/physics-world.md`). It also catches a case the old rule missed
 > even without the gravity margin: thrust opposing gravity, where the *total*
 > jump is 0.98 m/s (under tolerance) but the residual is 6.66 m/s.
 >

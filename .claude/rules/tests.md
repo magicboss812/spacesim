@@ -408,6 +408,11 @@ ruft `renderer._draw_body_icon` direkt auf und geht **nie** durch
 `renderer.render()`, haengt also an keiner der spaeteren zeichen-domaenen.
 
 
+`render_budget_test.py` §1 "gegenprobe: die alte rechnung haette die luecke
+rend_calc zugeschlagen" fails in the cloud container on the untouched tree
+too (measured 2026-09-29: alt 4.577 ms gegen neu 4.638 ms); the cause was not
+investigated. The other checks of §1 pass.
+
 `orbit_lines_test.py` has three **timing budgets** that this machine misses:
 "eine volle neuberechnung unter 5 ms", "ruhiger frame unter 0.20 ms" and "jeder
 weitere koerper unter 25 us". They are not correctness checks.
