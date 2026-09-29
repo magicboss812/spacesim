@@ -87,6 +87,16 @@ class ManeuverDrawMixin:
                 transformed = transform(ts, xs, ys)
             except Exception:
                 transformed = None
+            # Ohne gesetztes fenster (`draw_prediction` raeumt es vor diesem
+            # durchgang ab) rechnet der skalare weg den ursprung EXAKT -- und
+            # genau das kann der rahmen auch im stapel.
+            exact = getattr(frame, 'to_this_frame_xy_arrays_exact', None)
+            if (transformed is None and exact is not None
+                    and float(getattr(frame, '_origin_interp_q', 0.0)) <= 0.0):
+                try:
+                    transformed = exact(ts, xs, ys)
+                except Exception:
+                    transformed = None
             if transformed is not None:
                 frame_x, frame_y = transformed
         if frame_x is None:
