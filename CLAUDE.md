@@ -108,19 +108,19 @@ re-run `/graphify` first.
 
 ## Git — never on your own
 
-The repo root is this folder, and `CLAUDE.md` and `.claude/rules/` are tracked
-in it alongside the code. **Never `commit`, `add`, branch, push, stash or reset
-unless the user asks in that same turn** — inspecting is fine.
+`CLAUDE.md` and `.claude/rules/` are tracked in this repo with the code.
+**Never `commit`, `add`, branch, push, stash or reset unless the user asks in
+that same turn** — inspecting is fine. Working a task from `TASKS.md` (the
+one-task-per-session queue) counts as asked: commit and push that task.
 
 ## Screenshots — "check the screenshot(s)"
 
-They live in `../screenshots for debugging/` (next to the repo, not in it),
-named `Screenshot YYYY-MM-DD HHMMSS.png`, so **newest = last by name and by
-mtime**. *Check the screenshot(s)* in any wording means go read the newest N
-(plain singular = 1) — the image is not attached
-(`ls -t "../screenshots for debugging" | head -N`). They
-are usually **crops**, so the HUD is often missing and the scale unknown: read
-them for *shape*, and get every number from a measurement instead.
+They live in `../screenshots for debugging/` (next to the repo), named
+`Screenshot YYYY-MM-DD HHMMSS.png`, so **newest = last by name and by mtime**.
+*Check the screenshot(s)* means read the newest N (singular = 1); the image is
+not attached (`ls -t "../screenshots for debugging" | head -N`). Usually
+**crops** (HUD missing, scale unknown): read them for *shape*, take every number
+from a measurement. Headless capture in the cloud: `TASKS.md` → Screenshots.
 
 ## Invariants — don't break these
 
