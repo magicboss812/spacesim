@@ -55,6 +55,51 @@ class ComputeMixin:
                 return int(i)
         return -1
 
+    def _coast_start_unbound(self, snapshot, px, py, vx, vy, local_t):
+        """Ist das schiff am start der gleitkurve UNGEBUNDEN gegenueber dem
+        koerper mit der kleinsten kepler-zeitskala?
+
+        Derselbe koerper wie in `world.characteristic_timescale` (minimum
+        von sqrt(r^3/(G m)) ueber die festen koerper), die geschwindigkeit
+        des koerpers als zentrale differenz ueber +-1 s aus demselben
+        kepler-modell wie im kernel.
+        """
+        try:
+            body_m = snapshot["body_m"]
+            body_fixed = snapshot["body_fixed"]
+            G = float(snapshot["G"])
+        except Exception:
+            return False
+        best = math.inf
+        best_i = -1
+        best_r = 0.0
+        best_xy = None
+        for i in range(int(body_m.shape[0])):
+            mass = float(body_m[i])
+            if body_fixed[i] == 0 or mass <= 0.0:
+                continue
+            pos = self._snapshot_body_position_at_local_t(snapshot, i, local_t)
+            if pos is None:
+                continue
+            dx = px - float(pos[0])
+            dy = py - float(pos[1])
+            r = math.hypot(dx, dy)
+            if r < 1.0:
+                continue
+            ts = math.sqrt(r * r * r / (G * mass))
+            if ts < best:
+                best, best_i, best_r, best_xy = ts, i, r, pos
+        if best_i < 0:
+            return False
+        p0 = self._snapshot_body_position_at_local_t(snapshot, best_i, local_t - 1.0)
+        p1 = self._snapshot_body_position_at_local_t(snapshot, best_i, local_t + 1.0)
+        if p0 is None or p1 is None:
+            return False
+        rvx = vx - 0.5 * (float(p1[0]) - float(p0[0]))
+        rvy = vy - 0.5 * (float(p1[1]) - float(p0[1]))
+        eps = 0.5 * (rvx * rvx + rvy * rvy) - G * float(body_m[best_i]) / best_r
+        return eps >= 0.0
+
     def _snapshot_body_position_at_local_t(self, snapshot, index, local_t):
         if snapshot is None or index < 0:
             return None
@@ -445,6 +490,7 @@ class ComputeMixin:
                 else 0.0
             ),
             "rkn_rtol": float(self.rkn_rtol),
+            "rkn_rtol_unbound": float(getattr(self, 'rkn_rtol_unbound', 0.0) or 0.0),
             "rkn_atol_pos": float(self.rkn_atol_pos),
             "rkn_atol_vel": float(self.rkn_atol_vel),
             "rkn_safety": float(self.rkn_safety),
@@ -514,6 +560,16 @@ class ComputeMixin:
         if lead is not None:
             snapshot["lead"] = dict(lead)
             snapshot["lead_s"] = float(lead.get("lead_s", 0.0))
+            # UNTER SCHUB EIN SCHRITTBUDGET statt des vollen horizonts
+            # (Principia: `max_steps` je vorhersage). Beim zuenden auf einem
+            # transfer-horizont umrundet die gebundene bahn noch die Erde,
+            # tausende male: 1.7-2 s je auftrag, und die erste frische linie
+            # kam erst 50-150 sim-s nach der zuendung. Die linie ist unter
+            # schub dafuer kuerzer, solange sie gebunden ist; ein transfer
+            # braucht weniger schritte (Neptun 15 221).
+            budget = int(getattr(self, 'thrust_max_steps', 0) or 0)
+            if budget > 0:
+                snapshot["max_iters"] = int(min(int(snapshot["max_iters"]), budget))
         if getattr(self, "debug_moving_sources", False):
             self._debug_moving_source_snapshot(snapshot)
         return snapshot
@@ -709,6 +765,26 @@ class ComputeMixin:
                     start_px, start_py = float(end[0]), float(end[1])
                     start_vx, start_vy = float(end[3]), float(end[4])
                     start_t = float(end[2])
+
+            # UNGEBUNDEN AM START -> STRENGER. Die toleranz ist relativ zum
+            # BARYZENTRISCHEN abstand (1e-8 neben der Erde = 1.5 km je
+            # schritt). Auf einer gebundenen bahn bleibt der fehler dort, wo er
+            # entstand; auf einer abflug- oder vorbeiflughyperbel traegt die
+            # asymptote ihn ueber den ganzen restlichen horizont -- ein Neptun-
+            # transfer lag so 3529 s neben dem Ap, und weil jeder neue lauf von
+            # einem anderen punkt der hyperbel startet, WANDERTE der marker
+            # (.claude/rules/predictor.md). Die schritte dort sind wenige
+            # hundert: 1e-11 kostet den transfer +0.6 %, eine gebundene bahn
+            # dagegen das vierfache -- darum nur hier.
+            rtol_unbound = float(snapshot.get("rkn_rtol_unbound", 0.0) or 0.0)
+            if (0.0 < rtol_unbound < rtol and use_time_dependent_bodies
+                    and self._coast_start_unbound(
+                        snapshot, start_px, start_py, start_vx, start_vy,
+                        start_t)):
+                tol_scale = rtol_unbound / rtol
+                rtol *= tol_scale
+                atol_pos *= tol_scale
+                atol_vel *= tol_scale
 
             out, used, rkn_stats = _compute_distance_points_rkn_numba(
                 start_px,

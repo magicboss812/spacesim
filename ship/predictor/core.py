@@ -198,6 +198,10 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # fehler seiner anziehung bleibt unter diesem wert (m/s^2). 0 = aus.
         # Aus config gesetzt (predictor.planet_table_accel_tol).
         self.planet_table_accel_tol = 0.0
+        # rtol fuer eine gleitkurve, die UNGEBUNDEN startet (abflug,
+        # vorbeiflug); 0 = aus. Aus config (predictor.rkn_rtol_unbound),
+        # siehe _compute_from_snapshot_impl.
+        self.rkn_rtol_unbound = 0.0
         # LATENZAUSGLEICH UNTER SCHUB. Ein auftrag rechnet nicht vom
         # schiffszustand beim abschicken, sondern von dem, den das schiff
         # haben wird, wenn sein ergebnis gezeigt wird -- ueber den bekannten
@@ -207,6 +211,9 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         self.thrust_latency_compensation = True
         # Obergrenze des vorlaufs in sim-sekunden.
         self.thrust_lead_max_s = 900.0
+        # Schrittbudget eines auftrags mit schub-vorlauf (0 = voller
+        # horizont). Aus config (predictor.thrust_max_steps).
+        self.thrust_max_steps = 0
         # Groesster RK4-schritt des vorlaufs (sim-sekunden).
         self.thrust_lead_max_step_s = 2.0
         # Profil des laufenden ausfuehrer-brennvorgangs (set_thrust_plan)
@@ -214,11 +221,16 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # _handle_trajectory_branch_change), beide None ohne schub.
         self._thrust_plan = None
         self._thrust_held = None
-        # Gemessene latenz (sim-sekunden) vom abschicken bis zum einwechseln,
-        # gleitend gemittelt -- der vorlauf des naechsten auftrags.
-        self._lead_lag_ema = 0.0
-        # Sim-sekunden je wandsekunde, aus den update()-abstaenden.
+        # Gemessene latenz (WANDsekunden) vom abschicken bis zum eintreffen
+        # eines ergebnisses, gleitend gemittelt ueber ALLE eintreffenden,
+        # auch verworfene. Mal die aktuelle sim-rate ist das der vorlauf des
+        # naechsten auftrags (_expected_lead_s).
+        self._lead_lag_wall_ema = 0.0
+        # Sim-sekunden je wandsekunde: exakt von der schleife
+        # (set_sim_rate), sonst aus den update()-abstaenden geschaetzt.
+        self._sim_rate_now = 0.0
         self._sim_rate_ema = 0.0
+        self._sim_step_last = 0.0
         self._last_update_sim_t = None
         # Die ersten stuetzstellen der gezeigten linie, UNVERBRAUCHT: gegen
         # sie wird beim naechsten einwechseln gemessen, wie gut die gezeigte
@@ -614,6 +626,20 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         """
         self._thrust_plan = plan
 
+    def set_sim_rate(self, rate):
+        """Die sim-rate dieses bildes (sim-sekunden je wandsekunde).
+
+        Von der hauptschleife je bild gesetzt. Die geschaetzte `_sim_rate_ema`
+        haengt einer warp-stufe um dutzende bilder nach -- beim zuenden
+        direkt nach dem zeitraffer trug sie noch die alte stufe und machte
+        aus 0.1 s latenz 900 s vorlauf (.claude/rules/predictor.md).
+        """
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            rate = 0.0
+        self._sim_rate_now = rate if math.isfinite(rate) and rate > 0.0 else 0.0
+
     def set_reference_body_index(self, index: int | None):
         if index is None:
             new_index = None
@@ -694,6 +720,9 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
                     sim_t = float(world.time) if world is not None else None
                     last_sim_t = self._last_update_sim_t
                     if sim_t is not None and last_sim_t is not None and sim_t >= last_sim_t:
+                        # Der sim-schritt DIESES bildes, exakt: der vorlauf
+                        # wird auf ganze schritte gerundet (_expected_lead_s).
+                        self._sim_step_last = sim_t - last_sim_t
                         rate = (sim_t - last_sim_t) / (gap_ms / 1000.0)
                         prev_rate = float(self._sim_rate_ema or 0.0)
                         self._sim_rate_ema = rate if prev_rate <= 0.0 else (prev_rate * 0.9 + rate * 0.1)

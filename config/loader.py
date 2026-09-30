@@ -424,12 +424,17 @@ class ConfigLoader:
             # zur erwarteten anzeigezeit, ueber den bekannten schub voraus.
             ('thrust_latency_compensation', 'thrust_latency_compensation', bool),
             ('thrust_lead_max_s', 'thrust_lead_max_s', float),
+            # Schrittbudget je auftrag unter schub (0 = voller horizont).
+            ('thrust_max_steps', 'thrust_max_steps', int),
             # Ferne mondsysteme als ein koerper ab faktor x systemradius
             # (0 = jeder mond einzeln, wie die welt).
             ('group_far_moons_factor', 'group_far_moon_factor', float),
             # Ferne planeten aus einer kubischen tafel des laufs; ihr
             # anziehungsfehler bleibt unter diesem wert in m/s^2 (0 = aus).
             ('planet_table_accel_tol', 'planet_table_accel_tol', float),
+            # rtol fuer gleitkurven, die ungebunden starten (abflug- und
+            # vorbeiflughyperbeln); 0 = wie jede andere.
+            ('rkn_rtol_unbound', 'rkn_rtol_unbound', float),
             # anderswo ausgewertet (runtime/, ship/horizon.py)
             ('display_length_quantum_points', None, None),
             ('horizon_slider_min_mult', None, None),

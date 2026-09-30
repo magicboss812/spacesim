@@ -379,6 +379,8 @@ def _update_predictor(app):
             # (Predictor._thrust_lead_model).
             if hasattr(predictor, 'set_thrust_plan'):
                 predictor.set_thrust_plan(_executor_thrust_plan(app))
+            if hasattr(predictor, 'set_sim_rate'):
+                predictor.set_sim_rate(app.warp_rate())
             if hasattr(predictor, 'set_view_scale'):
                 # Das zoom-ZIEL einspeisen, nicht die nachlaufende skala: jede
                 # skalenaenderung loest einen synchronen neuaufbau aus, und das
