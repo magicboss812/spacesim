@@ -38,7 +38,14 @@ class JobsMixin:
         # tatsaechlich beschaeftigt sind, entscheidet _target_pipeline_depth
         # bild fuer bild aus rechenzeit/bildzeit. Leerlaufende threads kosten
         # nichts.
-        workers = self._pipeline_depth_cap()
+        #
+        # DOPPELT so viele threads wie die tiefe: gleitflug-auftraege, die beim
+        # zuenden noch rechnen, sind ab da ueberholt und zaehlen fuer die
+        # schub-auftraege nicht mit (`_async_jobs_in_flight(exclude_coast)`).
+        # Abbrechen laesst sich ein laufender kernel nicht; ohne eigene
+        # threads staenden die neuen hinter ihnen an (Saturn-transfer: 2 s
+        # je gleitflug-auftrag, erste frische linie 114 sim-s nach zuendung).
+        workers = 2 * self._pipeline_depth_cap()
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="predictor-worker")
         self._predictor_worker_threads = workers
         if self.debug:
@@ -72,22 +79,27 @@ class JobsMixin:
             self._pending_future = None
             self._pending_job_id = 0
 
-    def _async_jobs_in_flight(self):
+    def _async_jobs_in_flight(self, exclude_coast=False):
         """Wie viele auftraege rechnen gerade?
 
         `_pending_futures` enthaelt auch bereits FERTIGE futures, die nur noch
         nicht eingewechselt wurden -- die zaehlen hier nicht als "in arbeit".
+        `exclude_coast` laesst die auftraege ohne schub-vorlauf aus: unter
+        schub sind sie ueberholt (siehe _ensure_executor).
         """
         count = 0
         pending = getattr(self, "_pending_futures", None)
+        coast_ids = getattr(self, "_coast_job_ids", None) or ()
         if pending:
             for _job_id, fut in list(pending):
+                if exclude_coast and _job_id in coast_ids:
+                    continue
                 try:
                     if not fut.done():
                         count += 1
                 except Exception:
                     count += 1
-        if count == 0:
+        if count == 0 and not exclude_coast:
             pf = getattr(self, "_pending_future", None)
             if pf is not None and not any(pf is f for _j, f in (pending or [])):
                 try:
@@ -150,19 +162,54 @@ class JobsMixin:
     def _expected_lead_s(self):
         """Wie viele SIM-sekunden zwischen abschicken und einwechseln liegen.
 
-        Gemessen an den letzten einwechselungen (`_lead_lag_ema`); vor der
-        ersten die letzte rechenzeit plus ein bild, umgerechnet mit der
-        gemessenen sim-rate.
+        WANDzeit mal AKTUELLE sim-rate, beide getrennt: die latenz ist eine
+        eigenschaft der rechnung (`_lead_lag_wall_ema`, gemessen an jedem
+        eintreffenden ergebnis), die rate eine des bildes (`set_sim_rate`).
+        Vor dem ersten ergebnis gilt die letzte rechenzeit plus ein bild.
         """
-        lag = float(getattr(self, '_lead_lag_ema', 0.0) or 0.0)
-        if lag > 0.0:
-            return lag
-        rate = float(getattr(self, '_sim_rate_ema', 0.0) or 0.0)
-        compute_ms = float(getattr(self, 'last_compute_ms', 0.0) or 0.0)
-        frame_ms = float(getattr(self, '_update_interval_ms', 0.0) or 0.0)
-        if rate <= 0.0 or compute_ms <= 0.0:
+        rate = float(getattr(self, '_sim_rate_now', 0.0) or 0.0)
+        if rate <= 0.0:
+            rate = float(getattr(self, '_sim_rate_ema', 0.0) or 0.0)
+        if rate <= 0.0:
             return 0.0
-        return (compute_ms + frame_ms) / 1000.0 * rate
+        lag_wall = float(getattr(self, '_lead_lag_wall_ema', 0.0) or 0.0)
+        if lag_wall <= 0.0:
+            compute_ms = float(getattr(self, 'last_compute_ms', 0.0) or 0.0)
+            frame_ms = float(getattr(self, '_update_interval_ms', 0.0) or 0.0)
+            if compute_ms <= 0.0:
+                return 0.0
+            lag_wall = (compute_ms + frame_ms) / 1000.0
+        lead = lag_wall * rate
+        # AUF GANZE BILDSCHRITTE. Das schiff steht nur an bildgrenzen; ein
+        # vorlauf, der dazwischen endet, nimmt bis zu einen halben schritt
+        # schub zu viel oder zu wenig an -- ueber den horizont ein vielfaches
+        # davon (warp_predictor_test §9: 6.04 s statt 6.00 s vorlauf bei
+        # 3-s-schritten, 1.0e6 statt 6.5e3 m abweichung).
+        step = float(getattr(self, '_sim_step_last', 0.0) or 0.0)
+        if step > 0.0 and math.isfinite(step):
+            lead = max(1.0, round(lead / step)) * step
+        return lead
+
+    def _note_arrival_lag(self, snapshot):
+        """Latenz eines EINTREFFENDEN ergebnisses mitschreiben, egal ob es
+        danach eingewechselt oder verworfen wird.
+
+        Nur die angenommenen zu zaehlen haelt die schaetzung fest, sobald ein
+        vorlauf zu kurz ist: jedes ergebnis kommt dann zu spaet, wird
+        verworfen und korrigiert nichts (gemessen: 185 s brand ohne neue
+        linie, siehe .claude/rules/predictor.md). Im zeitraffer-halt gibt es
+        keinen schub und keinen vorlauf.
+        """
+        if snapshot is None or self._hold_active():
+            return
+        try:
+            lag = time.time() - float(snapshot.get('submit_ts', 0.0) or 0.0)
+        except Exception:
+            return
+        if not (math.isfinite(lag) and 0.0 <= lag <= 30.0):
+            return
+        prev = float(getattr(self, '_lead_lag_wall_ema', 0.0) or 0.0)
+        self._lead_lag_wall_ema = lag if prev <= 0.0 else (0.7 * prev + 0.3 * lag)
 
     def _thrust_lead_model(self, world):
         """Der schub, ueber den ein neuer auftrag VORAUSRECHNET, oder None.
@@ -329,7 +376,7 @@ class JobsMixin:
         # automatisch um eine bildzeit versetzt -- und liefern deshalb auch um
         # eine bildzeit versetzt ab, statt gebuendelt.
         depth = self._target_pipeline_depth()
-        if self._async_jobs_in_flight() < depth:
+        if self._async_jobs_in_flight(exclude_coast=True) < depth:
             try:
                 self._submit_async_compute(
                     ship, world, self._get_target_point_cap(), max_in_flight=depth,
@@ -398,18 +445,23 @@ class JobsMixin:
 
     def _submit_async_compute(self, ship, world, max_points, max_in_flight=1):
         pending = getattr(self, "_pending_futures", [])
+        lead = self._thrust_lead_model(world)
+        coast_ids = getattr(self, "_coast_job_ids", None)
+        if coast_ids is None:
+            coast_ids = self._coast_job_ids = set()
+        live_ids = {jid for jid, _f in pending}
+        coast_ids.intersection_update(live_ids)
 
         if self._single_flight and max_in_flight <= 1:
-            if len(pending) > 0:
+            if any(lead is None or jid not in coast_ids for jid, _f in pending):
                 return
-        elif self._async_jobs_in_flight() >= max_in_flight:
+        elif self._async_jobs_in_flight(exclude_coast=lead is not None) >= max_in_flight:
             # Gezaehlt wird, was RECHNET, nicht `len(pending)`: darin stehen
             # auch fertige, noch nicht eingewechselte ergebnisse, die keinen
             # worker mehr belegen.
             return
 
-        snapshot = self._make_snapshot(ship, world, max_points,
-                                       lead=self._thrust_lead_model(world))
+        snapshot = self._make_snapshot(ship, world, max_points, lead=lead)
         self._debug_integrator_mode("submit", snapshot)
 
         # ensure executor exists (lazy creation)
@@ -418,6 +470,8 @@ class JobsMixin:
 
         job_id = self._next_job_id
         fut = self._executor.submit(self._compute_from_snapshot, snapshot)
+        if lead is None:
+            coast_ids.add(job_id)
         if self.debug and not getattr(self, "_suppress_dbg_computed", False):
             try:
                 print(
@@ -537,6 +591,8 @@ class JobsMixin:
 
             if points is None:
                 return False
+
+            self._note_arrival_lag(snapshot)
 
             if snapshot is not None:
                 try:
@@ -713,18 +769,6 @@ class JobsMixin:
             self.points = points
             lead_points = int(result.get('lead_points', 0) or 0) if isinstance(result, dict) else 0
             self._remember_line_check(points, lead_points)
-            # Die latenz bis HIER (sim-sekunden) ist der vorlauf des
-            # naechsten auftrags. Nur in echtzeit: im zeitraffer ist sie
-            # tage lang und bedeutungslos, dort gibt es keinen schub.
-            try:
-                if (current_world is not None and snapshot is not None
-                        and not self._hold_active()):
-                    lag = float(current_world.time) - float(snapshot.get("sim_time", 0.0))
-                    if math.isfinite(lag) and lag >= 0.0:
-                        prev = float(getattr(self, '_lead_lag_ema', 0.0) or 0.0)
-                        self._lead_lag_ema = lag if prev <= 0.0 else (0.7 * prev + 0.3 * lag)
-            except Exception:
-                pass
             # Frisch gerechnet: die zeitspalte ist wieder exakt auf
             # `snapshot["sim_time"]` bezogen, und points[0] ist die echte
             # stuetzstelle des laufs, kein selbst vorangestellter kopf.

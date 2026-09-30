@@ -888,6 +888,11 @@ anchoring, `points[0]` is the ship's position at `world.time`.**
 > paced at 180 fps because the async pipeline runs on wall time.
 > `--snapshots-after` / `--dump-snapshots` save the game's snapshots at given
 > sim-seconds after burnout, for kernel comparisons on identical input.
+> `--coast-frames N` adds N real-time coast frames tracking every marker
+> (spread of r / t, label changes); `--no-warp` skips the warp to the Ap;
+> the report carries `burn_samples` (per-sample deviation, line age, Erde
+> energy), `burn_swaps` (every accept/reject with its lead) and
+> `burn_trace` (per frame: jobs in flight, lag, lead).
 >
 > **A bound orbit on a long horizon costs per revolution.** The horizon is an
 > arc in the barycentric frame, so anything near Erde covers it at ~30 km/s:
@@ -913,6 +918,21 @@ anchoring, `points[0]` is the ship's position at `world.time`.**
 > 120 000 → 1e6 s on top would cut the transfers to 362 / 1 935 steps at
 > +5 % Ap error against rtol alone and breaks §20's far-field counter-check:
 > measured, not done.
+>
+> **The same spread is the marker drift in real-time coasting.** Each swap
+> re-integrates from a new point of the departure hyperbola, so the error
+> above is re-sampled every ~0.25 s: Neptun, from world states 0.3 … 1900 s
+> after burnout, Ap time spread 1110 s and Pe time 2218 s at rtol 1e-8,
+> 3529 s off a tight reference. It is NOT the step grid (ceiling steps put on
+> an absolute time grid: spread unchanged) and not the ceiling (20 000 s:
+> unchanged); rtol 1e-11 alone gives 12 s / 25 s, 32 s off, for **+0.6 %**
+> steps (Saturn +3 %), because only the few hundred departure steps are
+> tolerance-limited; the rest sit at the ceiling. In bound orbits 1e-11 costs
+> 4× (LEO 1× 2989 → 11920 steps). Hence `predictor.rkn_rtol_unbound` 1e-11:
+> `_compute_from_snapshot_impl` uses it (rtol and both atol scaled) when the
+> coast STARTS unbound against the body with the smallest Kepler timescale
+> (`_coast_start_unbound`). A job that starts bound and meets a flyby later
+> is not covered; that needs a per-step form in the kernel.
 
 > **Body placement: place once, sum once, and no array-passing calls in the
 > hot path.** `_compute_acc_time_numba` first places every source for its
@@ -970,8 +990,28 @@ anchoring, `points[0]` is the ship's position at `world.time`.**
 > burnout included) or the held manual input (the detector's
 > gravity-subtracted residual per step, plus its turn rate between two
 > frames, so a prograde hold is followed). The lead is the measured
-> submit → swap latency in sim seconds (`_lead_lag_ema`, capped by
-> `thrust_lead_max_s`). The worker runs `burn.py::_thrust_lead_numba` (RK4,
+> submit → arrival latency in WALL seconds (`_lead_lag_wall_ema`, from
+> EVERY arriving result, rejected ones included) times the CURRENT warp rate
+> the loop hands over (`set_sim_rate`), rounded to whole sim steps of a frame
+> (`_sim_step_last`: the ship exists only at frame boundaries; 6.04 s instead
+> of 6.00 s at 3 s steps is 1.0e6 instead of 6.5e3 m in §9) and capped by
+> `thrust_lead_max_s`. Both halves are load-bearing. The old estimate was sim-second lag of ACCEPTED
+> swaps, with `_sim_rate_ema` as the fallback: at ignition straight after a
+> warp the EMA still carried the warp rate, so the first jobs got the 900 s
+> cap as lead (the shown line assumed the whole rest of the burn), and once
+> that exact line was up, every later line arrived after its shorter lead,
+> was rejected as worse, and never corrected the EMA: **185 s of burn
+> without a new line**, burn deviation p95 1838 px (node) / 2514 px
+> (manual), Saturn bench. After: 172 / 32 px, 0 rejections.
+> Under a lead the job also gets a step budget (`predictor.thrust_max_steps`,
+> 20 000; Principia caps every prediction at `max_steps` the same way): at a
+> transfer horizon the still-bound orbit costs 1.7–2 s per job, and the line
+> is shorter under thrust instead. And coast jobs still running at ignition
+> do not count against the thrust pipeline depth (`_coast_job_ids`,
+> `_async_jobs_in_flight(exclude_coast=True)`; the pool has 2 × depth
+> threads, a running kernel cannot be cancelled). With the three fixes the
+> first fresh line comes 9–12 s after ignition (was 114–190 s) and the
+> Saturn burn deviation p95 is 50–75 / 29–40 px (two runs). The worker runs `burn.py::_thrust_lead_numba` (RK4,
 > step ≤ `thrust_lead_max_step_s`, cut at the profile's kinks), then the
 > coast kernel from its end. The thrust arc (thinned to ≤ 16 segments) is
 > part of the line, so `_anchor_first_point` consumes it like everything

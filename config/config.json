@@ -82,8 +82,10 @@
     "swap_backlog_max": 1,
     "thrust_latency_compensation": true,
     "thrust_lead_max_s": 900.0,
+    "thrust_max_steps": 20000,
     "group_far_moons_factor": 300.0,
-    "planet_table_accel_tol": 1e-15
+    "planet_table_accel_tol": 1e-15,
+    "rkn_rtol_unbound": 1e-11
   },
   "maneuver": {
     "enabled": true,

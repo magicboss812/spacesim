@@ -67,6 +67,15 @@ parser.add_argument('--snapshots-after', default=None,
                          'moment, von dem aus gerechnet wird.')
 parser.add_argument('--dump-snapshots', default=None,
                     help='pickle-datei fuer die schnappschuss-reihe')
+parser.add_argument('--coast-frames', type=int, default=0,
+                    help='nach dem einrasten so viele bilder gleitflug in '
+                         'echtzeit und dabei JEDEN Ap/Pe-marker je bild '
+                         'mitschreiben (zittern ohne schub und ohne warp)')
+parser.add_argument('--rtol', type=float, default=None,
+                    help='rkn_rtol des predictors ueberschreiben')
+parser.add_argument('--no-warp', action='store_true',
+                    help='ohne den zeitraffer bis zum Ap (nur brand und '
+                         'einrasten messen)')
 args = parser.parse_args()
 
 W, H = 1280, 800
@@ -112,6 +121,21 @@ app = build_app(load_config())
 world = app.world
 ship = app.ship
 pred = app.predictor
+
+# Jede ein- oder abgewiesene einwechselung mitschreiben (der predictor loggt
+# sie selbst nur mit `debug`): (sim-zeit, angenommen, grund, vorlauf des
+# ergebnisses). Damit laesst sich einer abweichung ihre ursache zuordnen.
+swap_log = []
+_orig_log_snapshot_result = pred._log_snapshot_result
+
+
+def _record_snapshot_result(accepted, reason, snapshot, *a, **kw):
+    lead_s = 0.0 if snapshot is None else float(snapshot.get('lead_s', 0.0) or 0.0)
+    swap_log.append((float(world.time), bool(accepted), str(reason), lead_s))
+    return _orig_log_snapshot_result(accepted, reason, snapshot, *a, **kw)
+
+
+pred._log_snapshot_result = _record_snapshot_result
 bodies = {b.name.lower(): b for b in world.body}
 sonne = bodies['sonne']
 erde = bodies['erde']
@@ -235,10 +259,11 @@ def reference_line(snapshot):
     return pts, pick_ap(rp.get_apsis_markers())
 
 
-def line_deviation(drawn, ref_pts):
+def line_deviation(drawn, ref_pts, where=False):
     """Groesste abweichung der gezeichneten punkte von der referenz bei
-    GLEICHER zeit, in metern."""
+    GLEICHER zeit, in metern (mit `where` auch die zeit dieses punkts)."""
     worst = 0.0
+    t_worst = None
     for x, y, t in drawn:
         s = state_on_curve(ref_pts, t)
         if s is None:
@@ -246,7 +271,17 @@ def line_deviation(drawn, ref_pts):
         d = math.hypot(x - s[0], y - s[1])
         if d > worst:
             worst = d
-    return worst
+            t_worst = t
+    return (worst, t_worst) if where else worst
+
+
+def eps_rel(b):
+    """Spezifische bahnenergie des schiffs relativ zu `b` (J/kg); >0 heisst
+    ungebunden."""
+    bx, by, bvx, bvy = body_state_at(b, world.time)
+    r = math.hypot(ship.position.x - bx, ship.position.y - by)
+    v = math.hypot(ship.velocity.x - bvx, ship.velocity.y - bvy)
+    return 0.5 * v * v - world.G * b.mass / r
 
 
 def subsample(pts, n=400):
@@ -354,6 +389,8 @@ def main():
               'r_soi_m': r_soi, 'target_a_m': target_a,
               'cpu_count': os.cpu_count()}
 
+    if args.rtol is not None:
+        pred.rkn_rtol = float(args.rtol)
     # Einschwingen in echtzeit: die linie steht, die JITs sind warm.
     set_warp(app.realtime_warp_max)
     for _ in range(120):
@@ -403,10 +440,11 @@ def main():
         manual_frames = int(round((dv / app.maneuver_executor.a_max_sim())
                                   / sim_step_rt))
     burn = {'frames': 0, 'fresh': 0, 'age_sim_s': [], 'pred_ms': [],
-            'depth': [], 'compute_ms': []}
+            'depth': [], 'compute_ms': [], 'trace': []}
     samples = []
     last_burn_ap = None
     t_burn0 = world.time
+    burn_submitted0 = pred._jobs_submitted
     i = 0
     while True:
         if args.mode == 'node':
@@ -427,6 +465,12 @@ def main():
         burn['pred_ms'].append(info['pred_ms'])
         burn['depth'].append(int(getattr(pred, '_pipeline_depth_used', 1)))
         burn['compute_ms'].append(float(pred.last_compute_ms))
+        burn['trace'].append((world.time - t_burn0,
+                              int(pred._async_jobs_in_flight()),
+                              int(pred._async_jobs_in_flight(exclude_coast=True)),
+                              int(pred._jobs_submitted), int(pred._jobs_swapped),
+                              float(getattr(pred, '_lead_lag_wall_ema', 0.0) or 0.0),
+                              float(pred._expected_lead_s())))
         if i % max(1, args.ref_every) == 0:
             pts = pred.get_points()
             if pts is not None and len(pts) > 2:
@@ -436,6 +480,8 @@ def main():
                         ship, world, pred._get_target_point_cap()),
                     'drawn': subsample(pts),
                     'ap': pick_ap(info['markers']),
+                    'age_sim_s': (None if st is None else world.time - st),
+                    'eps_erde': eps_rel(erde),
                 })
     t_burnout = world.time
     print(f"BRENNSCHLUSS nach {burn['frames']} bildern, "
@@ -482,6 +528,8 @@ def main():
                 'drawn': subsample(pts),
                 'ap': ap,
             })
+    if args.coast_frames > 0:
+        report['coast'] = coast_markers(args.coast_frames)
     final_snapshot = pred._make_snapshot(ship, world, pred._get_target_point_cap())
     if args.dump_snapshot:
         import pickle
@@ -521,7 +569,7 @@ def main():
         refs = list(pool.map(lambda smp: reference_line(smp['snapshot']),
                              samples))
     for s, (ref_pts, ref_ap) in zip(samples, refs):
-        d = line_deviation(s['drawn'], ref_pts)
+        d, s['t_worst'] = line_deviation(s['drawn'], ref_pts, where=True)
         s['dev_m'] = d
         s['dev_full_px'] = d * zoom_full
         if s['ap'] is not None and ref_ap is not None:
@@ -531,6 +579,28 @@ def main():
             s['dev_ap_soi_px'] = None
     burn_s = [s for s in samples if s['phase'] == 'burn']
     settle_s = [s for s in samples if s['phase'] == 'settle']
+    # Je probe: wann im brand, wie alt die gezeigte linie, wie weit voraus
+    # der schlimmste punkt liegt und ob das schiff an der Erde noch gebunden
+    # ist -- damit sich ein p95 einer ursache zuordnen laesst.
+    burn_log = [e for e in swap_log if t_burn0 <= e[0] <= t_burnout]
+    reasons = collections.Counter(
+        ('ok' if e[1] else 'rej') + ':' + e[2] for e in burn_log)
+    report['burn_swaps'] = {
+        'reasons': dict(reasons),
+        'submitted': int(pred._jobs_submitted - burn_submitted0),
+        'log': [{'t_rel': e[0] - t_burn0, 'ok': e[1], 'reason': e[2],
+                 'lead_s': e[3]} for e in burn_log],
+    }
+    report['burn_trace'] = [
+        {'t_rel': t, 'in_flight': f, 'in_flight_lead': fl, 'submitted': a,
+         'swapped': b, 'lag_ema': lg, 'lead': ld}
+        for t, f, fl, a, b, lg, ld in burn['trace']]
+    report['burn_samples'] = [
+        {'t_rel': s['t'] - t_burn0, 'dev_full_px': s['dev_full_px'],
+         'dev_m': s['dev_m'], 'age_sim_s': s.get('age_sim_s'),
+         'worst_ahead_s': (None if s['t_worst'] is None
+                           else s['t_worst'] - s['t']),
+         'eps_erde': s.get('eps_erde')} for s in burn_s]
 
     def _stats(vals):
         vals = [v for v in vals if v is not None]
@@ -609,7 +679,7 @@ def main():
     prev_state = (world.time, ship.position.x, ship.position.y,
                   ship.velocity.x, ship.velocity.y)
     extremum = None
-    t_limit = ap0[2] + 0.5 * (ap0[2] - t_burnout)
+    t_limit = world.time if args.no_warp else ap0[2] + 0.5 * (ap0[2] - t_burnout)
     warp_steps_used = collections.Counter()
     while world.time < t_limit:
         rate = highest_step(float('inf'))
@@ -676,6 +746,64 @@ def main():
     print(json.dumps({k: report[k] for k in ('compute', 'burn', 'settle',
                                              'ap_error', 'warp')
                       if k in report}, indent=1, default=float))
+
+
+def coast_markers(n_frames):
+    """Gleitflug in echtzeit: wie weit wandert jeder marker, obwohl die bahn
+    stillsteht?
+
+    Ein marker wird ueber die bilder an seiner ZEIT wiedererkannt (art gleich,
+    zeit innerhalb 2 % der restflugzeit). Gemeldet je marker: spannweite von
+    abstand r und zeit t, spannweite der lage in px bei `soi`-zoom, wie oft
+    sich der angezeigte wert (HUD-rundung) geaendert hat, und zum vergleich
+    die zahl der einwechselungen in derselben zeit.
+    """
+    tracks = []
+    swaps = 0
+    t0 = world.time
+    for _ in range(n_frames):
+        info = frame()
+        swaps += 1 if info['swapped'] else 0
+        ms = info['markers']
+        if ms is None:
+            continue
+        for m in ms:
+            kind, t_abs, r = int(round(m[3])), float(m[2]), float(m[4])
+            if t_abs <= world.time:
+                continue
+            tr = None
+            for cand in tracks:
+                if cand['kind'] == kind and abs(cand['t'][-1] - t_abs) <= \
+                        0.02 * max(t_abs - world.time, 1.0):
+                    tr = cand
+                    break
+            if tr is None:
+                tr = {'kind': kind, 't': [], 'r': [], 'x': [], 'y': [],
+                      'label': []}
+                tracks.append(tr)
+            tr['t'].append(t_abs)
+            tr['r'].append(r)
+            tr['x'].append(float(m[0]))
+            tr['y'].append(float(m[1]))
+            tr['label'].append(units.distance(r))
+    out = {'frames': n_frames, 'sim_s': world.time - t0, 'swaps': swaps,
+           'markers': []}
+    for tr in tracks:
+        if len(tr['t']) < max(3, n_frames // 2):
+            continue
+        x, y = np.asarray(tr['x']), np.asarray(tr['y'])
+        changes = sum(1 for a, b in zip(tr['label'], tr['label'][1:]) if a != b)
+        out['markers'].append({
+            'kind': 'Ap' if tr['kind'] == 1 else 'Pe',
+            'eta_s': tr['t'][0] - t0, 'r_m': float(np.median(tr['r'])),
+            'r_span_m': float(max(tr['r']) - min(tr['r'])),
+            't_span_s': float(max(tr['t']) - min(tr['t'])),
+            'pos_span_soi_px': float(math.hypot(x.max() - x.min(),
+                                                y.max() - y.min()) * ZOOM_SOI),
+            'label_changes': changes, 'labels': sorted(set(tr['label'])),
+            'frames': len(tr['t']),
+        })
+    return out
 
 
 def find_extremum(s0, s1):
