@@ -88,6 +88,12 @@ paths:
 > directly. Result **0.000e+00 m** residual in every failing case, planets
 > untouched (Neptun 0.29 ms before and after).
 >
+> `to_this_frame_xy_arrays_exact` (2026-09-29) runs the same exact batch for
+> a caller that draws while NO window is set — the scalar path is exact then,
+> and `to_this_frame_xy_arrays` returns None. The maneuver line is that
+> caller (`.claude/rules/maneuver.md`); it sets `q = 0` and
+> `_origin_exact_batch` for the one call and restores both.
+>
 > **The exact batch must not reconcile against `_position_cache`.** That loop
 > exists for the knot grid, where the same ~260 times are asked for again by
 > both paths and across frames. Point times are 4000 different ones every

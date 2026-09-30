@@ -25,33 +25,48 @@ paths:
 > 2026-08-18 on the 28-body system: **25.5 us per substep against 1014 us**)
 > while `tests/warp_predictor_test.py` asserts `|Δpos| = |Δvel| = 0.0` against
 > the Python path and `tests/energy_test.py` stays on `4.2571e-07` /
-> `4.2230e-10`. Two traps. **`_body_pos_at_time` must stay word-for-word
-> `bodies.kepler_relative_xy`** — since 2026-08-27 world and predictor share
-> the *same* Kepler model, and this kernel is the world's copy of it. (Until
-> then this paragraph said the opposite: "do not reuse the predictor's
-> kernels, they solve Kepler while `bodies.position_at_time` uses a
-> constant-angular-rate approximation." That difference *was* the bug — see
-> the body-model note in `.claude/rules/orbit-lines.md`.) Change one, change
-> the other; §2 measures the bit-identity and catches it immediately. And
-> **keep the sum in body order** (float addition is not associative; a
-> different order changes the energy drift).
+> `4.2230e-10`. Three traps. **`_kepler_constants` + `_link_rel` must stay
+> word-for-word `bodies.kepler_relative_xy`** (split into the
+> time-independent part, computed once per `advance_dynamics`, and the
+> per-time part) — since 2026-08-27 world and predictor share the *same*
+> Kepler model, and this kernel is the world's copy of it. (Until then this
+> paragraph said the opposite: "do not reuse the predictor's kernels, they
+> solve Kepler while `bodies.position_at_time` uses a constant-angular-rate
+> approximation." That difference *was* the bug — see the body-model note in
+> `.claude/rules/orbit-lines.md`.) Change one, change the other; §2 measures
+> the bit-identity and catches it immediately. **Keep the sum in body order**
+> (float addition is not associative; a different order changes the energy
+> drift). And **a parent chain is summed from the TOP**, `rel0 + (rel1 +
+> root)`, because that is what `position_at_time`'s recursion does — the old
+> kernel summed from the bottom and only agreed because chains are two links
+> deep and Sonne sits at (0, 0).
 
 > **Per-substep cost is linear in the number of gravity sources — so old
 > measurements do not survive a bigger system file.** This paragraph used to
 > quote 336 steps at 47.4 ms Python / 0.88 ms kernel. Those were taken when
 > `solar_system.json` held **4** bodies; it now holds **28**, and re-measuring
 > gave figures **7x larger** across the board — exactly the body-count ratio.
-> `_body_pos_at_time` (`physics/world_kernels.py:63`) is called once per body per
-> acceleration evaluation, and there are 12 evaluations per substep
-> (step-doubling = 3 RKN4 steps x 4 stages), i.e. **324 body placements per
-> substep**, each a Kepler-ish solve with ~7 transcendentals. Any timing claim
-> here must name the body count it was taken at.
+> `_body_pos_at_time` (`physics/world_kernels.py`) is called once per body per
+> acceleration evaluation, and there were 12 evaluations per substep
+> (step-doubling = 3 RKN4 steps x 4 stages; 9 since `k3 = k2`), i.e. **324
+> body placements per substep** before the memo below, each a Kepler-ish solve
+> with ~7 transcendentals. Any timing claim here must name the body count it
+> was taken at.
 >
-> That also means the predictor's `body_memo` win (61.7 -> 17.0 ms, documented
-> below) has a **direct unclaimed analogue here**: the same three redundancies
-> are present — the same body at the same time re-asked across the 12
-> evaluations (only 5 distinct times), every moon re-solving its parent, and
-> the time-independent orbit constants recomputed on every call.
+> **The world kernel has its own body memo now (2026-09-29)** — the analogue
+> of the predictor's `body_memo`, for the same three redundancies: the same
+> body at the same time re-asked across the evaluations (9 per step-doubled
+> substep, 5 distinct times), every moon re-solving its planet, and the
+> time-independent Kepler constants redone on every call. `advance_dynamics`
+> allocates `memo` (`[t, x, y, valid]` per body — a valid column, never a NaN
+> sentinel) and `kc` once per call; `_body_pos_at_time` climbs to the first
+> known ancestor and descends, storing each link. **A body whose chain hangs
+> on a FREE body is never memoised** (`memo_ok = 0`): free bodies' `bx` moves
+> on every accepted substep. Bit-identity: the final state hash of 210 mixed
+> steps (1 s … 5000 s, warp ceilings on and off) equals the old tree's, for
+> the kernel and the Python reference alike, and §2 stays at `0.000e+00`.
+> `world.step` at 1 d/s (1280×800 bench, 28 bodies): **9.4 → 4.8 ms median**,
+> frame 45.1 → 38.3 ms.
 
 > **Time warp is bounded by TWO ceilings and one physical limit.** Added
 > 2026-08-18 to make interplanetary transfers reachable (a Hohmann
@@ -236,16 +251,14 @@ paths:
 > is pure waste — collapsing it to the classical 3-stage form cuts it
 > bit-identically.
 >
-> **Done in the predictor (2026-08-30), still open in the world.**
-> `predictor._rkn4_step_time_numba` and `_rkn4_step_numba` now read `k3 = k2`
+> **Done in the predictor (2026-08-30) and in the world (2026-09-29).**
+> `predictor._rkn4_step_time_numba` and `_rkn4_step_numba` read `k3 = k2`
 > instead of re-evaluating. Bit-identical across all nine measurement cases in
-> `tests/warp_predictor_test.py` §24 (same step count, 0.000e+00 deviation).
-> **But it is worth 1.02x–1.15x there, not the ~25 % this note promises, and
-> the reason is `body_memo`**: k3 ran at the *same time* as k2, so every body
-> hit the memo and only the 28 lookups plus the force sum were ever paid — the
-> Kepler solves were already saved. The **world kernel has no memo**, so the
-> full ~25 % is still on the table in `physics/world_kernels.py:147` / `physics/world.py`, and
-> that is where this note's figure still applies.
+> `tests/warp_predictor_test.py` §24 (same step count, 0.000e+00 deviation);
+> worth only 1.02x–1.15x there, because `body_memo` already served k3 from k2's
+> placements. `world_kernels._rkn4_step` and `world._rkn4_step_body_state` do
+> the same (`a3 = a2`): alone it took a mixed 210-step schedule 660 → 577 ms,
+> same final state hash.
 
 ## The body model (`bodies/body.py`, `physics/vec.py`)
 
@@ -253,8 +266,17 @@ paths:
   plus **`kepler_relative_xy()` — the one scripted-orbit model in the
   project**. `orbit_position` (used by `world.update_planets`) and
   `position_at_time` (used by the integrator's force loops) both go through
-  it, and `world_kernels._body_pos_at_time` is its word-for-word numba twin.
+  it, and `world_kernels._kepler_constants` + `_link_rel` are its word-for-word
+  numba twin (`_body_pos_at_time` walks the parent chain through them). The
+  predictor's twin is `physics/kernels/kepler.py::_kepler_rel_consts` (scalar
+  arguments only, see `.claude/rules/predictor.md` → "Body placement"); the
+  same word-for-word rule holds for it.
   Exact Kepler, so propagating in one step or in a hundred gives the same
   answer — which is what stops the time-warp chunking moving the planets.
   See the body-model note in `.claude/rules/orbit-lines.md`.
+  `world.acceleration_at` stays pure Python (it is the reference integrator's
+  force); `world.acceleration_at_fast` is the same sum through the kernel
+  (`world_kernels.acceleration_at_once`) for callers outside the integrator —
+  the predictor's thrust detector, 0.144 → 0.028 ms per call, 2000/2000
+  random (position, time, target) cases bit-identical.
 - `physics/vec.py` — `Vec2` with `__slots__`. Also exports `G = 6.6730831e-11`.

@@ -173,18 +173,14 @@ if r0 is not None:
 
     flown = math.hypot(ship.position.x - start.x, ship.position.y - start.y)
     spread = max(radii) - min(radii)
-    # DIE SCHRANKE IST NICHT NULL, UND DAS HAT EINEN BENANNTEN GRUND.
-    #
-    # Die verbliebenen stuetzstellen stehen bit-genau still, der scan selbst
-    # aber nicht ganz: er loest den teuren Kepler-solve fuer den referenz-
-    # koerper nur an jedem n-ten punkt und interpoliert dazwischen linear
-    # ueber die zeit (siehe `stride_max` / `time_window` in
-    # _find_apsis_markers_numba). Diese knoten haengen am INDEX, und der
-    # verschiebt sich um die vorn verbrauchten punkte -- die interpolierte
-    # Mond-position wackelt damit um den dort veranschlagten betrag
-    # ("erde/mond: zehner meter"). Gemessen 1.0e+01 m, also genau in dieser
-    # groessenordnung und rund fuenf zehnerpotenzen unter dem fehler, um den
-    # es hier geht (gemeldet 500 gegen 510 km).
+    # Die verbliebenen stuetzstellen stehen bit-genau still, und seit
+    # 2026-09-30 auch der scan: er stellt den referenzkoerper aus knoten auf
+    # einem festen ZEITgitter auf (`_apsis_d2_numba`), nicht mehr aus
+    # knoten an jedem n-ten INDEX -- die verschoben sich mit jedem vorn
+    # verbrauchten punkt, und die interpolierte Mond-position wackelte um
+    # gemessen 1.0e+01 m. Jetzt gemessen 0.000e+00 m; die schranke bleibt
+    # grosszuegig, weil es hier um den fehler von 10 km geht (gemeldet 500
+    # gegen 510 km), nicht um das letzte bit.
     check(spread < 100.0, "der gemeldete Pe-abstand bewegt sich nicht",
           f"streuung {spread:.3e} m ueber {len(radii)} frames "
           f"(schiff flog {flown:.3e} m)")

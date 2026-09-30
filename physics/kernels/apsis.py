@@ -13,7 +13,52 @@ import math
 import numpy as np
 from numba import njit
 
-from physics.kernels.kepler import _body_position_at_time_numba
+from physics.kernels.kepler import (_body_kepler_constants_numba,
+                                    _body_position_at_time_numba)
+
+
+#: Hoechstens so viel (m) darf der kubisch interpolierte ort des
+#: bezugskoerpers vom exakten abweichen (siehe `_ref_grid_step_numba`).
+REF_GRID_TOL_M = 1.0
+
+#: Unter dieser gitterweite (s) -- die inneren monde von Jupiter -- lohnt das
+#: gitter nicht mehr, dann wird je punkt exakt gerechnet.
+REF_GRID_MIN_STEP_S = 1000.0
+
+
+@njit(cache=True, nogil=True, fastmath=True)
+def _ref_grid_step_numba(ref_index, body_m, body_scripted, body_a, body_e,
+                         body_theta, body_arg, body_parent, G, tol):
+    """Gitterweite (s) fuer den bezugskoerper, oder 0.0 = er steht fest.
+
+    Der ort wird aus knoten auf einem FESTEN zeitgitter (`k * h`, lokal)
+    kubisch interpoliert. Lagrange-kubik liegt hoechstens
+    `(9/16)/24 * F * a(1+e) * (n h)^4` daneben (`F = (1+e)/(1-e)^5` fuer das
+    perihel); `h` ist so gewaehlt, dass das fuer JEDES glied der elternkette
+    unter `tol` bleibt. Weil das gitter an der zeit haengt und nicht an den
+    punkt-indizes, liefert jeder scan fuer denselben zeitpunkt denselben ort
+    -- egal, wie viele punkte vorn verbraucht wurden.
+    """
+    n = body_m.shape[0]
+    h = 0.0
+    cur = ref_index
+    depth = 0
+    while cur >= 0 and cur < n and depth < n:
+        parent = body_parent[cur]
+        if body_scripted[cur] == 0 or body_a[cur] <= 0.0 or parent < 0 or parent >= n:
+            break
+        m0, mm, s1e2, ca, sa, ok = _body_kepler_constants_numba(
+            cur, body_m, body_a, body_e, body_theta, body_arg, body_parent, G)
+        if ok == 0 or mm <= 0.0:
+            return -1.0
+        e = body_e[cur]
+        amp = 0.0234375 * (1.0 + e) / ((1.0 - e) ** 5) * body_a[cur] * (1.0 + e)
+        h_link = (tol / amp) ** 0.25 / mm
+        if h == 0.0 or h_link < h:
+            h = h_link
+        depth += 1
+        cur = parent
+    return h
 
 
 @njit(cache=True, nogil=True, fastmath=True)
@@ -106,6 +151,110 @@ def _refine_apsis_numba(pts, d2_arr, idx, use_tangents):
 
 
 @njit(cache=True, nogil=True, fastmath=True)
+def _apsis_d2_numba(
+    pts,
+    base_sim_time,
+    ref_index,
+    body_x,
+    body_y,
+    body_m,
+    body_scripted,
+    body_a,
+    body_e,
+    body_theta,
+    body_arg,
+    body_parent,
+    G,
+    use_time_dependent_bodies,
+):
+    """Quadrat-abstand jedes punktes zum bezugskoerper (pass 1 des scans).
+
+    JEDER WERT HAENGT NUR AN SEINEM PUNKT (ort und zeit), nicht an seinem
+    index: das zeitgitter der knoten ist fest. Deshalb darf der worker ihn
+    fuer seine kurve vorausrechnen und der hauptthread ihn nach dem
+    verbrauchen einfach weiterverwenden (siehe
+    ViewMixin.get_apsis_markers) -- es kommt dieselbe zahl heraus.
+    """
+    n = pts.shape[0]
+    d2_arr = np.empty(n, dtype=np.float64)
+    # Lokal angelegt, NICHT als modul-konstante: siehe _no_body_memo().
+    empty_memo = np.zeros((0, 10), dtype=np.float64)
+    # Pass 1: der ort des bezugskoerpers zu jeder punktzeit. Ein FESTER
+    # koerper (die Sonne) braucht keine aufstellung. Sonst kommt er aus
+    # knoten auf einem festen zeitgitter, kubisch interpoliert (hoechstens
+    # REF_GRID_TOL_M daneben, siehe _ref_grid_step_numba) -- ein kepler-
+    # aufruf je knoten statt je punkt. Frueher war es einer je 240 s
+    # linear: auf einer langen linie (punkte ~2000 s auseinander) ein aufruf
+    # JE PUNKT, 6.7 ms je scan bei 40 000 punkten, auf dem hauptthread und
+    # bei jeder neuen linie. Schnelle monde (gitter unter
+    # REF_GRID_MIN_STEP_S) werden je punkt exakt gerechnet -- die wahl haengt
+    # nur am koerper, nie an der punktreihe, damit jeder punkt denselben
+    # wert bekommt, gleich in welcher reihe er steht.
+    h = 0.0
+    if use_time_dependent_bodies != 0:
+        h = _ref_grid_step_numba(ref_index, body_m, body_scripted, body_a,
+                                 body_e, body_theta, body_arg, body_parent,
+                                 G, REF_GRID_TOL_M)
+    if h == 0.0:
+        rx = body_x[ref_index]
+        ry = body_y[ref_index]
+        for i in range(n):
+            dx = pts[i, 0] - rx
+            dy = pts[i, 1] - ry
+            d2_arr[i] = dx * dx + dy * dy
+    elif h < REF_GRID_MIN_STEP_S:
+        for i in range(n):
+            rx, ry = _body_position_at_time_numba(
+                ref_index, pts[i, 2] - base_sim_time,
+                body_x, body_y, body_m, body_scripted,
+                body_a, body_e, body_theta, body_arg, body_parent, G,
+                empty_memo,
+            )
+            dx = pts[i, 0] - rx
+            dy = pts[i, 1] - ry
+            d2_arr[i] = dx * dx + dy * dy
+    else:
+        inv_h = 1.0 / h
+        knot_k = np.full(8, -9223372036854775807, dtype=np.int64)
+        knot_x = np.zeros(8, dtype=np.float64)
+        knot_y = np.zeros(8, dtype=np.float64)
+        for i in range(n):
+            u = (pts[i, 2] - base_sim_time) * inv_h
+            k = int(math.floor(u))
+            s = u - k
+            rx = 0.0
+            ry = 0.0
+            for j in range(4):
+                kj = k - 1 + j
+                slot = kj & 7
+                if knot_k[slot] != kj:
+                    kx, ky = _body_position_at_time_numba(
+                        ref_index, float(kj) * h,
+                        body_x, body_y, body_m, body_scripted,
+                        body_a, body_e, body_theta, body_arg, body_parent, G,
+                        empty_memo,
+                    )
+                    knot_k[slot] = kj
+                    knot_x[slot] = kx
+                    knot_y[slot] = ky
+                if j == 0:
+                    w = -s * (s - 1.0) * (s - 2.0) / 6.0
+                elif j == 1:
+                    w = (s + 1.0) * (s - 1.0) * (s - 2.0) / 2.0
+                elif j == 2:
+                    w = -(s + 1.0) * s * (s - 2.0) / 2.0
+                else:
+                    w = (s + 1.0) * s * (s - 1.0) / 6.0
+                rx += w * knot_x[slot]
+                ry += w * knot_y[slot]
+            dx = pts[i, 0] - rx
+            dy = pts[i, 1] - ry
+            d2_arr[i] = dx * dx + dy * dy
+
+    return d2_arr
+
+
+@njit(cache=True, nogil=True, fastmath=True)
 def _find_apsis_markers_numba(
     pts,
     base_sim_time,
@@ -124,6 +273,7 @@ def _find_apsis_markers_numba(
     max_markers,
     skip_head,
     use_tangents,
+    d2_pre,
 ):
     # sucht lokale extrema des abstands schiff<->referenzkörper entlang der
     # predictor-punkte (pts: x, y, absolute sim-zeit[, vx, vy]). der
@@ -137,61 +287,14 @@ def _find_apsis_markers_numba(
     if n < 3 or ref_index < 0 or ref_index >= body_x.shape[0]:
         return out, count
 
-    # pass 1: quadrat-abstand zum referenzkörper pro punkt. der teure
-    # kepler-solve (scripted refs) läuft nur an stützstellen, dazwischen
-    # wird die ref-position linear über die zeit interpoliert: fehler
-    # ~0.5*a_ref*(window/2)^2 (erde/mond: zehner meter), weit unter dem
-    # punktabstand und der integrator-toleranz — die extremum-wahl
-    # zwischen nachbarpunkten bleibt davon unberührt.
-    d2_arr = np.empty(n, dtype=np.float64)
-    # Lokal angelegt, NICHT als modul-konstante: siehe _no_body_memo().
-    empty_memo = np.zeros((0, 10), dtype=np.float64)
-    if use_time_dependent_bodies != 0:
-        stride_max = 64
-        time_window = 240.0
-        ia = 0
-        rax, ray = _body_position_at_time_numba(
-            ref_index, pts[0, 2] - base_sim_time,
-            body_x, body_y, body_m, body_scripted,
-            body_a, body_e, body_theta, body_arg, body_parent, G,
-            empty_memo,
-        )
-        while ia < n - 1:
-            ib = ia + stride_max
-            if ib > n - 1:
-                ib = n - 1
-            # zeitfenster einhalten (punktzeiten sind monoton)
-            while ib > ia + 1 and pts[ib, 2] - pts[ia, 2] > time_window:
-                ib = ia + (ib - ia) // 2
-            rbx, rby = _body_position_at_time_numba(
-                ref_index, pts[ib, 2] - base_sim_time,
-                body_x, body_y, body_m, body_scripted,
-                body_a, body_e, body_theta, body_arg, body_parent, G,
-                empty_memo,
-            )
-            ta = pts[ia, 2]
-            span = pts[ib, 2] - ta
-            inv_span = 1.0 / span if span > 0.0 else 0.0
-            for i in range(ia, ib):
-                s = (pts[i, 2] - ta) * inv_span
-                rx = rax + (rbx - rax) * s
-                ry = ray + (rby - ray) * s
-                dx = pts[i, 0] - rx
-                dy = pts[i, 1] - ry
-                d2_arr[i] = dx * dx + dy * dy
-            ia = ib
-            rax = rbx
-            ray = rby
-        dx = pts[n - 1, 0] - rax
-        dy = pts[n - 1, 1] - ray
-        d2_arr[n - 1] = dx * dx + dy * dy
+    if d2_pre.shape[0] == n:
+        d2_arr = d2_pre
     else:
-        rx = body_x[ref_index]
-        ry = body_y[ref_index]
-        for i in range(n):
-            dx = pts[i, 0] - rx
-            dy = pts[i, 1] - ry
-            d2_arr[i] = dx * dx + dy * dy
+        d2_arr = _apsis_d2_numba(
+            pts, base_sim_time, ref_index, body_x, body_y, body_m,
+            body_scripted, body_a, body_e, body_theta, body_arg, body_parent,
+            G, use_time_dependent_bodies,
+        )
 
     # pass 2: trend-scan über den abstandsverlauf
     #

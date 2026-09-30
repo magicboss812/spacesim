@@ -130,10 +130,11 @@ paths:
 > `tests/ui_hud_test.py` §11 checks that, and also that the raw font is
 > *not* monospaced — otherwise the section would prove nothing.
   - `ui/text.py` — `TextRenderer`: role-based fonts (`match_font`, or a TTF
-    dropped into `ui/assets/`), label-texture cache with **LRU** eviction **over
-    a pool of retired textures** (see the GL-allocation note in
-    `.claude/rules/rendering.md`), tinted blitting, `defer()`/`flush()` for anything that must land
-    after FXAA.
+    dropped into `ui/assets/`), a label cache with **LRU** eviction whose
+    entries are slots in **one RGBA atlas** (`_ShelfAtlas`), tinted text drawn
+    as instances of the `UIDraw` batch (see the note under `ui/draw.py`).
+    `_blit` (own texquad draw, texture pool) survives only as the fallback for
+    a label larger than the atlas and for a `TextRenderer` without a batch.
 
 > **Der label-cache ist LRU, nicht FIFO — die reihenfolge muss die des
 > ZUGRIFFS sein.** Als reines dict war sie die des EINFÜGENS, und ein treffer
@@ -168,25 +169,47 @@ paths:
     right). A circle is a rect with radius = half the edge,
     a ring is that with a border and no fill, an arc is a ring with the arc
     params. **Draws are batched and instanced** (2026-08-17): `_submit` packs
-    the 33 per-shape floats into an instance buffer; `flush()` issues ONE
+    the 37 per-shape floats (33 + the text slot, zero for shapes) into an
+    instance buffer; `flush()` issues ONE
     instanced draw. Each shape used to be its own draw call with ~14 uniform
     writes — at ~160 calls per HUD frame (48 attitude-ring ticks alone) that
     was the single largest UI cost. Instance order == call order, so blending
-    is unchanged; `TextRenderer._blit` calls `rect_flush` (wired in
-    `UIContext`) before drawing so text still layers exactly by call order.
-    The shader takes per-instance attributes (`i_*` → flat varyings) instead
-    of uniforms; only `u_viewport` remains a uniform.
+    is unchanged. The shader takes per-instance attributes (`i_*` → flat
+    varyings) instead of uniforms; only `u_viewport` and `u_atlas` remain.
+
+> **Text is an INSTANCE of the same batch — the whole HUD is one draw
+> (2026-09-29).** Each label used to be its own texquad draw, and each had to
+> `rect_flush` the batch first to keep the layering: measured ~77 text draws
+> plus ~35 forced flushes per frame. Labels now live in one 2048² atlas
+> (`TextRenderer.attach_batch`, wired in `UIContext`) and `UIDraw.text_quad`
+> queues them as rows with `i_tex = (atlas_x, atlas_y, 1, 0)`; `ui_rect.frag`
+> takes a `texelFetch` branch for those. **Pixel-identical, not approximate**:
+> same integer quad corners (expand 0, no rotation), `gl_FragCoord − origin`
+> is exactly the texel texquad sampled at that pixel centre under NEAREST or
+> LINEAR, and the output is the same `texel * colour`. Measured in one
+> process against the old path (`batch = None`): **0 differing pixels** at
+> 2560×1440 and 1280×800, also with a 200² atlas and a 20-entry cache
+> (36 atlas resets, 5290 evictions); counter-check with text suppressed
+> differs in 10 320 px. GL draws per frame **190 → 80**, uniform writes
+> 261 → 120, `ui_calc` median **4.6 → 3.1 ms** (llvmpipe, 1280×800).
+>
+> Two rules keep it exact. **A slot may not be reused while a queued instance
+> still reads it**: every entry records `UIDraw.serial` when drawn, and
+> `_evict` flushes the batch first if it drops one from the pending batch;
+> an atlas reset (`clear_cache`) always flushes first. And **the atlas bytes
+> are the texquad bytes** — `tostring(..., 'RGBA', True)` written at the slot,
+> row 0 at the bottom, so `texelFetch` reads what texquad read.
 
 > **Filling one instance row is ONE assignment, not thirty-three (2026-08-27).**
 > Every single store into a numpy row is a full ufunc dispatch, and over the
 > ~200 shapes of a HUD frame that was measured as the largest single item
 > inside `_submit`. `UIDraw` keeps a flat view on the same memory
 > (`_instance_flat`, rebuilt in `_ensure_capacity` alongside the array) and
-> writes the 33 floats as one slice assignment — same order, same layout, it
+> writes the 37 floats as one slice assignment — same order, same layout, it
 > must still match `_INSTANCE_FORMAT`. And `flush()` hands the rows straight
 > to `write()` instead of `tobytes()`: rows `0..count` are already contiguous,
 > so the copy bought nothing — **~1.5 MB per frame** at ~200 shapes and the
-> nearly 60 flushes a frame takes.
+> nearly 60 flushes a frame took before text joined the batch.
   - `ui/core.py` — `Rect`, anchor constants, `UIContext`, `Widget`, `UIRoot`
     (hit-testing, hover/press/focus, z-order, `wants_mouse`/`wants_keyboard`).
 

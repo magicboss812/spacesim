@@ -106,13 +106,18 @@ class HoldMixin:
         # nicht mehr, `|g_jetzt - g_vorher| * dt` waechst genau mit diesem
         # fehler mit.
         residual_speed = delta_speed
+        residual_x = dvx_seen
+        residual_y = dvy_seen
+        span = max(dt_age, 0.0)
         if world is not None:
             try:
-                g = world.acceleration_at(ship, ship.position, cur_time)
+                fast = getattr(world, 'acceleration_at_fast', None)
+                g = (fast or world.acceleration_at)(ship, ship.position, cur_time)
                 gx = float(g.x)
                 gy = float(g.y)
-                span = max(dt_age, 0.0)
-                residual_speed = math.hypot(dvx_seen - gx * span, dvy_seen - gy * span)
+                residual_x = dvx_seen - gx * span
+                residual_y = dvy_seen - gy * span
+                residual_speed = math.hypot(residual_x, residual_y)
 
                 last_gx = self._last_seen_gx
                 last_gy = self._last_seen_gy
@@ -157,6 +162,27 @@ class HoldMixin:
             reason = "velocity"
         elif delta_pos > allowed_pos:
             reason = "position"
+
+        # DIE GEHALTENE EINGABE fuer den latenzausgleich (siehe
+        # `_thrust_lead_model`): der rest geteilt durch die schrittzeit ist die
+        # schubbeschleunigung dieses bildes. Kein schub, kein vorlauf.
+        # Die DREHRATE der schubrichtung aus zwei aufeinanderfolgenden
+        # bildern: mit richtungshalt dreht die nase mit der bahn, und ueber
+        # einen vorlauf von minuten (lange rechnungen) wird aus einem festen
+        # vektor sonst ein fehler von dutzenden m/s.
+        if reason == "velocity" and span > 0.0:
+            ax_now = residual_x / span
+            ay_now = residual_y / span
+            omega = 0.0
+            prev = getattr(self, '_thrust_held', None)
+            if prev is not None:
+                cross = prev[0] * ay_now - prev[1] * ax_now
+                dot = prev[0] * ax_now + prev[1] * ay_now
+                if dot > 0.0:
+                    omega = math.atan2(cross, dot) / span
+            self._thrust_held = (ax_now, ay_now, omega)
+        else:
+            self._thrust_held = None
 
         if reason is None:
             self._remember_ship_state(ship, world)
@@ -347,8 +373,22 @@ class HoldMixin:
                 self.points[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
             return 0
 
-        tail = points[drop:] if drop > 0 else points
-        head = np.empty((1, points.shape[1]), dtype=np.float64)
+        # DER KOPF KOMMT IN DIE ZEILE VOR DEM REST, NICHT IN EINE KOPIE.
+        #
+        # Die zeile direkt vor `points[drop]` ist der alte kopf oder eine eben
+        # verbrauchte stuetzstelle -- beide gehoeren nicht mehr zur kurve.
+        # Den kopf dorthin zu schreiben und eine ANSICHT ab dort zu nehmen,
+        # ergibt dieselben zahlen wie `concatenate((kopf, rest))`, ohne die
+        # 1.6 MB einer 40 000-punkte-kurve bei jedem verbrauch umzukopieren
+        # (gemessen ~0.3 ms im hauptthread). Nur eine frische kurve, von der
+        # nichts verbraucht ist, hat keine solche zeile und wird einmal
+        # kopiert.
+        base = self.points
+        row = drop if had_head else drop - 1
+        if row >= 0:
+            head = base[row:row + 1]
+        else:
+            head = np.empty((1, points.shape[1]), dtype=np.float64)
         head[0, 0] = float(ship.position.x)
         head[0, 1] = float(ship.position.y)
         head[0, 2] = now
@@ -359,7 +399,14 @@ class HoldMixin:
             head[0, 3] = float(getattr(ship.velocity, 'x', 0.0))
             head[0, 4] = float(getattr(ship.velocity, 'y', 0.0))
 
-        self.points = np.concatenate((head, tail), axis=0)
+        if row >= 0:
+            self.points = base[row:]
+        else:
+            self.points = np.concatenate((head, points), axis=0)
+        # Der vorgerechnete apsis-abstand folgt dem verbrauch: dieselben
+        # punkte, nur `drop` weniger vorn (siehe get_apsis_markers).
+        if drop > 0:
+            self._apsis_d2_offset = int(getattr(self, '_apsis_d2_offset', 0)) + drop
         self._synthetic_head = True
         # Die zeitspalte der verbliebenen punkte ist unangetastet -- ihr
         # versatz gegen den schnappschuss bleibt also, was er war.
@@ -427,6 +474,8 @@ class HoldMixin:
             if self._advance_points_along_curve(ship, st) is not None:
                 return
 
+        # Starr verschoben passt kein vorgerechneter apsis-abstand mehr.
+        self._apsis_d2_raw = None
         if np is not None and isinstance(self.points, np.ndarray):
             dx = sx - float(self.points[0, 0])
             dy = sy - float(self.points[0, 1])
@@ -484,6 +533,15 @@ class HoldMixin:
             except Exception:
                 self.points[0] = (sx, sy, t0)
 
+    def _debug_counts_points(self):
+        """Wird `_computed_since_last_update` gerade ausgegeben (PRED_DBG_COMPUTED)?
+
+        Nur dann lohnt `_count_recomputed_points`: der vergleich zweier
+        40 000-punkte-kurven kostete gemessen 1.5 ms im hauptthread, bei JEDER
+        eingewechselten linie, fuer einen zaehler, den sonst niemand liest.
+        """
+        return bool(self.debug) and not bool(getattr(self, "_suppress_dbg_computed", False))
+
     def _count_recomputed_points(self, old_points, new_points, tol=1e-6):
         """Gibt die Anzahl der Einträge in `new_points` zurück, die sich von `old_points` unterscheiden.
 
@@ -512,7 +570,7 @@ class HoldMixin:
         except Exception:
             return 0
 
-        if old_len <= 0:
+        if old_len <= 0 or not self._debug_counts_points():
             return max(0, new_len)
 
         try:
@@ -865,6 +923,8 @@ class HoldMixin:
                 1 if getattr(self, 'use_body_memo', True) else 0,
                 float(context.get('max_dt_floor', context['max_dt'])),
                 float(context.get('timescale_divisor', 0.0)),
+                float(snapshot.get('group_far_moons', 0.0) or 0.0),
+                float(snapshot.get('planet_table_tol', 0.0) or 0.0),
             )
         except Exception:
             return 0

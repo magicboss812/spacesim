@@ -16,6 +16,8 @@ Simpson EXAKT. Deshalb bekommt jede der drei phasen ihre eigene,
 gleichmaessige schrittweite statt einer gemeinsamen.
 """
 
+import math
+
 import numpy as np
 from numba import njit
 
@@ -246,6 +248,193 @@ def _burn_arc_numba(
             out[written, 0] = px
             out[written, 1] = py
             out[written, 2] = init_t + tau_start + (i + 1) * h
+            out[written, 3] = vx
+            out[written, 4] = vy
+
+    return out, written + 1
+
+
+@njit(cache=True, nogil=True, fastmath=True)
+def _lead_thrust_numba(t, init_t, mode, ax_c, ay_c, omega, dir_x, dir_y, tau0,
+                       a_peak, ramp_time, hold_time, total_time, ramp_rate):
+    """Schubbeschleunigung des vorlaufs zur lokalen zeit `t`.
+
+    mode 1: die GEHALTENE eingabe von hand -- betrag fest, richtung dreht mit
+    der zuletzt gemessenen rate `omega` (rad je sim-sekunde) weiter. Mit
+    richtungshalt (prograd) dreht die nase mit der bahn; 0 = fester vektor.
+    mode 2: das profil des ausfuehrers, `tau0` ist die profilzeit bei
+    `init_t` -- derselbe `_profile_accel_numba`, den vorschau und
+    ausfuehrer benutzen.
+    """
+    if mode == 1:
+        if omega == 0.0:
+            return ax_c, ay_c
+        ang = omega * (t - init_t)
+        c = math.cos(ang)
+        s = math.sin(ang)
+        return ax_c * c - ay_c * s, ax_c * s + ay_c * c
+    if mode == 2:
+        th = _profile_accel_numba(tau0 + (t - init_t), a_peak, ramp_time,
+                                  hold_time, total_time, ramp_rate)
+        return dir_x * th, dir_y * th
+    return 0.0, 0.0
+
+
+@njit(cache=True, nogil=True, fastmath=True)
+def _thrust_lead_numba(
+    init_px,
+    init_py,
+    init_vx,
+    init_vy,
+    init_t,
+    lead,
+    mode,
+    ax_c,
+    ay_c,
+    omega,
+    dir_x,
+    dir_y,
+    tau0,
+    a_peak,
+    ramp_time,
+    hold_time,
+    total_time,
+    ramp_rate,
+    max_step,
+    body_x,
+    body_y,
+    body_m,
+    body_fixed,
+    body_scripted,
+    body_a,
+    body_e,
+    body_theta,
+    body_arg,
+    body_parent,
+    G,
+    use_time_dependent_bodies,
+    body_memo,
+):
+    """Den schiffszustand ueber `lead` sekunden UNTER SCHUB vorausrechnen.
+
+    Der vorlauf einer vorhersage unter schub: sie soll bei ihrem eintreffen
+    zum dann aktuellen schiff passen, nicht zu dem, von dem sie ausging. Der
+    bogen wird mit RK4 in festen schritten (hoechstens `max_step`)
+    integriert, im profil-modus mit schrittgrenzen auf den knicken des
+    profils -- aus demselben grund wie in `_burn_arc_numba`: innerhalb einer
+    phase ist der schub linear oder konstant, ueber einen knick hinweg ist
+    RK4 nur erster ordnung.
+
+    Rueckgabe: die stuetzstellen des bogens (spalten x, y, t, vx, vy, erste =
+    anfangszustand, letzte = endzustand) und ihre zahl.
+    """
+    # Schrittgrenzen: anfang, ende und die knicke des profils dazwischen.
+    cuts = np.empty(5, dtype=np.float64)
+    ncut = 0
+    cuts[ncut] = init_t
+    ncut += 1
+    if mode == 2:
+        for kink in (ramp_time, ramp_time + hold_time, total_time):
+            tk = init_t + (kink - tau0)
+            if tk > init_t and tk < init_t + lead:
+                cuts[ncut] = tk
+                ncut += 1
+    cuts[ncut] = init_t + lead
+    ncut += 1
+
+    step = max_step if max_step > 0.0 else lead
+    total_steps = 0
+    for c in range(ncut - 1):
+        span = cuts[c + 1] - cuts[c]
+        if span > 0.0:
+            total_steps += int(math.ceil(span / step - 1e-9))
+    out = np.empty((total_steps + 1, 5), dtype=np.float64)
+    px = init_px
+    py = init_py
+    vx = init_vx
+    vy = init_vy
+    out[0, 0] = px
+    out[0, 1] = py
+    out[0, 2] = init_t
+    out[0, 3] = vx
+    out[0, 4] = vy
+    written = 0
+    ref_enabled = 0
+
+    for c in range(ncut - 1):
+        t_a = cuts[c]
+        span = cuts[c + 1] - t_a
+        if span <= 0.0:
+            continue
+        n_seg = int(math.ceil(span / step - 1e-9))
+        if n_seg < 1:
+            n_seg = 1
+        h = span / n_seg
+        for i in range(n_seg):
+            t = t_a + i * h
+            gx, gy = _rkn_acc_time_numba(
+                px, py, t, ref_enabled, -1, 0.0, 0.0,
+                body_x, body_y, body_m, body_fixed, body_scripted,
+                body_a, body_e, body_theta, body_arg, body_parent,
+                G, use_time_dependent_bodies, body_memo,
+            )
+            tx, ty = _lead_thrust_numba(t, init_t, mode, ax_c, ay_c, omega,
+                                        dir_x, dir_y, tau0, a_peak, ramp_time,
+                                        hold_time, total_time, ramp_rate)
+            k1ax = gx + tx
+            k1ay = gy + ty
+            p2x = px + vx * (h * 0.5)
+            p2y = py + vy * (h * 0.5)
+            v2x = vx + k1ax * (h * 0.5)
+            v2y = vy + k1ay * (h * 0.5)
+            gx, gy = _rkn_acc_time_numba(
+                p2x, p2y, t + h * 0.5, ref_enabled, -1, 0.0, 0.0,
+                body_x, body_y, body_m, body_fixed, body_scripted,
+                body_a, body_e, body_theta, body_arg, body_parent,
+                G, use_time_dependent_bodies, body_memo,
+            )
+            tx, ty = _lead_thrust_numba(t + h * 0.5, init_t, mode, ax_c, ay_c,
+                                        omega, dir_x, dir_y, tau0, a_peak, ramp_time,
+                                        hold_time, total_time, ramp_rate)
+            k2ax = gx + tx
+            k2ay = gy + ty
+            p3x = px + v2x * (h * 0.5)
+            p3y = py + v2y * (h * 0.5)
+            v3x = vx + k2ax * (h * 0.5)
+            v3y = vy + k2ay * (h * 0.5)
+            gx, gy = _rkn_acc_time_numba(
+                p3x, p3y, t + h * 0.5, ref_enabled, -1, 0.0, 0.0,
+                body_x, body_y, body_m, body_fixed, body_scripted,
+                body_a, body_e, body_theta, body_arg, body_parent,
+                G, use_time_dependent_bodies, body_memo,
+            )
+            k3ax = gx + tx
+            k3ay = gy + ty
+            p4x = px + v3x * h
+            p4y = py + v3y * h
+            v4x = vx + k3ax * h
+            v4y = vy + k3ay * h
+            gx, gy = _rkn_acc_time_numba(
+                p4x, p4y, t + h, ref_enabled, -1, 0.0, 0.0,
+                body_x, body_y, body_m, body_fixed, body_scripted,
+                body_a, body_e, body_theta, body_arg, body_parent,
+                G, use_time_dependent_bodies, body_memo,
+            )
+            tx, ty = _lead_thrust_numba(t + h, init_t, mode, ax_c, ay_c,
+                                        omega, dir_x, dir_y, tau0, a_peak, ramp_time,
+                                        hold_time, total_time, ramp_rate)
+            k4ax = gx + tx
+            k4ay = gy + ty
+
+            px = px + (vx + 2.0 * v2x + 2.0 * v3x + v4x) * (h / 6.0)
+            py = py + (vy + 2.0 * v2y + 2.0 * v3y + v4y) * (h / 6.0)
+            vx = vx + (k1ax + 2.0 * k2ax + 2.0 * k3ax + k4ax) * (h / 6.0)
+            vy = vy + (k1ay + 2.0 * k2ay + 2.0 * k3ay + k4ay) * (h / 6.0)
+
+            written += 1
+            out[written, 0] = px
+            out[written, 1] = py
+            out[written, 2] = t_a + (i + 1) * h
             out[written, 3] = vx
             out[written, 4] = vy
 

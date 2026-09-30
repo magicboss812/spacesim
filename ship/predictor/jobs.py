@@ -100,10 +100,13 @@ class JobsMixin:
     def _pipeline_depth_cap(self):
         """Obergrenze: konfiguration und verfuegbare kerne."""
         cap = int(max(1, getattr(self, "thrust_pipeline_depth", 1)))
-        try:
-            cores = int(os.cpu_count() or 2)
-        except Exception:
-            cores = 2
+        cores = getattr(self, "_cpu_cores", None)
+        if cores is None:
+            try:
+                cores = int(os.cpu_count() or 2)
+            except Exception:
+                cores = 2
+            self._cpu_cores = cores
         # Einen kern fuer haupt- und darstellungs-thread frei lassen.
         return max(1, min(cap, max(1, cores - 1)))
 
@@ -141,6 +144,154 @@ class JobsMixin:
             depth = max(1, min(cap, depth))
         self._pipeline_depth_used = depth
         return depth
+
+    # ------------------------------------------------------ latenzausgleich
+
+    def _expected_lead_s(self):
+        """Wie viele SIM-sekunden zwischen abschicken und einwechseln liegen.
+
+        Gemessen an den letzten einwechselungen (`_lead_lag_ema`); vor der
+        ersten die letzte rechenzeit plus ein bild, umgerechnet mit der
+        gemessenen sim-rate.
+        """
+        lag = float(getattr(self, '_lead_lag_ema', 0.0) or 0.0)
+        if lag > 0.0:
+            return lag
+        rate = float(getattr(self, '_sim_rate_ema', 0.0) or 0.0)
+        compute_ms = float(getattr(self, 'last_compute_ms', 0.0) or 0.0)
+        frame_ms = float(getattr(self, '_update_interval_ms', 0.0) or 0.0)
+        if rate <= 0.0 or compute_ms <= 0.0:
+            return 0.0
+        return (compute_ms + frame_ms) / 1000.0 * rate
+
+    def _thrust_lead_model(self, world):
+        """Der schub, ueber den ein neuer auftrag VORAUSRECHNET, oder None.
+
+        Ohne schub gibt es keinen vorlauf: die kurve beschreibt dann die
+        bahn und wird nur verbraucht (das bleibt bit-fuer-bit der alte weg).
+        Unter schub ist das ergebnis bei seinem eintreffen um die latenz alt
+        -- die linie hinge dem schiff um genau so viel schub hinterher. Also
+        rechnet der auftrag vom zustand ZUR ANZEIGEZEIT: mit dem profil des
+        ausfuehrers (exakt, einschliesslich brennschluss) oder mit der
+        gehaltenen eingabe von hand (stimmt, solange sie gehalten wird --
+        aendert sie sich, ist der fehler der, den die latenz ohnehin hatte).
+        """
+        if not getattr(self, 'thrust_latency_compensation', False):
+            return None
+        if self.rolling_mode or not self.async_compute or self._hold_active():
+            return None
+        try:
+            now = float(world.time)
+        except Exception:
+            return None
+        lead = min(self._expected_lead_s(), float(getattr(self, 'thrust_lead_max_s', 0.0)))
+        if not (lead > 0.0) or not math.isfinite(lead):
+            return None
+        model = {
+            'lead_s': lead, 'mode': 0, 'ax': 0.0, 'ay': 0.0, 'omega': 0.0,
+            'dir_x': 0.0, 'dir_y': 0.0, 'tau0': 0.0, 'a_peak': 0.0,
+            'ramp_time': 0.0, 'hold_time': 0.0, 'total_time': 0.0,
+            'ramp_rate': 0.0,
+            'max_step': float(getattr(self, 'thrust_lead_max_step_s', 2.0)),
+        }
+        plan = getattr(self, '_thrust_plan', None)
+        if plan is not None:
+            try:
+                tau0 = now - float(plan['t_ignition'])
+                total = float(plan['total_time'])
+            except Exception:
+                tau0, total = 0.0, 0.0
+            # Das fenster liegt ganz vor der zuendung oder hinter dem
+            # brennschluss: dann ist es gleitflug, und gleitflug braucht
+            # keinen vorlauf.
+            if total <= 0.0 or tau0 >= total or tau0 + lead <= 0.0:
+                return None
+            model.update({
+                'mode': 2, 'tau0': tau0,
+                'dir_x': float(plan['dir_x']), 'dir_y': float(plan['dir_y']),
+                'a_peak': float(plan['a_peak']),
+                'ramp_time': float(plan['ramp_time']),
+                'hold_time': float(plan['hold_time']),
+                'total_time': total,
+                'ramp_rate': float(plan['ramp_rate']),
+            })
+            return model
+        held = getattr(self, '_thrust_held', None)
+        if held is None:
+            return None
+        model.update({'mode': 1, 'ax': float(held[0]), 'ay': float(held[1]),
+                      'omega': float(held[2]) if len(held) > 2 else 0.0})
+        return model
+
+    @staticmethod
+    def _curve_state_at(points, t):
+        """(x, y, vx, vy) auf der kubischen kurve zur absoluten zeit, sonst None.
+
+        Dieselbe Hermite-auswertung wie `ship/maneuver/preview.py::
+        state_on_curve` (der predictor soll das manoever-paket nicht
+        importieren); NaN-tangenten fallen auf die sehne zurueck.
+        """
+        if points is None or not isinstance(points, np.ndarray):
+            return None
+        n = int(points.shape[0])
+        if n < 2 or points.shape[1] < 5:
+            return None
+        times = points[:, 2]
+        t = float(t)
+        if not (float(times[0]) <= t <= float(times[n - 1])):
+            return None
+        i = int(np.searchsorted(times, t, side='right')) - 1
+        i = max(0, min(i, n - 2))
+        t0 = float(times[i])
+        dt = float(times[i + 1]) - t0
+        p0x, p0y = float(points[i, 0]), float(points[i, 1])
+        p1x, p1y = float(points[i + 1, 0]), float(points[i + 1, 1])
+        v0x, v0y = float(points[i, 3]), float(points[i, 4])
+        v1x, v1y = float(points[i + 1, 3]), float(points[i + 1, 4])
+        if dt <= 0.0:
+            return (p0x, p0y, v0x, v0y)
+        s = (t - t0) / dt
+        if not (math.isfinite(v0x) and math.isfinite(v0y)
+                and math.isfinite(v1x) and math.isfinite(v1y)):
+            return (p0x + (p1x - p0x) * s, p0y + (p1y - p0y) * s,
+                    (p1x - p0x) / dt, (p1y - p0y) / dt)
+        s2 = s * s
+        s3 = s2 * s
+        h00 = 2.0 * s3 - 3.0 * s2 + 1.0
+        h10 = s3 - 2.0 * s2 + s
+        h01 = -2.0 * s3 + 3.0 * s2
+        h11 = s3 - s2
+        d00 = 6.0 * s2 - 6.0 * s
+        d10 = 3.0 * s2 - 4.0 * s + 1.0
+        d01 = -6.0 * s2 + 6.0 * s
+        d11 = 3.0 * s2 - 2.0 * s
+        return (h00 * p0x + h10 * dt * v0x + h01 * p1x + h11 * dt * v1x,
+                h00 * p0y + h10 * dt * v0y + h01 * p1y + h11 * dt * v1y,
+                (d00 * p0x + d01 * p1x) / dt + d10 * v0x + d11 * v1x,
+                (d00 * p0y + d01 * p1y) / dt + d10 * v0y + d11 * v1y)
+
+    def _curve_velocity_error(self, points, ship, t):
+        """|v_kurve(t) - v_schiff|, oder None, wenn die kurve `t` nicht abdeckt."""
+        st = self._curve_state_at(points, t)
+        if st is None or ship is None:
+            return None
+        try:
+            return math.hypot(st[2] - float(ship.velocity.x),
+                              st[3] - float(ship.velocity.y))
+        except Exception:
+            return None
+
+    def _remember_line_check(self, points, lead_points=0):
+        """Die ersten stuetzstellen der eben eingewechselten linie merken.
+
+        Unverbraucht -- `_anchor_first_point` wirft sie gleich weg und setzt
+        das schiff als kopf davor, gegen DEN liesse sich nichts messen.
+        """
+        try:
+            k = int(lead_points) + 3
+            self._line_check = np.array(points[:k], dtype=np.float64, copy=True)
+        except Exception:
+            self._line_check = None
 
     def _request_thrust_recompute(self, ship, world):
         """Schub-neuberechnung ANFORDERN statt sie im hauptthread zu erzwingen.
@@ -257,7 +408,8 @@ class JobsMixin:
             # worker mehr belegen.
             return
 
-        snapshot = self._make_snapshot(ship, world, max_points)
+        snapshot = self._make_snapshot(ship, world, max_points,
+                                       lead=self._thrust_lead_model(world))
         self._debug_integrator_mode("submit", snapshot)
 
         # ensure executor exists (lazy creation)
@@ -465,6 +617,31 @@ class JobsMixin:
                 # wall-fresh, version/view/reference-matching result is safe.
                 is_stale_wall_age = wall_age > max_wall_age
 
+                # IN ECHTZEIT ENTSCHEIDET DER VERGLEICH MIT DEM SCHIFF, NICHT
+                # DAS ALTER. Eine kurve wird verbraucht, nie verschoben -- ein
+                # altes ergebnis ist also nicht falsch, solange es zu dem
+                # passt, was das schiff seither getan hat. Unter schub mit
+                # vorlauf (_thrust_lead_model) ist das die frage, ob der
+                # angenommene schub eingetreten ist: nach dem loslassen der
+                # taste passt ein noch laufender auftrag nicht mehr. Er wird
+                # verworfen, wenn seine kurve JETZT weiter vom schiff abweicht
+                # als die gezeigte UND ueber der toleranz liegt -- schlechter
+                # als heute wird es dadurch nie.
+                is_thrust_mismatch = False
+                realtime_check = (not allow_rebase and current_world is not None
+                                  and cur_sim_time is not None
+                                  and not self._hold_active())
+                if realtime_check:
+                    is_stale_wall_age = False
+                    e_new = self._curve_velocity_error(points, current_ship, cur_sim_time)
+                    e_cur = self._curve_velocity_error(
+                        getattr(self, '_line_check', None), current_ship, cur_sim_time)
+                    tol = float(self.velocity_invalidation_abs_tol)
+                    if e_new is None:
+                        is_stale_wall_age = True
+                    elif e_new > tol and e_cur is not None and e_new >= e_cur:
+                        is_thrust_mismatch = True
+
                 reject_reason = None
                 if is_stale_view:
                     reject_reason = "view_scale"
@@ -472,6 +649,8 @@ class JobsMixin:
                     reject_reason = "reference_frame"
                 elif is_stale_wall_age:
                     reject_reason = "wall_age"
+                elif is_thrust_mismatch:
+                    reject_reason = "thrust_mismatch"
 
                 if reject_reason is not None:
                     self._log_snapshot_result(False, reject_reason, snapshot, cur_sim_time, sim_age, pos_delta, delta_speed)
@@ -532,6 +711,20 @@ class JobsMixin:
                 pass
 
             self.points = points
+            lead_points = int(result.get('lead_points', 0) or 0) if isinstance(result, dict) else 0
+            self._remember_line_check(points, lead_points)
+            # Die latenz bis HIER (sim-sekunden) ist der vorlauf des
+            # naechsten auftrags. Nur in echtzeit: im zeitraffer ist sie
+            # tage lang und bedeutungslos, dort gibt es keinen schub.
+            try:
+                if (current_world is not None and snapshot is not None
+                        and not self._hold_active()):
+                    lag = float(current_world.time) - float(snapshot.get("sim_time", 0.0))
+                    if math.isfinite(lag) and lag >= 0.0:
+                        prev = float(getattr(self, '_lead_lag_ema', 0.0) or 0.0)
+                        self._lead_lag_ema = lag if prev <= 0.0 else (0.7 * prev + 0.3 * lag)
+            except Exception:
+                pass
             # Frisch gerechnet: die zeitspalte ist wieder exakt auf
             # `snapshot["sim_time"]` bezogen, und points[0] ist die echte
             # stuetzstelle des laufs, kein selbst vorangestellter kopf.
@@ -542,6 +735,7 @@ class JobsMixin:
             # geometrie; der weiche weg im halt darf die marker der ALTEN
             # kurve nicht weiterreichen.
             self._invalidate_derived_caches()
+            self._adopt_apsis_d2(result)
             self.initialized = True
             self._last_swapped_job_id = finished_job_id
             self._jobs_swapped += 1

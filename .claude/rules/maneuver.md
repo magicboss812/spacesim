@@ -303,7 +303,22 @@ Frame, praktisch alles davon Python-Aufruf-Overhead. Hier waren es 900
 Punkte je Frame plus 400 weitere während eines Zugs, und *das* war neben der
 Rechnung im Hauptthread die zweite Hälfte des Bildraten-Einbruchs.
 `tests/maneuver_render_test.py` §3b vergleicht beide Wege: Abweichung
-0.000e+00 px. `maneuver.path_draw_points` (480) ist seit der Verfeinerung
+0.000e+00 px.
+
+**Im Spiel lief trotzdem der punktweise Weg — bis 2026-09-29.**
+`draw_prediction` räumt das Ursprungs-Fenster des Rahmens ab, bevor
+`draw_maneuver` zeichnet, und ohne Fenster gibt `to_this_frame_xy_arrays`
+`None` zurück: gemessen **575 skalare Transformationen je Frame, 2.78 ms**
+mit einem Knoten. Der Test merkte es nicht, weil er kein Fenster abräumt.
+`_maneuver_project` nimmt deshalb ohne Fenster
+`to_this_frame_xy_arrays_exact` — derselbe exakte Ursprung wie der skalare
+Weg, im Stapel (`.claude/rules/reference-frames.md`). Gegen die Schleife auf
+der echten Vorschaulinie: **0 px** in den nicht rotierenden Erde-/Sonne-
+Rahmen, **≤ 9.7e-13 px** in den rotierenden und im Mond-Rahmen (letztes Bit
+der Trigonometrie, unter der float32-Genauigkeit der Vertices).
+`draw_maneuver` **2.78 → 1.09 ms** Median.
+
+`maneuver.path_draw_points` (480) ist seit der Verfeinerung
 das **Budget**, nicht mehr ein Stride: die Punkte landen dort, wo die Kurve
 biegt, statt gleichmäßig über eine meist gerade Linie.
 

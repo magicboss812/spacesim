@@ -347,6 +347,22 @@ def _apply_horizon(app):
     app.horizon.apply(app.predictor, app.warp_rate(), grabbing=grabbing)
 
 
+def _executor_thrust_plan(app):
+    """Das schubprofil des ausfuehrers fuer den predictor, oder None."""
+    executor = getattr(app, 'maneuver_executor', None)
+    if executor is None or not executor.is_active or executor.profile is None:
+        return None
+    profile = executor.profile
+    return {
+        't_ignition': float(executor.t_ignition),
+        'dir_x': float(executor.dir_x), 'dir_y': float(executor.dir_y),
+        'a_peak': float(profile.a_peak), 'ramp_time': float(profile.ramp_time),
+        'hold_time': float(profile.hold_time),
+        'total_time': float(profile.total_time),
+        'ramp_rate': float(profile.ramp_rate),
+    }
+
+
 def _update_predictor(app):
     """Die vorhersagelinie fortschreiben und ihre punkte liefern."""
     predictor = app.predictor
@@ -358,6 +374,11 @@ def _update_predictor(app):
             # Im zeitraffer die kurve HALTEN statt jeden frame neu rechnen.
             # Siehe Predictor._hold_advance.
             predictor.set_hold(not app.thrust_allowed())
+            # Das profil eines laufenden autopilot-brennvorgangs: damit
+            # rechnet jeder auftrag bis zu seiner anzeigezeit exakt voraus
+            # (Predictor._thrust_lead_model).
+            if hasattr(predictor, 'set_thrust_plan'):
+                predictor.set_thrust_plan(_executor_thrust_plan(app))
             if hasattr(predictor, 'set_view_scale'):
                 # Das zoom-ZIEL einspeisen, nicht die nachlaufende skala: jede
                 # skalenaenderung loest einen synchronen neuaufbau aus, und das

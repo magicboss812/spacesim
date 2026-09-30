@@ -106,7 +106,7 @@ xvfb-run -a -s "-screen 0 2560x1440x24" \
 
 ---
 
-## Task 1: Performance overhaul `[ ]`
+## Task 1: Performance overhaul `[x]`
 
 **Goal.** Find and remove every CPU and GPU cost that changes neither what
 the player sees nor what the physics computes. The accuracy bar is absolute:
@@ -312,7 +312,99 @@ the acceptance check above still passes.
   time and steps at the Saturn and Neptun horizons, the burn metrics, and
   the acceptance check's Ap error and drift, before and after.
 
-**Result:** _open_
+**Result:** _Session 1 (2026-09-29): Part A. Session 2 (2026-09-30): Part B,
+at the end of this block._
+
+Done, each bit- or pixel-identical and noted in the owning rule file:
+1. HUD text is instances of the `ui_rect` batch (one label atlas, `texelFetch`
+   branch), so the HUD is one draw. 0 differing px vs the old texquad path
+   in one process at 2560×1440 and 1280×800, also under forced eviction and
+   36 atlas resets (`hud-ui.md`).
+2. World kernel body memo + `k3 = k2` (world and Python reference): same
+   final state hash as before, §2 still 0.000e+00; `world.step` at 1 d/s
+   9.4 → 4.8 ms (`physics-world.md`).
+3. Thrust detector's `g` via `world.acceleration_at_fast` (numba twin,
+   2000/2000 random cases bit-identical, 0.144 → 0.028 ms).
+4. Maneuver path projected in one exact batch (it silently ran 575 scalar
+   transforms per frame): ≤ 9.7e-13 px vs scalar, `draw_maneuver`
+   2.78 → 1.09 ms (`maneuver.md`).
+
+Before → after, median / p95 in ms, llvmpipe 1280×800, 900 frames, last 750;
+GL draws per frame **190 → 80**, uniform writes 261 → 120:
+
+| scenario | `frame` | `rend_calc` | `ui_calc` | `pred_draw` |
+|---|---|---|---|---|
+| default | 34.3 / 42.1 → 30.0 / 37.2 | 14.3 / 19.4 → 12.7 / 17.3 | 4.6 / 6.2 → 2.8 / 4.0 | 3.3 / 5.0 → 2.6 / 4.1 |
+| default (2nd run) | 34.2 / 42.1 → 30.1 / 39.4 | 14.0 / 19.0 → 12.8 / 18.5 | 4.6 / 6.0 → 2.8 / 4.3 | 3.1 / 4.7 → 2.7 / 4.2 |
+| `--zoom 1e-9` | 31.7 / 39.1 → 28.4 / 35.8 | 12.2 / 16.7 → 11.3 / 15.3 | 4.4 / 6.0 → 2.8 / 4.1 | 1.7 / 2.9 → 1.5 / 2.5 |
+| `--node 800,0` | 35.6 / 44.2 → 32.8 / 42.8 | 16.7 / 22.6 → 14.5 / 19.9 | 4.4 / 6.3 → 3.1 / 4.6 | 3.0 / 4.4 → 2.8 / 4.5 |
+| 1 d/s warp | 47.1 / 60.4 → 37.2 / 46.7 | 16.2 / 21.7 → 15.0 / 19.7 | 4.7 / 7.3 → 3.1 / 4.5 | 3.4 / 5.4 → 3.1 / 4.9 |
+
+Visual A/B at 2560×1440 (default, zoom, node) and 1280×800: the two baseline
+runs differ in ~140 px (max 210): a countdown and the Ap/Pe label at the
+ship, set by which async predictor result was swapped in. The optimised shot
+equals one baseline run exactly in zoom, node and 1280×800, and in default
+differs only in those same cells. Tests: no new failure outside
+`warp_predictor_test`'s timing checks. That file, three runs per tree back to
+back: both trees fail "tiefe waechst", "decke senkt", "100d/s -> 1y/s
+wechsel-frame" and "NEUEREN schiffszustand" (−0.082 m/s on the untouched
+tree too). "100d/s -> 30d/s wechsel-frame" failed 2 of 3 runs here, 0 of 3
+on the untouched tree (10.0 and 18.2 ms against an absolute 10 ms, quiet
+median 6–9 ms). The timed call is `predictor.update()`, whose only change is
+the cheaper gravity call; in the real loop `Predictor.update` at 1 d/s fell
+1.04 → 0.82 ms median. Watch it next session; `tests.md` lists all four
+warp transitions as flaky.
+
+Measured and left, with the reason: the 16 Ap/Pe markers of the default
+orbit (0.8 ms) cannot merge without changing overlap order; `FrameAffineTable`
+reuse across frames and a numba `future_tracks` are not bit-identical (the
+scalar frame path reads the per-frame window; numpy SIMD trig); the ship
+sprite's 36 draws could drop to ~26 with a vertex-colour ortho pipeline;
+the remaining HUD cost (~2.8 ms) is spread over ~245 `rect()` calls and
+widget geometry, next lever is per-widget instance caching; the `TIMING:`
+print costs 1–11 µs on Linux sinks, a Windows console is unmeasured here
+(compare `frame` with `debug.print_frame_timings` on and off there).
+
+**Part B** (session 2). `tools/transfer_bench.py` is the acceptance check.
+Changed, each noted in `predictor.md` → "Long horizons": body placement once
+per stage with 5 time slots and scalar-only Kepler (`kepler.py`,
+`integrators.py`); far moon systems as one body (factor 300) and a planet
+table (1e-15 m/s²), both from config, both 0 in a bare `Predictor()`;
+latency compensation under thrust (`burn.py::_thrust_lead_numba`, executor
+profile or held input) with swaps judged against the ship instead of the
+1.5 s wall-age gate; apsis pass 1 on a fixed time grid, computed by the
+worker; balanced `rkn_rtol` 1e-7 → 1e-8. Two runs each, before → after
+(Ap error = first post-burnout Ap against the world's actual extremum, px at
+SOI zoom; line deviation at full-line zoom):
+
+| scenario | compute (steps) | fresh line | shown age | line dev. median | Ap error | drift |
+|---|---|---|---|---|---|---|
+| Saturn node | 206 / 213 → 51 / 44 ms (2464 → 2470) | 1.3 / 2.1 → 41 / 39 % | 334 s → ≤ 4 ms | 610 / 542 → 6 / 10 px | 4.38e6 / 4.39e6 → 1.44e6 / 1.49e6 m | 0.051 → 0.007 px |
+| Saturn manual | 202 / 206 → 44 / 46 ms | 1.4 / 1.5 → 39 / 37 % | 334 s → 0 | 579 / 590 → 11 / 14 px | 4.21e6 / 4.18e6 → 1.35e6 / 1.35e6 m | 0.050 → 0.006 px |
+| Neptun node | 1237 / 1394 → 251 / 256 ms (15210 → 15221) | 0 → 9.4 / 9.2 % | 339 s → ≤ 6 ms | 305 → 253 / 197 px | 2.65e7 / 2.66e7 → 1.51e7 / 1.43e7 m | 0.064 → 0.050 / 0.044 px |
+| Neptun manual | 1289 / 1281 → 280 / 268 ms | 0 → 8.9 / 9.0 % | 339 s → ≤ 7 ms | 309 → 323 / 360 px | 2.67e7 / 2.71e7 → 1.08e7 / 1.08e7 m | 0.069 → 0.014 px |
+
+First post-burnout line at Neptun 31 s → 0.1–0.6 s after burnout; marker
+jumps after it ≤ 0.023 px. Without the `rtol` change the kernel work alone
+left the Neptun node Ap at 3.04e7 / 3.45e7 m. Both kernels agree to ≤ 2 m on
+the same snapshot; the error depends on the moment the line starts from,
+and the old build always showed its first line ~1750 s after burnout.
+Predictor main-thread time per burn frame: median 0.15 → 0.14–0.27 ms,
+p95 0.26 → 0.85–1.30 ms (38 % of frames swap instead of 2 %).
+
+Open: the burn line deviation p95 got worse (Saturn 1.1–1.3k → 0.25–2.5k px,
+Neptun 1.4k → 2.0–2.4k px) and the Neptun manual median rose 5–17 %; not
+investigated. `rtol` 1e-8 costs +51 % steps in bound orbits (LEO 1× 488 →
+737). Raising `rkn_max_dt_ceiling` to 1e6 s would cut transfers ~7× more
+at +5 % Ap error against `rtol` alone and breaks §20's counter-check:
+measured, not done. Tests: the same failures as before the change;
+`warp_predictor_test` §9 (the line no longer trails under thrust) and §12
+(depth 3 may already run every frame) were rewritten to the new behaviour,
+§10 got the table checks. Visual A/B: the pixels that differ are the same
+two regions that differ between two baseline runs, the Pe label at the
+ship and an apsis countdown (03:39:16 → 03:43:22). The countdown moved
+because first Pe of the near-circular default orbit is now 15336 s, against
+15398 s for a tight reference (was 15095 s).
 
 ---
 

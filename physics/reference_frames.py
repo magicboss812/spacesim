@@ -634,6 +634,25 @@ class _BodyEphemerisMixin:
         return (self._cubic_4pt(x0, x1, x2, x3, frac),
                 self._cubic_4pt(y0, y1, y2, y3, frac))
 
+    def to_this_frame_xy_arrays_exact(self, times, xs, ys):
+        """`to_this_frame_xy_arrays` mit EXAKTEM ursprung, ohne knotengitter.
+
+        Fuer aufrufer, die zeichnen, waehrend KEIN fenster gesetzt ist
+        (`_origin_interp_q <= 0`) -- dann rechnet der skalare weg den
+        ursprung exakt, und `to_this_frame_xy_arrays` gibt None zurueck. Die
+        manoeverlinie fiel dadurch in die punktweise schleife: gemessen 575
+        skalare transformationen je frame, 2.8 ms. Hier laeuft derselbe
+        exakte weg im stapel (`_knot_positions_batch`, wie im moon-fall von
+        `set_origin_interp_window`); das fenster wird danach wiederhergestellt.
+        """
+        saved = (self._origin_interp_q, self._origin_exact_batch)
+        self._origin_interp_q = 0.0
+        self._origin_exact_batch = True
+        try:
+            return self.to_this_frame_xy_arrays(times, xs, ys)
+        finally:
+            self._origin_interp_q, self._origin_exact_batch = saved
+
     def _origin_xy_arrays(self, body, times):
         """Stapelfassung von _body_world_position_at_time. None = nicht moeglich.
 

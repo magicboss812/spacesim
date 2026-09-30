@@ -41,96 +41,202 @@ except Exception:                                    # pragma: no cover
 # schuetzt zugleich vor einem zyklischen is_moon_of.
 _MAX_PARENT_DEPTH = 16
 
+# Spalten des koerper-gedaechtnisses `memo`: zeit, x, y, gueltig. Eine
+# EIGENE gueltig-spalte statt eines NaN-waechters -- dieselbe regel wie im
+# `body_memo` des praediktors (.claude/rules/predictor.md).
+_MEMO_COLUMNS = 4
+# Spalten von `kc`, den zeitunabhaengigen Kepler-groessen je koerper:
+# rechnet-mit-bahn, M0, mittlere bewegung, sqrt(1-e^2), cos(arg), sin(arg).
+_KC_COLUMNS = 6
+
 
 @njit(cache=True, nogil=True, fastmath=False)
-def _body_pos_at_time(index, t, bx, by, k_has, k_a, k_e, k_arg, k_parent,
-                      k_ref_theta, k_ref_time, k_mu):
-    """Nachbau von bodies.body.position_at_time -- iterativ statt rekursiv.
+def _kepler_constants(k_has, k_a, k_e, k_arg, k_ref_theta, k_mu, kc):
+    """Die ZEITUNABHAENGIGEN teile der Kepler-loesung, einmal je aufruf.
 
-    Ein koerper OHNE gueltige bahn liefert seine gespeicherte position; ein
-    koerper MIT bahn liefert seine relativposition plus die position seines
-    mutterkoerpers zur selben zeit. Genau diese kette wird hier abgelaufen.
+    `M0`, die mittlere bewegung, `sqrt(1-e^2)` und `cos/sin(arg)` haengen nur
+    an den bahnelementen und der epoche (`k_ref_theta`), und die stehen fuer
+    die dauer eines `advance_dynamics` fest. Die ausdruecke sind WORT FUER WORT
+    die von `bodies.kepler_relative_xy`; `kc[i, 0] = 0` heisst "gespeicherte
+    position": kein bahnkoerper, oder der nenner der epoche ist entartet --
+    in beiden faellen liefert die python-fassung `self.position`.
     """
-    acc_x = 0.0
-    acc_y = 0.0
-    idx = index
-    for _ in range(_MAX_PARENT_DEPTH):
+    for idx in range(k_has.shape[0]):
+        kc[idx, 0] = 0.0
         if k_has[idx] == 0:
-            return acc_x + bx[idx], acc_y + by[idx]
-
+            continue
         a = k_a[idx]
         e = k_e[idx]
         mu = k_mu[idx]
-
         nu0 = k_ref_theta[idx]
-        delta_t = t - k_ref_time[idx]
-
-        # Exakte Kepler-fortschreibung -- WORT FUER WORT
-        # bodies.kepler_relative_xy. Siehe modulkopf, punkt 1.
         cos_nu0 = math.cos(nu0)
         sin_nu0 = math.sin(nu0)
         denom = 1.0 + e * cos_nu0
         if abs(denom) <= 1e-14:
-            return acc_x + bx[idx], acc_y + by[idx]
-
+            continue
         sqrt_one_minus_e2 = math.sqrt(max(0.0, 1.0 - e * e))
         sin_e0 = sqrt_one_minus_e2 * sin_nu0 / denom
         cos_e0 = (e + cos_nu0) / denom
         ecc_anomaly0 = math.atan2(sin_e0, cos_e0)
         mean_anomaly0 = ecc_anomaly0 - e * math.sin(ecc_anomaly0)
         mean_motion = math.sqrt(mu / (a * a * a))
-
-        mean_anomaly = mean_anomaly0 + mean_motion * delta_t
-        two_pi = 2.0 * math.pi
-        mean_anomaly = (mean_anomaly + math.pi) % two_pi
-        if mean_anomaly < 0.0:
-            mean_anomaly += two_pi
-        mean_anomaly -= math.pi
-
-        ecc_anomaly = mean_anomaly
-        for _ in range(12):
-            f = ecc_anomaly - e * math.sin(ecc_anomaly) - mean_anomaly
-            fp = 1.0 - e * math.cos(ecc_anomaly)
-            if abs(fp) <= 1e-14:
-                break
-            delta = f / fp
-            ecc_anomaly -= delta
-            if abs(delta) <= 1e-13:
-                break
-
-        cos_e = math.cos(ecc_anomaly)
-        sin_e = math.sin(ecc_anomaly)
-        r_t = a * (1.0 - e * cos_e)
-        if r_t <= 0.0 or not math.isfinite(r_t):
-            return acc_x + bx[idx], acc_y + by[idx]
-
-        nu = math.atan2(sqrt_one_minus_e2 * sin_e, cos_e - e)
-        x_orb = r_t * math.cos(nu)
-        y_orb = r_t * math.sin(nu)
-
-        c = math.cos(k_arg[idx])
-        s = math.sin(k_arg[idx])
-        acc_x += x_orb * c - y_orb * s
-        acc_y += x_orb * s + y_orb * c
-
-        idx = k_parent[idx]
-        if idx < 0:
-            return acc_x, acc_y
-
-    return acc_x + bx[idx], acc_y + by[idx]
+        kc[idx, 0] = 1.0
+        kc[idx, 1] = mean_anomaly0
+        kc[idx, 2] = mean_motion
+        kc[idx, 3] = sqrt_one_minus_e2
+        kc[idx, 4] = math.cos(k_arg[idx])
+        kc[idx, 5] = math.sin(k_arg[idx])
 
 
 @njit(cache=True, nogil=True, fastmath=False)
-def _acceleration_at(target, px, py, t, bx, by, bm, k_has, k_a, k_e, k_arg,
-                     k_parent, k_ref_theta, k_ref_time, k_mu, G):
+def _link_rel(idx, t, k_a, k_e, k_ref_time, kc):
+    """Relativposition EINES kettenglieds zu seinem elter zur zeit t.
+
+    Der zeitabhaengige rest von `bodies.kepler_relative_xy`, wort fuer wort.
+    Rueckgabe (ok, x, y); ok = False, wo die python-fassung `None` liefert
+    (dann gilt die gespeicherte position des glieds).
+    """
+    a = k_a[idx]
+    e = k_e[idx]
+    delta_t = t - k_ref_time[idx]
+
+    mean_anomaly = kc[idx, 1] + kc[idx, 2] * delta_t
+    two_pi = 2.0 * math.pi
+    mean_anomaly = (mean_anomaly + math.pi) % two_pi
+    if mean_anomaly < 0.0:
+        mean_anomaly += two_pi
+    mean_anomaly -= math.pi
+
+    ecc_anomaly = mean_anomaly
+    for _ in range(12):
+        f = ecc_anomaly - e * math.sin(ecc_anomaly) - mean_anomaly
+        fp = 1.0 - e * math.cos(ecc_anomaly)
+        if abs(fp) <= 1e-14:
+            break
+        delta = f / fp
+        ecc_anomaly -= delta
+        if abs(delta) <= 1e-13:
+            break
+
+    cos_e = math.cos(ecc_anomaly)
+    sin_e = math.sin(ecc_anomaly)
+    r_t = a * (1.0 - e * cos_e)
+    if r_t <= 0.0 or not math.isfinite(r_t):
+        return False, 0.0, 0.0
+
+    nu = math.atan2(kc[idx, 3] * sin_e, cos_e - e)
+    x_orb = r_t * math.cos(nu)
+    y_orb = r_t * math.sin(nu)
+
+    c = kc[idx, 4]
+    s = kc[idx, 5]
+    return True, x_orb * c - y_orb * s, x_orb * s + y_orb * c
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _body_pos_at_time(index, t, bx, by, k_a, k_e, k_parent, k_ref_time, kc,
+                      memo, memo_ok, chain):
+    """Nachbau von bodies.body.position_at_time, mit koerper-gedaechtnis.
+
+    Python rechnet `relativ(t) + elter.position_at_time(t)` -- die kette wird
+    also von OBEN her aufsummiert (`rel0 + (rel1 + wurzel)`). Genau so hier:
+    erst hochsteigen bis zu einem bekannten vorfahren (gedaechtnis-treffer
+    oder ein glied mit gespeicherter position), dann absteigen und jedes
+    glied als `rel + elter` bilden und merken.
+
+    Das gedaechtnis gibt nur zurueck, was fuer GENAU diese zeit schon
+    gerechnet wurde, also bit fuer bit dasselbe. Es spart die wiederholung:
+    die step-doubling-schritte fragen 9 kraefte an 5 verschiedenen zeiten
+    ab, und jeder mond loeste seinen planeten ein zweites mal.
+    `memo_ok[i] = 0` fuer koerper, deren kette an einem FREIEN koerper haengt
+    -- dessen position (`bx`) wandert waehrend des aufrufs.
+    """
+    depth = 0
+    idx = index
+    base_x = 0.0
+    base_y = 0.0
+    while True:
+        if memo_ok[idx] == 1 and memo[idx, 3] == 1.0 and memo[idx, 0] == t:
+            base_x = memo[idx, 1]
+            base_y = memo[idx, 2]
+            break
+        if kc[idx, 0] == 0.0:
+            base_x = bx[idx]
+            base_y = by[idx]
+            break
+        chain[depth] = idx
+        depth += 1
+        parent = k_parent[idx]
+        if parent < 0:
+            break
+        idx = parent
+        if depth >= _MAX_PARENT_DEPTH:
+            base_x = bx[idx]
+            base_y = by[idx]
+            break
+
+    px = base_x
+    py = base_y
+    for k in range(depth - 1, -1, -1):
+        j = chain[k]
+        ok, rx, ry = _link_rel(j, t, k_a, k_e, k_ref_time, kc)
+        if ok:
+            px = rx + px
+            py = ry + py
+        else:
+            px = bx[j]
+            py = by[j]
+        if memo_ok[j] == 1:
+            memo[j, 0] = t
+            memo[j, 1] = px
+            memo[j, 2] = py
+            memo[j, 3] = 1.0
+    return px, py
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _memo_setup(dyn, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta, k_mu,
+                kc, memo, memo_ok):
+    """Konstanten rechnen, gedaechtnis leeren, merkbare koerper bestimmen."""
+    _kepler_constants(k_has, k_a, k_e, k_arg, k_ref_theta, k_mu, kc)
+    nb = k_has.shape[0]
+    for i in range(nb):
+        memo[i, 3] = 0.0
+        memo_ok[i] = 1
+    for i in range(nb):
+        idx = i
+        ended = False
+        for _ in range(_MAX_PARENT_DEPTH + 1):
+            is_dyn = False
+            for d in range(dyn.shape[0]):
+                if dyn[d] == idx:
+                    is_dyn = True
+            if is_dyn:
+                break
+            if kc[idx, 0] == 0.0:
+                ended = True
+                break
+            idx = k_parent[idx]
+            if idx < 0:
+                ended = True
+                break
+        # Nur eine kette, die OHNE freien koerper an einer festen wurzel
+        # endet, darf gemerkt werden.
+        if not ended:
+            memo_ok[i] = 0
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _acceleration_at(target, px, py, t, bx, by, bm, k_a, k_e, k_parent,
+                     k_ref_time, kc, memo, memo_ok, chain, G):
     """Nachbau von world.acceleration_at. Reihenfolge = koerper-reihenfolge."""
     ax = 0.0
     ay = 0.0
     for j in range(bx.shape[0]):
         if j == target:
             continue
-        ox, oy = _body_pos_at_time(j, t, bx, by, k_has, k_a, k_e, k_arg,
-                                   k_parent, k_ref_theta, k_ref_time, k_mu)
+        ox, oy = _body_pos_at_time(j, t, bx, by, k_a, k_e, k_parent,
+                                   k_ref_time, kc, memo, memo_ok, chain)
         dx = ox - px
         dy = oy - py
         r2 = dx * dx + dy * dy
@@ -144,31 +250,48 @@ def _acceleration_at(target, px, py, t, bx, by, bm, k_has, k_a, k_e, k_arg,
 
 
 @njit(cache=True, nogil=True, fastmath=False)
-def _rkn4_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_has, k_a, k_e,
-               k_arg, k_parent, k_ref_theta, k_ref_time, k_mu, G):
+def acceleration_at_once(target, px, py, t, bx, by, bm, k_has, k_a, k_e,
+                         k_arg, k_parent, k_ref_theta, k_ref_time, k_mu, G):
+    """Eine einzelne kraftauswertung von aussen (world.acceleration_at_fast)."""
+    nb = bx.shape[0]
+    kc = np.empty((nb, _KC_COLUMNS), dtype=np.float64)
+    memo = np.empty((nb, _MEMO_COLUMNS), dtype=np.float64)
+    memo_ok = np.empty(nb, dtype=np.int64)
+    chain = np.empty(_MAX_PARENT_DEPTH + 1, dtype=np.int64)
+    no_dyn = np.empty(0, dtype=np.int64)
+    _memo_setup(no_dyn, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta, k_mu,
+                kc, memo, memo_ok)
+    return _acceleration_at(target, px, py, t, bx, by, bm, k_a, k_e,
+                            k_parent, k_ref_time, kc, memo, memo_ok, chain, G)
+
+
+@njit(cache=True, nogil=True, fastmath=False)
+def _rkn4_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_a, k_e, k_parent,
+               k_ref_time, kc, memo, memo_ok, chain, G):
     """world._rkn4_step_body_state."""
-    a1x, a1y = _acceleration_at(target, px, py, t0, bx, by, bm, k_has, k_a,
-                                k_e, k_arg, k_parent, k_ref_theta, k_ref_time,
-                                k_mu, G)
+    a1x, a1y = _acceleration_at(target, px, py, t0, bx, by, bm, k_a, k_e,
+                                k_parent, k_ref_time, kc, memo, memo_ok, chain,
+                                G)
 
     hh = h * h
     p2x = px + vx * (h * 0.5) + a1x * (hh * 0.125)
     p2y = py + vy * (h * 0.5) + a1y * (hh * 0.125)
     a2x, a2y = _acceleration_at(target, p2x, p2y, t0 + h * 0.5, bx, by, bm,
-                                k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
-                                k_ref_time, k_mu, G)
+                                k_a, k_e, k_parent, k_ref_time, kc, memo,
+                                memo_ok, chain, G)
 
-    p3x = px + vx * (h * 0.5) + a1x * (hh * 0.125)
-    p3y = py + vy * (h * 0.5) + a1y * (hh * 0.125)
-    a3x, a3y = _acceleration_at(target, p3x, p3y, t0 + h * 0.5, bx, by, bm,
-                                k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
-                                k_ref_time, k_mu, G)
+    # k3 = k2: die dritte stufe liegt bei `p0 + v0*h/2 + a1*h²/8`, also exakt
+    # dort, wo p2 liegt (dasselbe argument ist der ganze vorteil von RKN4),
+    # zur selben zeit -- ihre kraft ist a2, bit fuer bit. Sie ein zweites mal
+    # auszuwerten kostete ein viertel des schritts fuer nichts. Die
+    # python-referenz (`world._rkn4_step_body_state`) tut dasselbe.
+    a3x, a3y = a2x, a2y
 
     p4x = px + vx * h + a3x * (hh * 0.5)
     p4y = py + vy * h + a3y * (hh * 0.5)
-    a4x, a4y = _acceleration_at(target, p4x, p4y, t0 + h, bx, by, bm, k_has,
-                                k_a, k_e, k_arg, k_parent, k_ref_theta,
-                                k_ref_time, k_mu, G)
+    a4x, a4y = _acceleration_at(target, p4x, p4y, t0 + h, bx, by, bm, k_a,
+                                k_e, k_parent, k_ref_time, kc, memo, memo_ok,
+                                chain, G)
 
     new_px = px + vx * h + (a1x + a2x + a3x) * (hh / 6.0)
     new_py = py + vy * h + (a1y + a2y + a3y) * (hh / 6.0)
@@ -178,31 +301,31 @@ def _rkn4_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_has, k_a, k_e,
 
 
 @njit(cache=True, nogil=True, fastmath=False)
-def _verlet_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_has, k_a, k_e,
-                 k_arg, k_parent, k_ref_theta, k_ref_time, k_mu, G):
+def _verlet_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_a, k_e,
+                 k_parent, k_ref_time, kc, memo, memo_ok, chain, G):
     """world._verlet_step_body_state (Stoermer-Verlet, KDK)."""
-    a0x, a0y = _acceleration_at(target, px, py, t0, bx, by, bm, k_has, k_a,
-                                k_e, k_arg, k_parent, k_ref_theta, k_ref_time,
-                                k_mu, G)
+    a0x, a0y = _acceleration_at(target, px, py, t0, bx, by, bm, k_a, k_e,
+                                k_parent, k_ref_time, kc, memo, memo_ok, chain,
+                                G)
     p1x = px + vx * h + a0x * (0.5 * h * h)
     p1y = py + vy * h + a0y * (0.5 * h * h)
-    a1x, a1y = _acceleration_at(target, p1x, p1y, t0 + h, bx, by, bm, k_has,
-                                k_a, k_e, k_arg, k_parent, k_ref_theta,
-                                k_ref_time, k_mu, G)
+    a1x, a1y = _acceleration_at(target, p1x, p1y, t0 + h, bx, by, bm, k_a,
+                                k_e, k_parent, k_ref_time, kc, memo, memo_ok,
+                                chain, G)
     v1x = vx + (a0x + a1x) * (0.5 * h)
     v1y = vy + (a0y + a1y) * (0.5 * h)
     return p1x, p1y, v1x, v1y
 
 
 @njit(cache=True, nogil=True, fastmath=False)
-def _step_once(mode, target, px, py, vx, vy, t0, h, bx, by, bm, k_has, k_a,
-               k_e, k_arg, k_parent, k_ref_theta, k_ref_time, k_mu, G):
+def _step_once(mode, target, px, py, vx, vy, t0, h, bx, by, bm, k_a, k_e,
+               k_parent, k_ref_time, kc, memo, memo_ok, chain, G):
     if mode == 1:
-        return _verlet_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_has,
-                            k_a, k_e, k_arg, k_parent, k_ref_theta,
-                            k_ref_time, k_mu, G)
-    return _rkn4_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_has, k_a,
-                      k_e, k_arg, k_parent, k_ref_theta, k_ref_time, k_mu, G)
+        return _verlet_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_a,
+                            k_e, k_parent, k_ref_time, kc, memo, memo_ok,
+                            chain, G)
+    return _rkn4_step(target, px, py, vx, vy, t0, h, bx, by, bm, k_a, k_e,
+                      k_parent, k_ref_time, kc, memo, memo_ok, chain, G)
 
 
 @njit(cache=True, nogil=True, fastmath=False)
@@ -240,6 +363,16 @@ def advance_dynamics(dyn, dyn_px, dyn_py, dyn_vx, dyn_vy, t_start, total_dt,
     try_vx = np.empty(n, dtype=np.float64)
     try_vy = np.empty(n, dtype=np.float64)
 
+    # Koerper-gedaechtnis fuer diesen aufruf: epoche und geskriptete
+    # positionen stehen fest, bis er zurueckkehrt (siehe _body_pos_at_time).
+    nb = bx.shape[0]
+    kc = np.empty((nb, _KC_COLUMNS), dtype=np.float64)
+    memo = np.empty((nb, _MEMO_COLUMNS), dtype=np.float64)
+    memo_ok = np.empty(nb, dtype=np.int64)
+    chain = np.empty(_MAX_PARENT_DEPTH + 1, dtype=np.int64)
+    _memo_setup(dyn, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta, k_mu,
+                kc, memo, memo_ok)
+
     hint = max_step if h_hint <= 0.0 else min(h_hint, max_step)
 
     while remaining > 1e-12:
@@ -258,18 +391,18 @@ def advance_dynamics(dyn, dyn_px, dyn_py, dyn_vx, dyn_vy, t_start, total_dt,
                 v0y = dyn_vy[i]
 
                 fpx, fpy, fvx, fvy = _step_once(
-                    mode, target, p0x, p0y, v0x, v0y, t, h, bx, by, bm, k_has,
-                    k_a, k_e, k_arg, k_parent, k_ref_theta, k_ref_time, k_mu, G)
+                    mode, target, p0x, p0y, v0x, v0y, t, h, bx, by, bm, k_a,
+                    k_e, k_parent, k_ref_time, kc, memo, memo_ok, chain, G)
 
                 half = h * 0.5
                 h1px, h1py, h1vx, h1vy = _step_once(
                     mode, target, p0x, p0y, v0x, v0y, t, half, bx, by, bm,
-                    k_has, k_a, k_e, k_arg, k_parent, k_ref_theta, k_ref_time,
-                    k_mu, G)
+                    k_a, k_e, k_parent, k_ref_time, kc, memo, memo_ok, chain,
+                    G)
                 h2px, h2py, h2vx, h2vy = _step_once(
                     mode, target, h1px, h1py, h1vx, h1vy, t + half, half, bx,
-                    by, bm, k_has, k_a, k_e, k_arg, k_parent, k_ref_theta,
-                    k_ref_time, k_mu, G)
+                    by, bm, k_a, k_e, k_parent, k_ref_time, kc, memo, memo_ok,
+                    chain, G)
 
                 pos_err = math.sqrt((h2px - fpx) * (h2px - fpx)
                                     + (h2py - fpy) * (h2py - fpy))
@@ -323,8 +456,8 @@ def advance_dynamics(dyn, dyn_px, dyn_py, dyn_vx, dyn_vy, t_start, total_dt,
                     target = dyn[i]
                     npx, npy, nvx, nvy = _step_once(
                         mode, target, dyn_px[i], dyn_py[i], dyn_vx[i],
-                        dyn_vy[i], t, h, bx, by, bm, k_has, k_a, k_e, k_arg,
-                        k_parent, k_ref_theta, k_ref_time, k_mu, G)
+                        dyn_vy[i], t, h, bx, by, bm, k_a, k_e, k_parent,
+                        k_ref_time, kc, memo, memo_ok, chain, G)
                     try_px[i] = npx
                     try_py[i] = npy
                     try_vx[i] = nvx

@@ -595,6 +595,8 @@ def _chain(job):
             1 if snapshot.get('use_body_memo', True) else 0,
             snapshot['rkn_max_dt_floor'],
             snapshot['rkn_max_dt_timescale_divisor'],
+            float(snapshot.get('group_far_moons', 0.0) or 0.0),
+            float(snapshot.get('planet_table_tol', 0.0) or 0.0),
         )
         if used < 2:
             break

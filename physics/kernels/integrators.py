@@ -16,9 +16,20 @@ eine integrator-konstante hier zu aendern heisst, sie auch in
 """
 import math
 
+import numpy as np
 from numba import njit
 
-from physics.kernels.kepler import _body_position_at_time_numba
+from physics.kernels.kepler import (MEMO_COLUMNS, MEMO_GROUP, MEMO_POS,
+                                    _body_position_at_time_numba,
+                                    _place_bodies_numba)
+
+#: `fastmath` OHNE `reassoc` fuer die kraftsumme. Liest die schleife die
+#: aufgestellten quellen nur noch aus dem notizblock, darf LLVM sie sonst
+#: vektorisieren und die summe der 28 beitraege umordnen -- gemessen 1.4 m
+#: auf dem Saturn-transfer gegen den alten weg, der in jeder iteration
+#: eine funktion rief und deshalb in koerper-reihenfolge summierte. Die
+#: reihenfolge ist tragend (physics-world.md: "keep the sum in body order").
+_ACC_FASTMATH = {'nnan', 'ninf', 'nsz', 'arcp', 'contract', 'afn'}
 
 
 @njit(cache=True, nogil=True, fastmath=True)
@@ -419,7 +430,7 @@ def _rkn_adaptive_step_numba(
         step_dt = next_dt
 
 
-@njit(cache=True, nogil=True, fastmath=True)
+@njit(cache=True, nogil=True, fastmath=_ACC_FASTMATH)
 def _compute_acc_time_numba(
     x,
     y,
@@ -438,39 +449,64 @@ def _compute_acc_time_numba(
     use_time_dependent_bodies,
     body_memo,
 ):
+    n = body_x.shape[0]
+    # ERST AUFSTELLEN, DANN SUMMIEREN -- und zwar in EINER schleife fuer
+    # beide wege. Mit notizblock in voller breite (der des rkn-kernels)
+    # stellt `_place_bodies_numba` alle quellen einmal in MEMO_POS auf; dort
+    # stecken auch die beiden naeherungen, die der lauf einschalten kann
+    # (ferne planeten aus der tafel, ferne mondsysteme als ein koerper mit
+    # der systemmasse). Ohne notizblock kommen die orte einzeln aus
+    # `_body_position_at_time_numba` in ein lokales feld. Die summe danach
+    # ist fuer beide dieselbe kompilierte schleife: zwei schleifen gleichen
+    # quelltexts rundeten verschieden (gemessen 2.3 m auf dem Saturn-
+    # transfer), weil LLVM die eine vektorisierte.
+    fast = (use_time_dependent_bodies != 0 and body_memo.shape[0] == n
+            and body_memo.shape[1] >= MEMO_COLUMNS)
+    if fast:
+        _place_bodies_numba(x, y, local_t, body_x, body_y, body_m, body_fixed,
+                            body_scripted, body_a, body_e, body_theta,
+                            body_arg, body_parent, G, body_memo)
+        pos = body_memo
+        cx = MEMO_POS
+        cfar = MEMO_GROUP + 3
+        cmass = MEMO_GROUP + 1
+    else:
+        pos = np.zeros((n, MEMO_POS + 3), dtype=np.float64)
+        for i in range(n):
+            if body_fixed[i] == 0:
+                continue
+            if use_time_dependent_bodies != 0:
+                sx, sy = _body_position_at_time_numba(
+                    i, local_t, body_x, body_y, body_m, body_scripted,
+                    body_a, body_e, body_theta, body_arg, body_parent, G,
+                    body_memo,
+                )
+            else:
+                sx = body_x[i]
+                sy = body_y[i]
+            pos[i, MEMO_POS] = sx
+            pos[i, MEMO_POS + 1] = sy
+        cx = MEMO_POS
+        cfar = MEMO_GROUP + 3
+        cmass = MEMO_GROUP + 1
+
     ax = 0.0
     ay = 0.0
-    for i in range(body_x.shape[0]):
+    for i in range(n):
         if body_fixed[i] == 0:
             continue
-
-        if use_time_dependent_bodies != 0:
-            source_x, source_y = _body_position_at_time_numba(
-                i,
-                local_t,
-                body_x,
-                body_y,
-                body_m,
-                body_scripted,
-                body_a,
-                body_e,
-                body_theta,
-                body_arg,
-                body_parent,
-                G,
-                body_memo,
-            )
-        else:
-            source_x = body_x[i]
-            source_y = body_y[i]
-
-        dx = source_x - x
-        dy = source_y - y
+        if pos[i, cx + 2] != 0.0:
+            continue
+        dx = pos[i, cx] - x
+        dy = pos[i, cx + 1] - y
         dist2 = dx * dx + dy * dy
         if dist2 < 1e-12:
             continue
+        mass = body_m[i]
+        if pos[i, cfar] != 0.0:
+            mass = pos[i, cmass]
         invd = 1.0 / math.sqrt(dist2)
-        accm = G * body_m[i] / dist2
+        accm = G * mass / dist2
         ax += dx * invd * accm
         ay += dy * invd * accm
     return ax, ay
@@ -510,17 +546,35 @@ def _local_timescale_numba(
 
     Rueckgabe 0.0, wenn kein koerper eine zeitskala liefert -- der aufrufer
     laesst seine decke dann unveraendert.
+
+    Ferne monde, die als teil ihres planeten ziehen (siehe
+    _compute_acc_time_numba), bleiben aussen vor. Das aendert das MINIMUM
+    nicht: ein mond in der entfernung D seines planeten hat die zeitskala
+    sqrt(D'^3/(G m)) mit D' >= D (1 - 1/faktor) und m << M -- groesser als
+    die seines planeten, der mit seiner eigenen masse mitgezaehlt wird.
     """
     best = 0.0
     have = 0
-    for i in range(body_x.shape[0]):
+    n = body_x.shape[0]
+    fast = (use_time_dependent_bodies != 0 and body_memo.shape[0] == n
+            and body_memo.shape[1] >= MEMO_COLUMNS)
+    if fast:
+        _place_bodies_numba(x, y, local_t, body_x, body_y, body_m, body_fixed,
+                            body_scripted, body_a, body_e, body_theta,
+                            body_arg, body_parent, G, body_memo)
+    for i in range(n):
         if body_fixed[i] == 0:
             continue
         mass = body_m[i]
         if mass <= 0.0:
             continue
 
-        if use_time_dependent_bodies != 0:
+        if fast:
+            if body_memo[i, MEMO_POS + 2] != 0.0:
+                continue
+            source_x = body_memo[i, MEMO_POS]
+            source_y = body_memo[i, MEMO_POS + 1]
+        elif use_time_dependent_bodies != 0:
             source_x, source_y = _body_position_at_time_numba(
                 i,
                 local_t,

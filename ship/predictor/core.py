@@ -187,6 +187,49 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # bit-vergleich (tests/warp_predictor_test.py §10), nach demselben
         # muster wie world.use_fast_integrator.
         self.use_body_memo = True
+        # FERNE MONDSYSTEME ALS EIN KOERPER: ab `faktor x systemradius`
+        # entfernung zieht ein planet mit der masse seines systems, und seine
+        # monde werden nicht aufgestellt (physics/kernels/propagate.py::
+        # _setup_far_moon_groups). 0 = jeder mond einzeln, wie die welt.
+        # Aus config gesetzt (predictor.group_far_moons_factor).
+        self.group_far_moon_factor = 0.0
+        # PLANETENTAFEL: ein planet weit genug weg kommt aus einer kubischen
+        # tafel des laufs statt aus fuenf kepler-loesungen je schritt; der
+        # fehler seiner anziehung bleibt unter diesem wert (m/s^2). 0 = aus.
+        # Aus config gesetzt (predictor.planet_table_accel_tol).
+        self.planet_table_accel_tol = 0.0
+        # LATENZAUSGLEICH UNTER SCHUB. Ein auftrag rechnet nicht vom
+        # schiffszustand beim abschicken, sondern von dem, den das schiff
+        # haben wird, wenn sein ergebnis gezeigt wird -- ueber den bekannten
+        # schub vorausgerechnet (physics/kernels/burn.py::_thrust_lead_numba):
+        # exakt fuer den ausfuehrer (sein profil), mit der gehaltenen eingabe
+        # von hand. Siehe _thrust_lead_model und _swap_ready_result.
+        self.thrust_latency_compensation = True
+        # Obergrenze des vorlaufs in sim-sekunden.
+        self.thrust_lead_max_s = 900.0
+        # Groesster RK4-schritt des vorlaufs (sim-sekunden).
+        self.thrust_lead_max_step_s = 2.0
+        # Profil des laufenden ausfuehrer-brennvorgangs (set_thrust_plan)
+        # und die gehaltene eingabe dieses bildes (aus
+        # _handle_trajectory_branch_change), beide None ohne schub.
+        self._thrust_plan = None
+        self._thrust_held = None
+        # Gemessene latenz (sim-sekunden) vom abschicken bis zum einwechseln,
+        # gleitend gemittelt -- der vorlauf des naechsten auftrags.
+        self._lead_lag_ema = 0.0
+        # Sim-sekunden je wandsekunde, aus den update()-abstaenden.
+        self._sim_rate_ema = 0.0
+        self._last_update_sim_t = None
+        # Die ersten stuetzstellen der gezeigten linie, UNVERBRAUCHT: gegen
+        # sie wird beim naechsten einwechseln gemessen, wie gut die gezeigte
+        # linie noch zum schiff passt (_swap_ready_result).
+        self._line_check = None
+        # Vom worker vorgerechneter pass 1 des apsis-scans (abstand jedes
+        # punktes zum bezugskoerper) fuer die zuletzt eingewechselte kurve,
+        # und wie viele ihrer punkte vorn schon verbraucht sind.
+        self._apsis_d2_raw = None
+        self._apsis_d2_offset = 0
+        self._apsis_d2_gen = -1
         # A coasting ship's velocity changes by ~|g|*dt each step from gravity
         # alone; only a jump BEYOND that (real thrust) should invalidate the
         # trajectory. Without this the detector fires every frame and forces a
@@ -445,7 +488,11 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
             self.integrator_mode = "rkn"
             self.rkn_min_dt = 0.1
             self.rkn_max_dt = 1500.0
-            self.rkn_rtol = 1e-7
+            # 1e-8, nicht 1e-7: die toleranz ist relativ zum BARYZENTRISCHEN
+            # abstand, neben der Erde also 15 km je schritt bei 1e-7 -- das
+            # setzt den Ap-fehler eines transfers (Neptun 3.0e7 -> 1.2e7 m
+            # bei +0.2 % schritten; gebundene bahnen +51 %). predictor.md.
+            self.rkn_rtol = 1e-8
             self.rkn_atol_pos = 10.0
             self.rkn_atol_vel = 1e-4
         elif q == "accurate":
@@ -530,6 +577,8 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
     def reset(self):
         self._cancel_pending_job()
         self.points = _empty_points()
+        self._line_check = None
+        self._apsis_d2_raw = None
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
         self._clear_apsis_markers()
@@ -553,6 +602,17 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
         # Die gemessene bahn-zeitspanne gehoert zu der kurve, die es nicht mehr
         # gibt. Nach einem reparenting/teleport waere sie schlicht falsch.
         self._horizon_time_per_arc = 0.0
+
+    def set_thrust_plan(self, plan):
+        """Das profil eines laufenden ausfuehrer-brennvorgangs (oder None).
+
+        Von der hauptschleife je bild gesetzt (runtime/loop.py
+        `_update_predictor`). Ein dict mit `t_ignition`, `dir_x`, `dir_y` und
+        den profilgroessen von `BurnProfile` (`a_peak`, `ramp_time`,
+        `hold_time`, `total_time`, `ramp_rate`) -- dieselben zahlen, die der
+        ausfuehrer fliegt, also ist der vorlauf dafuer exakt.
+        """
+        self._thrust_plan = plan
 
     def set_reference_body_index(self, index: int | None):
         if index is None:
@@ -629,6 +689,15 @@ class Predictor(HoldMixin, ComputeMixin, JobsMixin, ViewMixin):
                 if 0.05 <= gap_ms <= 250.0:
                     prev = float(self._update_interval_ms or 0.0)
                     self._update_interval_ms = gap_ms if prev <= 0.0 else (prev * 0.9 + gap_ms * 0.1)
+                    # Und die sim-rate: der vorlauf wird in SIM-sekunden
+                    # gebraucht, gemessen wird die latenz aber in wandzeit.
+                    sim_t = float(world.time) if world is not None else None
+                    last_sim_t = self._last_update_sim_t
+                    if sim_t is not None and last_sim_t is not None and sim_t >= last_sim_t:
+                        rate = (sim_t - last_sim_t) / (gap_ms / 1000.0)
+                        prev_rate = float(self._sim_rate_ema or 0.0)
+                        self._sim_rate_ema = rate if prev_rate <= 0.0 else (prev_rate * 0.9 + rate * 0.1)
+            self._last_update_sim_t = float(world.time) if world is not None else None
         except Exception:
             pass
 
