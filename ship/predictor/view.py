@@ -10,7 +10,7 @@ import time
 import numpy as np
 
 from physics.kernels import _empty_points
-from physics.kernels.apsis import _find_apsis_markers_numba
+from physics.kernels.apsis import _apsis_d2_numba, _find_apsis_markers_numba
 
 
 class ViewMixin:
@@ -38,6 +38,8 @@ class ViewMixin:
 
     def _clear_prediction_points(self):
         self.points = self._empty_points_array()
+        self._line_check = None
+        self._apsis_d2_raw = None
         self._roll_states = np.empty((0, 5), dtype=np.float64) if np is not None else []
         self.initialized = False
         self._points_time_offset = 0.0
@@ -318,6 +320,85 @@ class ViewMixin:
             return False
         return bool(np.all(np.isfinite(pts[:, 3:5])))
 
+    def _tangents_ok(self, pts):
+        """`_points_have_tangents`, einmal je kurve statt je scan.
+
+        Ob die tangenten-spalten geschrieben sind, haengt am kernel der
+        kurve, nicht am verbrauchten anfang (der kopf traegt die schiffs-
+        geschwindigkeit, endlich). 0.35 ms je scan bei 40 000 punkten.
+        """
+        gen = int(getattr(self, '_points_generation', 0))
+        if getattr(self, '_tangents_ok_gen', None) != gen:
+            self._tangents_ok_value = self._points_have_tangents(pts)
+            self._tangents_ok_gen = gen
+        return self._tangents_ok_value
+
+    def _adopt_apsis_d2(self, result):
+        """Den vom worker vorgerechneten apsis-abstand der neuen kurve merken.
+
+        Dazu, ob ihre tangenten-spalten brauchbar sind (`_tangents_ok`) --
+        auch das hat der worker schon nachgesehen.
+        """
+        if isinstance(result, dict) and "tangents_ok" in result:
+            self._tangents_ok_value = bool(result["tangents_ok"])
+            self._tangents_ok_gen = int(getattr(self, '_points_generation', 0))
+        d2 = result.get("apsis_d2") if isinstance(result, dict) else None
+        pts = self.points
+        if (d2 is None or not isinstance(pts, np.ndarray)
+                or int(d2.shape[0]) != int(pts.shape[0])):
+            self._apsis_d2_raw = None
+            return
+        self._apsis_d2_raw = d2
+        self._apsis_d2_offset = 0
+        self._apsis_d2_gen = int(getattr(self, '_points_generation', 0))
+
+    def _apsis_d2_for(self, pts, base_sim_time, ref_index, snapshot):
+        """Pass 1 fuer die gezeichnete kurve aus dem vorgerechneten stueck.
+
+        Die aktuelle kurve ist nach dem verbrauchen `[kopf] + roh[offset:]`
+        (`_advance_points_along_curve`); gezeichnet wird davon ein anfang. Der
+        abstand eines punktes haengt nur an ihm selbst, also ist der
+        vorgerechnete wert DERSELBE, den pass 1 hier liefern wuerde -- nur der
+        kopf wird neu gerechnet. Passt die struktur nicht (zeitraffer-halt,
+        starre verschiebung, anderer bezug), None: dann rechnet der kernel
+        selbst.
+        """
+        raw = getattr(self, '_apsis_d2_raw', None)
+        if raw is None or self._hold_active():
+            return None
+        if int(getattr(self, '_apsis_d2_gen', -1)) != int(getattr(self, '_points_generation', 0)):
+            return None
+        if float(getattr(self, '_points_time_offset', 0.0)) != 0.0:
+            return None
+        full = self.points
+        if not isinstance(full, np.ndarray) or pts.shape[0] > full.shape[0]:
+            return None
+        head = 1 if bool(getattr(self, '_synthetic_head', False)) else 0
+        offset = int(getattr(self, '_apsis_d2_offset', 0))
+        if full.shape[0] - head != raw.shape[0] - offset:
+            return None
+        n = int(pts.shape[0])
+        if not head:
+            return raw[offset:offset + n]
+        head_d2 = _apsis_d2_numba(
+            pts[:1], base_sim_time, ref_index,
+            snapshot["body_x"], snapshot["body_y"], snapshot["body_m"],
+            snapshot["body_scripted"], snapshot["body_a"], snapshot["body_e"],
+            snapshot["body_theta"], snapshot["body_arg"], snapshot["body_parent"],
+            float(snapshot["G"]),
+            1 if bool(snapshot.get("use_time_dependent_bodies", True)) else 0,
+        )
+        if offset >= 1:
+            # Wie die punkte selbst (`_advance_points_along_curve`): der kopf
+            # kommt in den platz der zuletzt verbrauchten stuetzstelle, und
+            # die zeile ab dort IST das gesuchte feld -- keine kopie.
+            raw[offset - 1] = head_d2[0]
+            return raw[offset - 1:offset - 1 + n]
+        d2 = np.empty(n, dtype=np.float64)
+        d2[0] = head_d2[0]
+        d2[1:] = raw[:n - 1]
+        return d2
+
     def get_apsis_markers(self):
         """Apoapsis/Periapsis-Marker der aktuellen Prädiktionslinie.
 
@@ -375,6 +456,11 @@ class ViewMixin:
             return self._apsis_markers
 
         try:
+            base_t = (float(snapshot.get("sim_time", 0.0))
+                      + float(getattr(self, "_points_time_offset", 0.0)))
+            d2_pre = self._apsis_d2_for(pts, base_t, ref_index, snapshot)
+            if d2_pre is None:
+                d2_pre = np.empty(0, dtype=np.float64)
             markers, count = _find_apsis_markers_numba(
                 pts,
                 # DIE BEZUGSZEIT MUSS ZU DEN PUNKTZEITEN PASSEN, NICHT ZUR UHR.
@@ -418,7 +504,8 @@ class ViewMixin:
                 # sich das nicht abfragen: er ist `fastmath=True`, dort
                 # liefern SOWOHL `math.isfinite(nan)` ALS AUCH `nan == nan`
                 # den wert True. Also numpy, ausserhalb.
-                1 if self._points_have_tangents(pts) else 0,
+                1 if self._tangents_ok(pts) else 0,
+                d2_pre,
             )
             self._apsis_markers = markers[:int(count)].copy()
         except Exception as exc:

@@ -32,10 +32,10 @@ paths:
 
   | § | asserts |
   |---|---|
-  | 9 | thrust does not block the main thread — `update()` inside the frame budget under sustained thrust, the line neither emptied nor frozen, settling back to the coasting noise floor after burnout |
-  | 10 | the body-placement memo is bit-identical to the un-memoised path (5 configurations, incl. a two-link moon chain) |
+  | 9 | thrust does not block the main thread — `update()` inside the frame budget under sustained thrust, the line neither emptied nor frozen, settling back to the coasting noise floor after burnout; since the latency compensation (2026-09-30) the line under thrust stays within 3× the coasting noise (measured 6.5e3 against 2.1e5 m; it used to trail by a multiple) |
+  | 10 | the body-placement memo is bit-identical to the un-memoised path (5 configurations, incl. a two-link moon chain; grouping and planet table set to 0, config turns both on); far-moon grouping at factor 300 stays under 1 m, factor 0.03 moves the line >100× that (counter-check); the planet table at 1e-15 m/s² stays under 1 m and is not bit-identical (0.34 m is step-control noise; a LEO line cannot see the table even at 1e-5) |
   | 11 | Ap/Pe markers land on an analytic e=0.5 ellipse's radii (8.0002e6 vs 8.0e6, 2.4002e7 vs 2.4e7) |
-  | 12 | the thrust pipeline never swaps a result backwards — strictly ascending job ids *and* strictly increasing snapshot velocity |
+  | 12 | the thrust pipeline never swaps a result backwards — strictly ascending job ids *and* strictly increasing snapshot velocity; depth 3 refreshes ≥ 1.4× depth 1 *or* already ≥ 85 % of the frame rate (since 2026-09-30 one default-horizon compute is shorter than a frame: 137/s → 153/s at 154 fps) |
   | 13 | thrust is detected near periapsis but not while coasting or under warp (12/12 and 0/12 at four points; 0/6 under a 7 d/s step) |
   | 14 | swap pacing produces no double-steps |
   | 15 | the far-field step ceiling costs the same at periapsis as at apoapsis (fails at 5.80 against the old code) |
@@ -74,7 +74,9 @@ paths:
   the old rigid shift was off by), the point list neither growing nor shrinking
   as its synthetic head is prepended and stripped, a shifted time column not
   displacing the reference body, and the warp hold not getting worse from
-  sharing the mechanism.
+  sharing the mechanism. §1 spread is **0.000e+00 m** since the scan's pass 1
+  runs on a fixed time grid (was 1.0e1 m: the old windows followed the point
+  indices, `.claude/rules/predictor.md` → "Long horizons").
 - **`horizon_targets_test.py`** — the pure length rule of the HUD horizon
   slider: §1–3 `test.horizon_targets()` against `predictor_horizon_lengths`
   (grabbing pins the computed length at the ceiling, `drawn` follows the knob),

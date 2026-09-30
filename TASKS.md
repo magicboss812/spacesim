@@ -106,7 +106,7 @@ xvfb-run -a -s "-screen 0 2560x1440x24" \
 
 ---
 
-## Task 1: Performance overhaul `[ ]`
+## Task 1: Performance overhaul `[x]`
 
 **Goal.** Find and remove every CPU and GPU cost that changes neither what
 the player sees nor what the physics computes. The accuracy bar is absolute:
@@ -312,8 +312,8 @@ the acceptance check above still passes.
   time and steps at the Saturn and Neptun horizons, the burn metrics, and
   the acceptance check's Ap error and drift, before and after.
 
-**Result:** _Session 1 (2026-09-29): Part A partly done, Part B not started.
-Task stays `[ ]`; the next session continues with Part B._
+**Result:** _Session 1 (2026-09-29): Part A. Session 2 (2026-09-30): Part B,
+at the end of this block._
 
 Done, each bit- or pixel-identical and noted in the owning rule file:
 1. HUD text is instances of the `ui_rect` batch (one label atlas, `texelFetch`
@@ -365,9 +365,46 @@ widget geometry, next lever is per-widget instance caching; the `TIMING:`
 print costs 1–11 µs on Linux sinks, a Windows console is unmeasured here
 (compare `frame` with `debug.print_frame_timings` on and off there).
 
-Next session: Part B from the start. Build `tools/transfer_bench.py` (the
-acceptance check) before any predictor change; the faster world kernel
-makes its warp leg cheaper. Nothing in the predictor compute path changed.
+**Part B** (session 2). `tools/transfer_bench.py` is the acceptance check.
+Changed, each noted in `predictor.md` → "Long horizons": body placement once
+per stage with 5 time slots and scalar-only Kepler (`kepler.py`,
+`integrators.py`); far moon systems as one body (factor 300) and a planet
+table (1e-15 m/s²), both from config, both 0 in a bare `Predictor()`;
+latency compensation under thrust (`burn.py::_thrust_lead_numba`, executor
+profile or held input) with swaps judged against the ship instead of the
+1.5 s wall-age gate; apsis pass 1 on a fixed time grid, computed by the
+worker; balanced `rkn_rtol` 1e-7 → 1e-8. Two runs each, before → after
+(Ap error = first post-burnout Ap against the world's actual extremum, px at
+SOI zoom; line deviation at full-line zoom):
+
+| scenario | compute (steps) | fresh line | shown age | line dev. median | Ap error | drift |
+|---|---|---|---|---|---|---|
+| Saturn node | 206 / 213 → 51 / 44 ms (2464 → 2470) | 1.3 / 2.1 → 41 / 39 % | 334 s → ≤ 4 ms | 610 / 542 → 6 / 10 px | 4.38e6 / 4.39e6 → 1.44e6 / 1.49e6 m | 0.051 → 0.007 px |
+| Saturn manual | 202 / 206 → 44 / 46 ms | 1.4 / 1.5 → 39 / 37 % | 334 s → 0 | 579 / 590 → 11 / 14 px | 4.21e6 / 4.18e6 → 1.35e6 / 1.35e6 m | 0.050 → 0.006 px |
+| Neptun node | 1237 / 1394 → 251 / 256 ms (15210 → 15221) | 0 → 9.4 / 9.2 % | 339 s → ≤ 6 ms | 305 → 253 / 197 px | 2.65e7 / 2.66e7 → 1.51e7 / 1.43e7 m | 0.064 → 0.050 / 0.044 px |
+| Neptun manual | 1289 / 1281 → 280 / 268 ms | 0 → 8.9 / 9.0 % | 339 s → ≤ 7 ms | 309 → 323 / 360 px | 2.67e7 / 2.71e7 → 1.08e7 / 1.08e7 m | 0.069 → 0.014 px |
+
+First post-burnout line at Neptun 31 s → 0.1–0.6 s after burnout; marker
+jumps after it ≤ 0.023 px. Without the `rtol` change the kernel work alone
+left the Neptun node Ap at 3.04e7 / 3.45e7 m. Both kernels agree to ≤ 2 m on
+the same snapshot; the error depends on the moment the line starts from,
+and the old build always showed its first line ~1750 s after burnout.
+Predictor main-thread time per burn frame: median 0.15 → 0.14–0.27 ms,
+p95 0.26 → 0.85–1.30 ms (38 % of frames swap instead of 2 %).
+
+Open: the burn line deviation p95 got worse (Saturn 1.1–1.3k → 0.25–2.5k px,
+Neptun 1.4k → 2.0–2.4k px) and the Neptun manual median rose 5–17 %; not
+investigated. `rtol` 1e-8 costs +51 % steps in bound orbits (LEO 1× 488 →
+737). Raising `rkn_max_dt_ceiling` to 1e6 s would cut transfers ~7× more
+at +5 % Ap error against `rtol` alone and breaks §20's counter-check:
+measured, not done. Tests: the same failures as before the change;
+`warp_predictor_test` §9 (the line no longer trails under thrust) and §12
+(depth 3 may already run every frame) were rewritten to the new behaviour,
+§10 got the table checks. Visual A/B: the pixels that differ are the same
+two regions that differ between two baseline runs, the Pe label at the
+ship and an apsis countdown (03:39:16 → 03:43:22). The countdown moved
+because first Pe of the near-circular default orbit is now 15336 s, against
+15398 s for a tight reference (was 15095 s).
 
 ---
 

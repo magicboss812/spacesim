@@ -28,10 +28,11 @@ import numpy as np
 #: dann als geraden, statt eine kruemmung zu erfinden.
 POINT_COLUMNS = 5
 
-#: Spaltenzahl des koerper-notizblocks: [t, x, y, gueltig] + die fuenf
-#: zeitunabhaengigen bahngroessen + deren gueltigkeitsmerker.
-#: Siehe `_body_position_at_time_numba`.
-BODY_MEMO_COLUMNS = 10
+#: Spaltenzahl des koerper-notizblocks. Die aufteilung (plaetze, gruppierung,
+#: planetentafel, schreibzeiger) steht in `physics/kernels/kepler.py`
+#: (MEMO_GROUP, MEMO_SLOT_BASE, MEMO_TAB, MEMO_CURSOR).
+from .kepler import MEMO_COLUMNS as BODY_MEMO_COLUMNS  # noqa: E402
+from .kepler import MEMO_SLOTS as BODY_MEMO_SLOTS  # noqa: E402,F401
 
 
 def _no_body_memo():

@@ -16,6 +16,24 @@ from physics.kernels.propagate import (
     _compute_distance_points_rkn_numba,
 )
 from physics.kernels.kepler import _body_position_at_time_numba
+from physics.kernels.burn import _thrust_lead_numba
+from physics.kernels.apsis import _apsis_d2_numba
+
+
+#: Hoechstens so viele stuecke behaelt der schubbogen des vorlaufs in der
+#: linie. Er ist beim eintreffen fast ganz verbraucht; das Hermite-stueck
+#: zwischen zwei seiner zustaende ist fuer konstanten schub plus die ueber
+#: sekunden kaum gekruemmte schwerkraft exakt genug.
+LEAD_ARC_MAX_SEGMENTS = 16
+
+
+def _thin_lead_arc(arc):
+    """Den vorlauf-bogen auf LEAD_ARC_MAX_SEGMENTS stuecke ausduennen."""
+    n = int(arc.shape[0])
+    if n <= LEAD_ARC_MAX_SEGMENTS + 1:
+        return arc
+    idx = np.unique(np.linspace(0, n - 1, LEAD_ARC_MAX_SEGMENTS + 1).astype(np.int64))
+    return arc[idx]
 
 
 class ComputeMixin:
@@ -325,7 +343,7 @@ class ComputeMixin:
         """
         return self._make_snapshot(ship, world, int(max_points))
 
-    def _make_snapshot(self, ship, world, max_points):
+    def _make_snapshot(self, ship, world, max_points, lead=None):
         effective_precision = self._effective_precision()
         ref_enabled, ref_px, ref_py = self._resolve_reference_body(world)
         physics_ref_enabled = 0
@@ -462,6 +480,14 @@ class ComputeMixin:
         # laeuft im worker-thread und darf den schalter nicht mitten im lauf
         # wechseln sehen.
         snapshot["use_body_memo"] = bool(getattr(self, "use_body_memo", True))
+        # Ferne mondsysteme als ein koerper (0 = jeder mond einzeln), siehe
+        # physics/kernels/propagate.py::_setup_far_moon_groups.
+        snapshot["group_far_moons"] = float(
+            getattr(self, "group_far_moon_factor", 0.0) or 0.0)
+        # Planetentafel: erlaubter beschleunigungsfehler in m/s^2 (0 = aus),
+        # siehe physics/kernels/propagate.py::_setup_planet_table.
+        snapshot["planet_table_tol"] = float(
+            getattr(self, "planet_table_accel_tol", 0.0) or 0.0)
         body_x, body_y, body_m, body_fixed = self._serialize_bodies_numba(world)
         snapshot["body_x"] = body_x
         snapshot["body_y"] = body_y
@@ -482,6 +508,12 @@ class ComputeMixin:
         snapshot["body_arg"] = body_arg
         snapshot["body_parent"] = body_parent
         snapshot["body_names"] = [str(getattr(b, "name", "")) for b in world.body]
+        # Der VORLAUF unter schub (siehe JobsMixin._thrust_lead_model): die
+        # rechnung beginnt `lead_s` sim-sekunden spaeter, am zustand, den das
+        # schiff unter diesem schub dann hat.
+        if lead is not None:
+            snapshot["lead"] = dict(lead)
+            snapshot["lead_s"] = float(lead.get("lead_s", 0.0))
         if getattr(self, "debug_moving_sources", False):
             self._debug_moving_source_snapshot(snapshot)
         return snapshot
@@ -515,6 +547,11 @@ class ComputeMixin:
                 return
             precision = float(snapshot.get("precision", 0.0) or 0.0)
             max_points = int(snapshot.get("max_points", 0) or 0)
+            # Die stuetzstellen des vorlaufs liegen nach ZEIT, nicht nach
+            # bogen -- fuer das verhaeltnis zaehlt nur die eigentliche kurve.
+            lead_points = int(result.get("lead_points", 0) or 0)
+            if lead_points > 0:
+                points = points[lead_points:]
             n = int(len(points))
             if precision <= 0.0 or max_points <= 0 or n < max(3, max_points // 2):
                 return
@@ -529,6 +566,7 @@ class ComputeMixin:
         mode = self._normalize_integrator_mode(snapshot.get("integrator_mode", "rkn"))
         self._debug_integrator_mode("compute", snapshot)
         rkn_stats = None
+        lead_arc = None
 
         if mode == "rkn":
             min_dt = float(snapshot.get("rkn_min_dt", 0.1))
@@ -637,11 +675,46 @@ class ComputeMixin:
             if not math.isfinite(timescale_divisor) or timescale_divisor <= 0.0:
                 timescale_divisor = 0.0
 
+            # VORLAUF: erst der schubbogen bis zur erwarteten anzeigezeit,
+            # dann die gleitkurve ab seinem ende. Der bogen gehoert zur linie
+            # (zwischen dem schiff und dem start der gleitkurve), damit
+            # `_anchor_first_point` ihn wie alles andere verbraucht.
+            start_px = float(snapshot["ship_px"])
+            start_py = float(snapshot["ship_py"])
+            start_vx = float(snapshot["ship_vx"])
+            start_vy = float(snapshot["ship_vy"])
+            start_t = float(snapshot.get("resume_t", 0.0))
+            lead_arc = None
+            lead = snapshot.get("lead")
+            if lead is not None and float(lead.get("lead_s", 0.0)) > 0.0 and use_time_dependent_bodies:
+                arc, arc_n = _thrust_lead_numba(
+                    start_px, start_py, start_vx, start_vy, start_t,
+                    float(lead["lead_s"]), int(lead["mode"]),
+                    float(lead["ax"]), float(lead["ay"]),
+                    float(lead.get("omega", 0.0)),
+                    float(lead["dir_x"]), float(lead["dir_y"]),
+                    float(lead["tau0"]), float(lead["a_peak"]),
+                    float(lead["ramp_time"]), float(lead["hold_time"]),
+                    float(lead["total_time"]), float(lead["ramp_rate"]),
+                    float(lead.get("max_step", 2.0)),
+                    snapshot["body_x"], snapshot["body_y"], snapshot["body_m"],
+                    snapshot["body_fixed"], body_scripted, body_a, body_e,
+                    body_theta, body_arg, body_parent, float(snapshot["G"]),
+                    use_time_dependent_bodies, _no_body_memo(),
+                )
+                arc = arc[:int(arc_n)]
+                if arc.shape[0] >= 2 and np.all(np.isfinite(arc)):
+                    lead_arc = _thin_lead_arc(arc)
+                    end = lead_arc[-1]
+                    start_px, start_py = float(end[0]), float(end[1])
+                    start_vx, start_vy = float(end[3]), float(end[4])
+                    start_t = float(end[2])
+
             out, used, rkn_stats = _compute_distance_points_rkn_numba(
-                snapshot["ship_px"],
-                snapshot["ship_py"],
-                snapshot["ship_vx"],
-                snapshot["ship_vy"],
+                start_px,
+                start_py,
+                start_vx,
+                start_vy,
                 0,
                 float(snapshot.get("ref_px", 0.0)),
                 float(snapshot.get("ref_py", 0.0)),
@@ -671,12 +744,14 @@ class ComputeMixin:
                 max_rejects,
                 use_time_dependent_bodies,
                 ref_index,
-                float(snapshot.get("resume_t", 0.0)),
+                start_t,
                 float(snapshot.get("resume_accumulated", 0.0)),
                 float(snapshot.get("resume_proposed_dt", 0.0)),
                 1 if snapshot.get("use_body_memo", True) else 0,
                 max_dt_floor,
                 timescale_divisor,
+                float(snapshot.get("group_far_moons", 0.0) or 0.0),
+                float(snapshot.get("planet_table_tol", 0.0) or 0.0),
             )
             # Alles aufheben, was noetig ist, um GENAU HIER weiterzurechnen.
             # Entscheidend ist, dass der SCHNAPPSCHUSS mitgehalten wird: die
@@ -783,6 +858,11 @@ class ComputeMixin:
             )
         points = out[:int(used)].copy()
         computed_count = int(used)
+        lead_points = 0
+        if mode == "rkn" and lead_arc is not None and points.shape[0] >= 1:
+            # Der letzte bogenpunkt IST der erste punkt der gleitkurve.
+            lead_points = int(lead_arc.shape[0] - 1)
+            points = np.concatenate((lead_arc[:-1], points), axis=0)
 
         try:
             base_sim_time = float(snapshot.get("sim_time", 0.0)) if snapshot is not None else 0.0
@@ -808,7 +888,35 @@ class ComputeMixin:
         if getattr(self, "debug_moving_sources", False):
             self._debug_predictor_energy(snapshot, points)
 
-        return {"points": points, "snapshot": snapshot, "computed": computed_count, "rkn_stats": rkn_stats}
+        # PASS 1 DES APSIS-SCANS GLEICH HIER, AUF DEM WORKER: der abstand
+        # jedes punktes zum bezugskoerper haengt nur an diesem punkt (festes
+        # zeitgitter, siehe physics/kernels/apsis.py::_apsis_d2_numba), also
+        # rechnet der hauptthread nach dem einwechseln dieselben zahlen nicht
+        # noch einmal -- 6.7 ms je neuer linie bei 40 000 punkten.
+        apsis_d2 = None
+        try:
+            ref_index = int(snapshot.get("reference_body_index", -1))
+            if (isinstance(points, np.ndarray) and points.ndim == 2
+                    and points.shape[0] >= 3 and 0 <= ref_index < snapshot["body_x"].shape[0]):
+                apsis_d2 = _apsis_d2_numba(
+                    points, base_sim_time, ref_index,
+                    snapshot["body_x"], snapshot["body_y"], snapshot["body_m"],
+                    snapshot["body_scripted"], snapshot["body_a"], snapshot["body_e"],
+                    snapshot["body_theta"], snapshot["body_arg"], snapshot["body_parent"],
+                    float(snapshot["G"]),
+                    1 if bool(snapshot.get("use_time_dependent_bodies", True)) else 0,
+                )
+        except Exception:
+            apsis_d2 = None
+
+        tangents_ok = bool(
+            isinstance(points, np.ndarray) and points.ndim == 2
+            and points.shape[1] >= 5 and points.shape[0] >= 2
+            and np.all(np.isfinite(points[:, 3:5])))
+
+        return {"points": points, "snapshot": snapshot, "computed": computed_count,
+                "rkn_stats": rkn_stats, "lead_points": lead_points,
+                "apsis_d2": apsis_d2, "tangents_ok": tangents_ok}
 
     def _compute_full_rolling(self, ship, world):
         start_ts = time.time()
@@ -1000,9 +1108,13 @@ class ComputeMixin:
 
         # Siehe _swap_ready_result: neue kurve, neue marker -- und eine
         # zeitspalte, die wieder auf ihrem eigenen schnappschuss sitzt.
+        if isinstance(self.points, np.ndarray):
+            self._remember_line_check(self.points)
         self._points_time_offset = 0.0
         self._synthetic_head = False
         self._invalidate_derived_caches()
+        if isinstance(result, dict):
+            self._adopt_apsis_d2(result)
         self.initialized = True
  
         try:

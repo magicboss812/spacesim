@@ -79,7 +79,11 @@
     "apsis_markers_enabled": true,
     "apsis_max_markers": 16,
     "thrust_pipeline_depth": 6,
-    "swap_backlog_max": 1
+    "swap_backlog_max": 1,
+    "thrust_latency_compensation": true,
+    "thrust_lead_max_s": 900.0,
+    "group_far_moons_factor": 300.0,
+    "planet_table_accel_tol": 1e-15
   },
   "maneuver": {
     "enabled": true,

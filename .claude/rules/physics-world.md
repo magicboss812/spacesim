@@ -267,7 +267,10 @@ paths:
   project**. `orbit_position` (used by `world.update_planets`) and
   `position_at_time` (used by the integrator's force loops) both go through
   it, and `world_kernels._kepler_constants` + `_link_rel` are its word-for-word
-  numba twin (`_body_pos_at_time` walks the parent chain through them).
+  numba twin (`_body_pos_at_time` walks the parent chain through them). The
+  predictor's twin is `physics/kernels/kepler.py::_kepler_rel_consts` (scalar
+  arguments only, see `.claude/rules/predictor.md` → "Body placement"); the
+  same word-for-word rule holds for it.
   Exact Kepler, so propagating in one step or in a hundred gives the same
   answer — which is what stops the time-warp chunking moving the planets.
   See the body-model note in `.claude/rules/orbit-lines.md`.

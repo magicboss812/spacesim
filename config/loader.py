@@ -420,6 +420,16 @@ class ConfigLoader:
             # 0 = immer sofort das neueste (kuerzeste verzoegerung, aber
             # ruckartig), 2 = vollstaendig gleichmaessig, dafuer aeltere linie.
             ('swap_backlog_max', 'swap_backlog_max', int),
+            # Latenzausgleich unter schub: jeder auftrag rechnet vom zustand
+            # zur erwarteten anzeigezeit, ueber den bekannten schub voraus.
+            ('thrust_latency_compensation', 'thrust_latency_compensation', bool),
+            ('thrust_lead_max_s', 'thrust_lead_max_s', float),
+            # Ferne mondsysteme als ein koerper ab faktor x systemradius
+            # (0 = jeder mond einzeln, wie die welt).
+            ('group_far_moons_factor', 'group_far_moon_factor', float),
+            # Ferne planeten aus einer kubischen tafel des laufs; ihr
+            # anziehungsfehler bleibt unter diesem wert in m/s^2 (0 = aus).
+            ('planet_table_accel_tol', 'planet_table_accel_tol', float),
             # anderswo ausgewertet (runtime/, ship/horizon.py)
             ('display_length_quantum_points', None, None),
             ('horizon_slider_min_mult', None, None),

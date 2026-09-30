@@ -15,7 +15,10 @@ import math
 import numpy as np
 from numba import njit
 
-from physics.kernels.kepler import _body_kepler_constants_numba
+from physics.kernels import BODY_MEMO_COLUMNS
+from physics.kernels.kepler import (MEMO_GROUP, MEMO_TAB,
+                                    _body_kepler_constants_numba,
+                                    _setup_body_kinds)
 from physics.kernels.integrators import (
     _compute_acc_nearest_numba,
     _compute_acc_numba,
@@ -24,6 +27,81 @@ from physics.kernels.integrators import (
     _rkn_adaptive_step_numba,
     _rkn_adaptive_step_time_numba,
 )
+
+
+@njit(cache=True, nogil=True, fastmath=True)
+def _setup_far_moon_groups(body_memo, body_m, body_fixed, body_scripted,
+                           body_a, body_e, body_parent, group_factor):
+    """Die mondsysteme fuer `_compute_acc_time_numba` im notizblock anlegen.
+
+    Ein MOND ist ein koerper, dessen elternkoerper selbst einen hat (planet
+    um stern). Je mond: seine wurzel (der planet, +1 kodiert, 0 = keine). Je
+    planet: die masse des ganzen systems und die schwelle
+    `(faktor x groesster apozentrumsabstand eines mondes)^2`, ab der er als
+    ein koerper zieht. Nur monde, deren planet im koerper-array VOR ihnen
+    steht -- die schleife entscheidet am planeten, bevor sie die monde
+    erreicht.
+    """
+    n = body_m.shape[0]
+    for p in range(n):
+        body_memo[p, MEMO_GROUP + 1] = body_m[p]
+    for j in range(n):
+        p = body_parent[j]
+        if body_fixed[j] == 0 or body_scripted[j] == 0 or p < 0 or p >= j:
+            continue
+        if body_parent[p] < 0 or body_fixed[p] == 0 or body_a[j] <= 0.0:
+            continue
+        body_memo[j, MEMO_GROUP] = float(p + 1)
+        body_memo[p, MEMO_GROUP + 1] += body_m[j]
+        reach = group_factor * body_a[j] * (1.0 + body_e[j])
+        if reach * reach > body_memo[p, MEMO_GROUP + 2]:
+            body_memo[p, MEMO_GROUP + 2] = reach * reach
+
+
+@njit(cache=True, nogil=True, fastmath=True)
+def _setup_planet_table(body_memo, body_m, body_fixed, body_scripted, body_a,
+                        body_e, body_parent, G, accel_tol):
+    """Die planetentafel fuer `kepler._table_position_numba` anlegen.
+
+    Ein PLANET umlaeuft einen koerper ohne eigene bahn (die Sonne). Je planet
+    ein knotenabstand `h = T/N` und die nah-schwelle: die kubik liegt
+    hoechstens `eps = (9/16)/24 * F * a(1+e) * (2 pi / N)^4` daneben
+    (`F = (1+e)/(1-e)^5` fuer die staerkere kruemmung im perihel), ihre
+    anziehung also hoechstens `2 mu eps / D^3` -- unterhalb der schwelle
+    `D_min = (2 mu eps / accel_tol)^(1/3)` rechnet der aufrufer exakt. N ist so
+    gewaehlt, dass `D_min` hoechstens ein fuenftel der bahnhalbachse ist; mit
+    der masse des ganzen systems, weil ein gruppierter planet mit ihr zieht.
+    """
+    n = body_m.shape[0]
+    two_pi = 2.0 * math.pi
+    for i in range(n):
+        p = body_parent[i]
+        if body_fixed[i] == 0 or body_scripted[i] == 0 or body_a[i] <= 0.0:
+            continue
+        if p < 0 or p >= n or body_parent[p] >= 0:
+            continue
+        if body_memo[i, 9] <= 0.0 or body_memo[i, 5] <= 0.0:
+            continue
+        e = body_e[i]
+        a = body_a[i]
+        period = two_pi / body_memo[i, 5]
+        mass = body_m[i]
+        if body_memo[i, MEMO_GROUP + 1] > mass:
+            mass = body_memo[i, MEMO_GROUP + 1]
+        mu2 = 2.0 * G * mass
+        amp = 0.0234375 * (1.0 + e) / ((1.0 - e) ** 5) * a * (1.0 + e) * two_pi ** 4
+        d_goal = 0.2 * a
+        knots = math.ceil((amp * mu2 / (accel_tol * d_goal * d_goal * d_goal)) ** 0.25)
+        if knots < 64.0:
+            knots = 64.0
+        if knots > 16384.0:
+            knots = 16384.0
+        eps = amp / (knots ** 4)
+        d_min = (mu2 * eps / accel_tol) ** (1.0 / 3.0)
+        h = period / knots
+        body_memo[i, MEMO_TAB] = h
+        body_memo[i, MEMO_TAB + 1] = 1.0 / h
+        body_memo[i, MEMO_TAB + 2] = d_min * d_min
 
 
 @njit(cache=True, nogil=True, fastmath=True)
@@ -67,6 +145,8 @@ def _compute_distance_points_rkn_numba(
     use_body_memo,
     max_dt_floor,
     timescale_divisor,
+    group_factor,
+    table_accel_tol,
 ):
     # init_t / init_accumulated / init_proposed_dt machen den kernel
     # FORTSETZBAR: mit dem zustand, den ein frueherer lauf in stats[7:]
@@ -97,7 +177,7 @@ def _compute_distance_points_rkn_numba(
     # kernel ohne notizblock. Das ist der A/B-schalter fuer den
     # bit-vergleich (Predictor.use_body_memo).
     _memo_rows = body_x.shape[0] if use_body_memo != 0 else 0
-    body_memo = np.zeros((_memo_rows, 10), dtype=np.float64)
+    body_memo = np.zeros((_memo_rows, BODY_MEMO_COLUMNS), dtype=np.float64)
     # Vorlauf: die zeitunabhaengigen bahngroessen EINMAL je koerper.
     # Spalte 9 traegt das ergebnis: 1 = brauchbar, -1 = bahn unbrauchbar
     # (dann liefert die auswertung sofort ok = 0).
@@ -114,6 +194,15 @@ def _compute_distance_points_rkn_numba(
             body_memo[_bi, 7] = _ca
             body_memo[_bi, 8] = _sa
             body_memo[_bi, 9] = 1.0
+    if _memo_rows > 0:
+        _setup_body_kinds(body_memo, body_x, body_scripted, body_a, body_e,
+                          body_parent)
+    if group_factor > 0.0 and _memo_rows > 0:
+        _setup_far_moon_groups(body_memo, body_m, body_fixed, body_scripted,
+                               body_a, body_e, body_parent, group_factor)
+    if table_accel_tol > 0.0 and _memo_rows > 0:
+        _setup_planet_table(body_memo, body_m, body_fixed, body_scripted,
+                            body_a, body_e, body_parent, G, table_accel_tol)
 
     stats = np.zeros(14, dtype=np.float64)
 

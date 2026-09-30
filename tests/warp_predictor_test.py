@@ -717,13 +717,15 @@ check(int(p._trajectory_version) == versions0,
       "kein trajektorien-neustart je schub-frame",
       f"version {versions0} -> {int(p._trajectory_version)}")
 
-# Waehrend des brennens haengt die gezeichnete linie um eine rechenzeit
-# hinterher. Nach brennschluss MUSS dieser abstand wieder auf das
-# gleitflug-rauschen zurueckgehen -- sonst waere die vorhersage dauerhaft
-# falsch, und der gewonnene bildratenvorteil waere erkauft.
+# Frueher hing die gezeichnete linie waehrend des brennens um eine
+# rechenzeit hinterher (gemessen ein vielfaches des gleitflug-rauschens).
+# Mit dem latenzausgleich (Predictor.thrust_latency_compensation) rechnet
+# jeder auftrag vom zustand zur anzeigezeit, ueber die gehaltene eingabe
+# voraus -- die linie trifft das schiff statt ihm nachzulaufen. Nach
+# brennschluss MUSS der abstand ohnehin wieder auf das rauschen zurueck.
 burn_dev = _deviation()
-check(burn_dev > coast_dev * 3.0,
-      "unter schub haengt die linie messbar hinterher (die eingegangene wette)",
+check(burn_dev < coast_dev * 3.0,
+      "unter schub haengt die linie nicht mehr hinterher (latenzausgleich)",
       f"{burn_dev:.3e} m gegen {coast_dev:.3e} m gleitflug-rauschen")
 
 dev_now = burn_dev
@@ -759,9 +761,14 @@ print("10. Der koerper-notizblock rechnet BIT-IDENTISCH")
 # und die bahn wich um 1.8e6 m ab -- ohne diese pruefung waere das nur als
 # "irgendwie andere linie" aufgefallen.
 
-def _line(memo, view_scale, ref_name=None, thrust=0.0):
+def _line(memo, view_scale, ref_name=None, thrust=0.0, group=0.0, table=0.0):
     w_, ship_, p_ = build(async_compute=False)
     p_.use_body_memo = memo
+    # Die gruppierung ferner mondsysteme und die planetentafel wohnen im
+    # notizblock und sind NAEHERUNGEN -- fuer den bit-vergleich aus (die
+    # config schaltet beide ein), geprueft werden sie unten.
+    p_.group_far_moon_factor = float(group)
+    p_.planet_table_accel_tol = float(table)
     p_.set_view_scale(view_scale)
     if ref_name is not None:
         for i, b in enumerate(w_.body):
@@ -797,6 +804,40 @@ for _label, _kw in (
 check(_fast_ms < _slow_ms * 0.75,
       "und er ist deutlich schneller",
       f"{_slow_ms:.0f} ms -> {_fast_ms:.0f} ms ({_slow_ms / max(_fast_ms, 1e-9):.1f}x)")
+
+# Ferne mondsysteme als ein koerper (predictor.group_far_moons_factor): der
+# fehler ist der dipol des systems, bei der konfigurierten schwelle im
+# erdorbit millimeter ueber den ganzen horizont. Gegenprobe: bei faktor 0.03
+# zaehlt auch der Mond als teil der Erde, und die linie verschiebt sich
+# messbar -- die pruefung sieht die gruppierung also wirklich.
+_exact, _ = _line(True, view_scale=2e-9)
+_grouped, _ = _line(True, view_scale=2e-9, group=300.0)
+_coarse, _ = _line(True, view_scale=2e-9, group=0.03)
+_dev_g = float(np.nanmax(np.abs(_grouped[:, :2] - _exact[:, :2])))
+_dev_c = float(np.nanmax(np.abs(_coarse[:, :2] - _exact[:, :2])))
+check(_grouped.shape == _exact.shape and _dev_g < 1.0,
+      "ferne mondsysteme als ein koerper: linie unter 1 m",
+      f"faktor 300: {_dev_g:.3e} m; gegenprobe faktor 0.03 (auch der Mond als teil der Erde): {_dev_c:.3e} m")
+check(_dev_c > 100.0 * max(_dev_g, 1e-12),
+      "die gegenprobe sieht die gruppierung",
+      f"{_dev_c:.3e} m gegen {_dev_g:.3e} m")
+
+# Die planetentafel (predictor.planet_table_accel_tol): ferne planeten aus
+# einer kubik ueber exakte knoten, anziehungsfehler unter der schranke. Was
+# bei 1e-15 uebrig bleibt, ist das rauschen der schrittweitensteuerung (ein
+# anderes letztes bit, ein anderer, gleich guter schrittverlauf), nicht die
+# tafel: selbst 1e-5 m/s^2 gibt hier dieselben 0.7 m, weil ferne planeten an
+# einem schiff im Erdorbit kaum ziehen. Gegenprobe deshalb nur, dass der
+# schalter den kernel erreicht (die linie ist nicht mehr bit-gleich);
+# die wirkung auf einen transfer misst tools/transfer_bench.py (predictor.md).
+_tabled, _ = _line(True, view_scale=2e-9, table=1e-15)
+_dev_t = float(np.nanmax(np.abs(_tabled[:, :2] - _exact[:, :2])))
+check(_tabled.shape == _exact.shape and _dev_t < 1.0,
+      "planetentafel: linie unter 1 m",
+      f"schranke 1e-15 m/s^2: {_dev_t:.3e} m")
+check(_dev_t > 0.0,
+      "die tafel erreicht den kernel",
+      f"{_dev_t:.3e} m gegen die exakte linie")
 
 print()
 print("11. Ap/Pe-marker sitzen auf den analytisch bekannten radien")
@@ -905,8 +946,10 @@ def _burn(depth, frames=360):
             vys.append(float(snap.get('ship_vy', 0.0)) if snap else float('nan'))
             last = jid
         time.sleep(FRAME)
+    elapsed = time.perf_counter() - t0
     return {
-        'rate': (int(p_._jobs_swapped) - swaps0) / (time.perf_counter() - t0),
+        'rate': (int(p_._jobs_swapped) - swaps0) / elapsed,
+        'fps': frames / elapsed,
         'ids': ids,
         'vys': np.array(vys),
         'queue_max': queue_max,
@@ -933,9 +976,12 @@ check(_deep['queue_max'] <= 3,
       "die warteschlange laeuft nicht voll",
       f"hoechstens {_deep['queue_max']} gleichzeitige auftraege bei tiefe 3")
 
-check(_deep['rate'] > _one['rate'] * 1.4,
-      "tiefe 3 erneuert deutlich oefter als tiefe 1",
-      f"{_one['rate']:.0f}/s -> {_deep['rate']:.0f}/s "
+# Mehr als ein wechsel je bild geht nicht. Ist eine rechnung schon kuerzer
+# als ein bild (seit Task 1 B am grundhorizont), holt tiefe 1 fast die
+# bildrate, und tiefe 3 kann nur noch bis an sie heran.
+check(_deep['rate'] > _one['rate'] * 1.4 or _deep['rate'] > 0.85 * _deep['fps'],
+      "tiefe 3 erneuert deutlich oefter als tiefe 1 (oder schon je bild)",
+      f"{_one['rate']:.0f}/s -> {_deep['rate']:.0f}/s bei {_deep['fps']:.0f} bildern/s "
       f"(alle {1000.0 / max(_one['rate'], 1e-9):.0f} ms -> alle {1000.0 / max(_deep['rate'], 1e-9):.0f} ms)")
 
 # Die tiefe ist nicht fest, sondern folgt rechenzeit/bildzeit -- eine feste
@@ -1776,6 +1822,8 @@ try:
             # pruefen (dort ist sogar `nan == nan` wahr). Siehe
             # Predictor._points_have_tangents.
             1 if _p19._points_have_tangents(points) else 0,
+            # Kein vorgerechneter abstand: der kernel rechnet pass 1 selbst.
+            np.empty(0, dtype=np.float64),
         )
         return out[:int(count)].copy()
 
