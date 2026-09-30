@@ -75,7 +75,7 @@
     "use_reference_acceleration_correction": false,
     "rkn_adaptive_far_maxdt": true,
     "rkn_far_field_target_steps": 1250.0,
-    "rkn_max_dt_ceiling": 120000.0,
+    "rkn_max_dt_ceiling": 20000.0,
     "apsis_markers_enabled": true,
     "apsis_max_markers": 16,
     "thrust_pipeline_depth": 6,
@@ -83,8 +83,8 @@
     "thrust_latency_compensation": true,
     "thrust_lead_max_s": 900.0,
     "thrust_max_steps": 20000,
-    "group_far_moons_factor": 300.0,
-    "planet_table_accel_tol": 1e-15,
+    "group_far_moons_factor": 0.0,
+    "planet_table_accel_tol": 0.0,
     "rkn_rtol_unbound": 1e-11
   },
   "maneuver": {
@@ -236,7 +236,7 @@
     "enabled": true,
     "grid_enabled": true,
     "stars_enabled": true,
-    "accent_color": "#1DE788",
+    "accent_color": "#33A5BF",
     "grid_opacity": 0.65,
     "grid_anchor": "frame",
     "grid_max_speed_px": 1500.0,

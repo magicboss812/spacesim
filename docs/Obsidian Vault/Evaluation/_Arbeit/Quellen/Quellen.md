@@ -20,12 +20,21 @@
 [21] Hyperbolische Bahnen https://orbital-mechanics.space/the-orbit-equation/hyperbolic-trajectories.html, zuletzt 28.09.2026
 [23] Planetarer Vorbeiflug https://orbital-mechanics.space/interplanetary-maneuvers/planetary-arrival-flyby.html, zuletzt 29.09.2026
 [24] Impulsive Manöver https://orbital-mechanics.space/orbital-maneuvers/impulsive-maneuvers.html, zuletzt 29.09.2026
+[25] Mehrkörperprobleme https://orbital-mechanics.space/the-n-body-problem/many-body-problems.html, zuletzt 29.09.2026
+[26] Eingeschränktes Dreikörperproblem https://orbital-mechanics.space/the-n-body-problem/circular-restricted-three-body-problem.html, zuletzt 29.09.2026
+[27] Numerische Lösung des Zweikörperproblems https://orbital-mechanics.space/the-n-body-problem/two-body-inertial-numerical-solution.html, zuletzt 29.09.2026
+[28] Einflusssphäre https://orbital-mechanics.space/interplanetary-maneuvers/sphere-of-influence.html, zuletzt 30.09.2026
+[31] MacTutor History of Mathematics: Ernst Heinrich Bruns https://mathshistory.st-andrews.ac.uk/Biographies/Bruns/, zuletzt 30.09.2026
+[32] MacTutor History of Mathematics: Jules Henri Poincaré https://mathshistory.st-andrews.ac.uk/Biographies/Poincare/, zuletzt 30.09.2026
+[33] Planetarer Abflug https://orbital-mechanics.space/interplanetary-maneuvers/planetary-departure-trajectory.html, zuletzt 30.09.2026
 
 ---
 ## Literatur / Papers
 [2] [[Obsidian Vault/Evaluation/_Arbeit/Quellen/Literatur/nasa apollo 11 flight report.pdf]] Apollo 11 Mission Report, Houston 1969, verfügbar über "https://ntrs.nasa.gov/citations/19700008096" 
 [Curtis] [[orbital-mechanics-for-engineering-students-fourth-edition-9780081021330-008102133x_compress.pdf]] "Orbital Mechanics for engineering students, 4th edition" von Howard D. Curtis
 [22] Blanco, P. R.; Mungan, C. E.: "Rocket Propulsion, Classical Relativity, and the Oberth Effect", The Physics Teacher 57 (2019), S. 439–441, verfügbar über https://www.usna.edu/Users/physics/mungan/_files/documents/Publications/TPT46.pdf, zuletzt 28.09.2026
+[29] Musielak, Z. E.; Quarles, B.: "The three-body problem", Reports on Progress in Physics 77 (2014), 065901, verfügbar über https://arxiv.org/abs/1508.02312, zuletzt 30.09.2026
+[30] Park, R. S.; Folkner, W. M.; Williams, J. G.; Boggs, D. H.: "The JPL Planetary and Lunar Ephemerides DE440 and DE441", The Astronomical Journal 161 (2021), 105, verfügbar über https://ssd.jpl.nasa.gov/doc/Park.2021.AJ.DE440.pdf, zuletzt 29.09.2026
 
 ---
 ## Bildquellen
@@ -36,4 +45,6 @@ Abb. 4 Bahnelemente einer Bahn im Raum: KI-erstellt (Claude), Inhalt nach [19]
 Abb. 5 Energiediagramm der Bahnformen: KI-erstellt (Claude), Inhalt nach [20] und [21]
 Abb. 6 Impulsives Manöver: KI-erstellt (Claude), Inhalt nach [24]
 Abb. 7 Massenverhältnis nach der Raketengrundgleichung: KI-erstellt (Claude), berechnet nach [5] mit $I_{sp}$ aus [Curtis]
+Abb. 8 Zweikörperbahn und Bahnen dreier Körper: Rechnung und Grafik KI-erstellt (Claude), Anordnung nach [29]
+Abb. 9 Numerische Integration einer Kreisbahn: Rechnung und Grafik KI-erstellt (Claude), Euler-Verfahren
 
