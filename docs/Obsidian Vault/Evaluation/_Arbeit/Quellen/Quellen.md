@@ -27,6 +27,8 @@
 [31] MacTutor History of Mathematics: Ernst Heinrich Bruns https://mathshistory.st-andrews.ac.uk/Biographies/Bruns/, zuletzt 30.09.2026
 [32] MacTutor History of Mathematics: Jules Henri Poincaré https://mathshistory.st-andrews.ac.uk/Biographies/Poincare/, zuletzt 30.09.2026
 [33] Planetarer Abflug https://orbital-mechanics.space/interplanetary-maneuvers/planetary-departure-trajectory.html, zuletzt 30.09.2026
+[34] Hohmann-Transfer https://orbital-mechanics.space/orbital-maneuvers/hohmann-transfer.html, zuletzt 06.10.2026
+[35] Phasenlage interplanetarer Transfers https://orbital-mechanics.space/interplanetary-maneuvers/interplanetary-transfer-phasing.html, zuletzt 06.10.2026
 
 ---
 ## Literatur / Papers
@@ -47,4 +49,5 @@ Abb. 6 Impulsives Manöver: KI-erstellt (Claude), Inhalt nach [24]
 Abb. 7 Massenverhältnis nach der Raketengrundgleichung: KI-erstellt (Claude), berechnet nach [5] mit $I_{sp}$ aus [Curtis]
 Abb. 8 Zweikörperbahn und Bahnen dreier Körper: Rechnung und Grafik KI-erstellt (Claude), Anordnung nach [29]
 Abb. 9 Numerische Integration einer Kreisbahn: Rechnung und Grafik KI-erstellt (Claude), Euler-Verfahren
-
+Abb. 8 (Kap. 3.1, neue Zählung) Hohmann-Transfer zwischen zwei Kreisbahnen: KI-erstellt (Claude), Inhalt nach [34]
+Abb. 9 (Kap. 3.1, neue Zählung) Phasenwinkel beim Start: KI-erstellt (Claude), Inhalt nach [35], gezeichnet für $r_2 = 1{,}8\,r_1$
