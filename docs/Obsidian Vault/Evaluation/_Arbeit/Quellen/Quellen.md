@@ -1,4 +1,4 @@
-	## Beitragsquellen
+## Beitragsquellen
 [1] NASA: Basics of Space Flight - Gravitation und Mechanik  https://science.nasa.gov/learn/basics-of-space-flight/chapter3-1/ bis `/chapter3-4`, zuletzt 13.09.2026
 [4] "NASA: Voyager. The Grand Tour of Big Science": https://www.nasa.gov/history/SP-4219/Chapter11.html zuletzt 07.09.2026
 [5] "NASA Glenn Research Center: Ideal Rocket Equation": https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/ideal-rocket-equation/ zuletzt 07.09.2026
@@ -13,7 +13,7 @@
 [14] Relativbewegung im Zweikörperproblem https://orbital-mechanics.space/the-n-body-problem/two-body-relative-motion.html, zuletzt 25.09.2026
 [15] Drehimpulserhaltung https://orbital-mechanics.space/constants-of-orbital-motion/angular-momentum-is-conserved.html, zuletzt 26.09.2026
 [16] Bahngleichung https://orbital-mechanics.space/the-orbit-equation/the-orbit-equation.html, zuletzt 26.09.2026
-[17] Planetare Parameter https://orbital-mechanics.space/reference/planetary-parameters.html, zuletzt 26.09.2026
+[17] Planetare Parameter https://orbital-mechanics.space/reference/planetary-parameters.html, zuletzt 11.10.2026
 [18] Gravitation und Kugelsymmetrie https://orbital-mechanics.space/reference/gravity-and-spherical-symmetry.html, zuletzt 26.09.2026
 [19] Klassische Bahnelemente https://orbital-mechanics.space/classical-orbital-elements/classical-orbital-elements.html, zuletzt 26.09.2026
 [20] Energieerhaltung https://orbital-mechanics.space/constants-of-orbital-motion/energy-is-conserved-in-orbital-motion.html, zuletzt 28.09.2026
@@ -29,6 +29,10 @@
 [33] Planetarer Abflug https://orbital-mechanics.space/interplanetary-maneuvers/planetary-departure-trajectory.html, zuletzt 30.09.2026
 [34] Hohmann-Transfer https://orbital-mechanics.space/orbital-maneuvers/hohmann-transfer.html, zuletzt 06.10.2026
 [35] Phasenlage interplanetarer Transfers https://orbital-mechanics.space/interplanetary-maneuvers/interplanetary-transfer-phasing.html, zuletzt 06.10.2026
+[36] Einführung in interplanetare Manöver https://orbital-mechanics.space/interplanetary-maneuvers/introduction.html, zuletzt 11.10.2026
+[37] Planetare Ankunft und Einfang https://orbital-mechanics.space/interplanetary-maneuvers/planetary-arrival-capture.html, zuletzt 11.10.2026
+[38] Transfers ohne Hohmann-Bedingung https://orbital-mechanics.space/orbital-maneuvers/non-hohmann-transfers.html, zuletzt 12.10.2026
+[39] Zeit seit der Periapsis auf Ellipsenbahnen (Keplergleichung) https://orbital-mechanics.space/time-since-periapsis-and-keplers-equation/elliptical-orbits.html, zuletzt 12.10.2026
 
 ---
 ## Literatur / Papers
@@ -51,3 +55,6 @@ Abb. 8 Zweikörperbahn und Bahnen dreier Körper: Rechnung und Grafik KI-erstell
 Abb. 9 Numerische Integration einer Kreisbahn: Rechnung und Grafik KI-erstellt (Claude), Euler-Verfahren
 Abb. 8 (Kap. 3.1, neue Zählung) Hohmann-Transfer zwischen zwei Kreisbahnen: KI-erstellt (Claude), Inhalt nach [34]
 Abb. 9 (Kap. 3.1, neue Zählung) Phasenwinkel beim Start: KI-erstellt (Claude), Inhalt nach [35], gezeichnet für $r_2 = 1{,}8\,r_1$
+Abb. 9 (Kap. 3.2) Abflug- und Ankunftshyperbel mit Zusammensetzung der Geschwindigkeiten: KI-erstellt (Claude), Inhalt nach [33] und [37], Hyperbelform aus dem Rechenbeispiel
+Abb. 10 (Kap. 3.3) Hohmann-Transfer und schnellerer Transfer mit Zerlegung der Geschwindigkeiten am Schnittpunkt: KI-erstellt (Claude), Inhalt nach [11], [15] und [38], Bahnen und Vektoren maßstäblich aus dem Rechenbeispiel
+Abb. 11 (Kap. 3.3) Geschwindigkeitsaufwand über der Flugzeit: Rechnung und Grafik KI-erstellt (Claude), Rechenweg nach [33], [37] und [39], Werte aus [17]
