@@ -311,8 +311,42 @@ alone.
   2.56 Tm; past `4×` the point spacing coarsens exactly as it does under `+`.
   See `.claude/rules/hud-ui.md`.
 - `PageUp` / `PageDown` — sim_dt up / down. `Esc` — quit.
+- `Space` — pause (also the leftmost cell of the warp bar, and a checkbox in
+  the dev UI's Simulation header). `F12` — screenshot (below).
+
+> **Pause is `camera.paused`, never `sim_dt = 0`.** `min_sim_dt` floors
+> `sim_dt` and several places divide by it. `runtime/loop.py` sets
+> `sim_step = 0` while paused and skips `maneuver_executor.update`, so
+> `world.step` returns at once, the mission clock stops and an armed node
+> does not progress. `sim_dt` is untouched, so unpausing (Space again, a
+> second click on the pause cell) runs on at the previous step; clicking a
+> warp step also unpauses. `Camera.thrust_allowed` returns False while
+> paused (throttle shows `HOLD`, the predictor sits in the warp hold);
+> rotation, camera, HUD and prediction keep running. Measured through
+> `runtime.loop.run`: `world.time` 2871.72 s before and after 239 paused
+> frames, a wheel zoom in that window still moved `target_scale`
+> 1e-6 → 3.375e-6, `sim_dt` 6.0 before and after.
+
+> **The F12 capture is read between `ui_root.render()` and
+> `devui.render()`** (`runtime/screenshot.py`, called from `runtime/loop.py`
+> right after `devui.build()`): world + player HUD, no ImGui pixel. The dev
+> UI's button is pressed inside `build()`, so it lands in the same frame.
+> Only `glReadPixels` runs on the main thread (10 ms at 2560×1440 on
+> llvmpipe); flip, PNG encode and write run on a one-worker pool, shut down
+> (waited for) when the loop ends. **The encoder is numpy + `zlib`, not
+> `pygame.image.save`**: pygame holds the GIL for the whole encode and the
+> main thread stood still for up to **520 ms**; `zlib.compress` releases it,
+> longest main-thread gap **6–11 ms** (idle 0.8 ms).
+> Folder `screenshot.directory` (relative = repo root, git-ignored), name
+> `spacesim_YYYY-MM-DD_HHMMSS.png`, `_2`… within the same second.
 - **Warp steps are `1m/s, 10m/s, 1h/s, 1d/s, 7d/s, 30d/s, 100d/s, 1y/s`**
   (`ui/hud/layout.py::WARP_STEPS`, sim-seconds per real second). The top
   three were added 2026-08-18; steps that the current orbit cannot resolve
   are greyed out and refuse clicks, and `_clamp_warp` in `runtime/loop.py`
   backstops the keyboard. See the time-warp note in `.claude/rules/physics-world.md`.
+  The bar has **one cell more than `WARP_STEPS`**: cell 0 is the pause
+  (`WarpBar.PAUSE_INDEX`, a two-bar glyph drawn with `ctx.draw.rect`), cell
+  `i > 0` is `WARP_STEPS[i - 1]`. `Hud._warp_index` / `_set_warp` /
+  `_warp_step_enabled` speak cells, not steps; the cumulative fill starts
+  at cell 1 (`SegmentBar.cumulative_from`), so the pause is never part of
+  the level.

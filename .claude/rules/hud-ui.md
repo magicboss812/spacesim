@@ -482,6 +482,27 @@ paths:
 > er auf `T+` springt — das ist ein ZUSTAND wie `disabled`, keine fuenfte
 > bedeutungsfarbe.
 
+## HUD visibility — draw-only toggles (`ui/hud/visibility.py`)
+
+`HudVisibility` (built in `runtime/bootstrap.py`, driven by the dev UI's
+"HUD visibility" header and `tools/game_shot.py --hide all|KEY,…`) hides
+HUD elements and the renderer's world overlays for clean figures.
+
+> **Hiding is `Widget.drawn = False`, never `visible = False`.**
+> `Widget.update` skips invisible children, so `visible` would freeze the
+> element. `drawn` is only read by `UIRoot.paint_order`, which drops the
+> whole subtree; `_pick` walks the same list, so a hidden element takes no
+> mouse input, while layout and update still run. The AP/PE block lives
+> inside `NavballCluster`, so it is a flag there (`show_info`, which also
+> carves its rect out of `hit_test`); hiding the navball hides it too.
+> The world overlays are `renderer.draw_apsis_markers`,
+> `draw_body_labels`, `draw_maneuver_markers`: they gate only the drawing,
+> `apsis_marker_hits` / `maneuver_node_hits` are filled every frame. The
+> apsis tooltip is drawn only while the markers are, and the
+> `ManeuverGizmo` (input only) follows `draw_maneuver_markers`. Verified at
+> 2560×1440: `--hide all` leaves world, line and ship only; `--hide navball`
+> removes the cluster and its four tiles, nothing else.
+
 ## Two HUD elements read the renderer instead of the world
 
 `hud/apsis_tooltip.py`, `hud/system_map.py` and `ManeuverGizmo` are the only

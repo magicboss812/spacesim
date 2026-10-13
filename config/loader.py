@@ -373,6 +373,19 @@ class ConfigLoader:
             'dv_step_coarse': float(self.get('maneuver.dv_step_coarse', 10.0)),
         }
 
+    def screenshot_dir(self) -> str:
+        """Zielordner der F12-fotos (`screenshot.directory`).
+
+        Ein relativer pfad gilt ab der REPO-WURZEL, nicht ab der config-datei:
+        SPACESIM_CONFIG zeigt bei messlaeufen auf eine kopie im temp-ordner,
+        und die fotos sollen trotzdem neben dem code landen.
+        """
+        raw = self.get_str('screenshot.directory', 'screenshots') or 'screenshots'
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent.parent / path
+        return str(path)
+
     def apply_to_predictor(self, predictor):
         """predictor-abschnitt -> predictor.py (genauigkeit, reichweite, marker)."""
         if predictor is None:

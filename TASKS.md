@@ -408,7 +408,7 @@ because first Pe of the near-circular default orbit is now 15336 s, against
 
 ---
 
-## Task 2: Screenshot key, time pause, HUD visibility toggles `[ ]`
+## Task 2: Screenshot key, time pause, HUD visibility toggles `[x]`
 
 Clean captures for the paper's figures.
 
@@ -450,7 +450,25 @@ Clean captures for the paper's figures.
 cluster hidden; one F12 capture opened and checked; a few seconds paused with
 `world.time` unchanged and the view still responsive.
 
-**Result:** _open_
+**Result:** `F12` / dev-UI button → `runtime/screenshot.py` reads the
+framebuffer between `ui_root.render()` and `devui.render()` (dev UI open:
+not in the PNG), PNG via numpy + `zlib` on a worker into
+`screenshot.directory` (default `screenshots/`, git-ignored).
+`pygame.image.save` was measured first and holds the GIL: main thread
+stalled up to 520 ms at 2560×1440; the zlib writer leaves 6–11 ms
+(readback itself 10 ms on llvmpipe). Pause = `camera.paused` (`Space`,
+warp-bar cell 0 with a two-bar glyph, dev-UI checkbox): `world.time`
+2871.72 s before and after 239 paused frames through `runtime.loop.run`,
+wheel zoom still moved `target_scale` 1e-6 → 3.375e-6, `sim_dt` kept.
+HUD visibility: `Widget.visible` skips `update()`, so a draw-only
+`Widget.drawn` was added (cut in `paint_order`, so no input either); three
+renderer flags gate world overlays, hit lists unchanged (16 apsis hits,
+1 node + 4 handles, hidden or not). `tools/game_shot.py --hide all|KEY,…`.
+Default shot differs from baseline only inside the warp bar. Tests: touched
+files all pass; `warp_predictor_test` 4 failures vs 8 on the untouched tree
+back to back (`tests.md`). Next tasks: warp-bar indices are CELLS now
+(cell = step + 1); Task 4's arrival may use `camera.paused`.
+
 
 ---
 

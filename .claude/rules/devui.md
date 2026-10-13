@@ -17,6 +17,10 @@ paths:
   The **Timing** header graphs the same four series as the `TIMING:` print line
   — `TimingHistory` is a `(5, capacity)` float32 ring buffer, one contiguous row
   per series, handed straight to `imgui.plot_lines` with `values_offset`.
+  A **Screenshot (F12)** button sits above the headers (capture point:
+  `.claude/rules/camera-input.md`), and the **HUD visibility** header draws
+  one checkbox per entry of `ui/hud/visibility.py` (`HUD_ELEMENTS`,
+  `WORLD_OVERLAYS`) plus "hide all" — see `.claude/rules/hud-ui.md`.
 
 > **The timing buffer is filled every frame, not only while the panel is open.**
 > `DevContext.sample_timings()` is called from `runtime/loop.py` unconditionally, right

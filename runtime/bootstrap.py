@@ -30,7 +30,8 @@ from render.renderer import Renderer
 from runtime.window import Window
 from ui import UIContext, UIRoot, UIState
 from ui.devui import DevContext, ImguiLayer
-from ui.hud import Hud
+from ui.hud import Hud, HudVisibility
+from runtime.screenshot import ScreenshotWriter
 
 
 def load_config():
@@ -142,6 +143,7 @@ class App:
         'predictor_toggle_points', 'predictor_min_precision', 'precision_step',
         'maneuver_plan', 'maneuver_preview', 'maneuver_executor',
         'maneuver_config', 'selected_node_index', 'maneuver_router_ref',
+        'screenshot', 'hud_visibility',
     )
 
     def warp_rate(self):
@@ -425,9 +427,17 @@ def build_app(config):
     # schub dauerhaft gesperrt. Begruendung steht bei Camera.allow_warp_rate.
     app.camera.allow_warp_rate(app.realtime_warp_max, app.tick_rate)
 
+    # F12 / dev-knopf. Gezogen wird in runtime/loop.py zwischen HUD und
+    # dev-oberflaeche.
+    app.screenshot = ScreenshotWriter(config.screenshot_dir())
+    # Die nur-anzeige-schalter der dev-oberflaeche. Auch ohne HUD da: die
+    # welt-overlays des renderers haengen nicht am HUD.
+    app.hud_visibility = HudVisibility(app.hud, app.renderer)
+
     # Was die dev-oberflaeche verstellen darf (siehe ui/devui.py).
     app.dev_ctx = DevContext(
         world=w, camera=app.camera, predictor=predictor, renderer=app.renderer,
         ship_control=app.ship_control, ship=app.ship, tick_rate=app.tick_rate,
+        hud_visibility=app.hud_visibility, screenshot=app.screenshot,
     )
     return app

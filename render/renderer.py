@@ -248,6 +248,14 @@ class Renderer(
         # apoapsis/periapsis-marker auf der prädiktionslinie (vom predictor
         # geliefert, hier nur gezeichnet).
         self.show_apsis_markers = True
+        # NUR-ANZEIGE-schalter der welt-overlays (dev-oberflaeche ->
+        # "HUD visibility", ui/hud/visibility.py). Anders als
+        # show_apsis_markers / maneuver_enabled schalten sie nur das ZEICHNEN
+        # ab: apsis_marker_hits und maneuver_node_hits werden weiter jeden
+        # frame gefuellt.
+        self.draw_apsis_markers = True
+        self.draw_body_labels = True
+        self.draw_maneuver_markers = True
         self.apsis_marker_radius_px = 5.0
         # Die marker blenden aus, wenn die bahn AM SCHIRM klein wird (nicht
         # nach zoom-schwelle): unter `fade_min_px` apsis-radius unsichtbar,
@@ -966,9 +974,10 @@ class Renderer(
 
         # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,
         # damit der kantenfilter den text nicht verschmiert (siehe _draw_body).
-        for name, label_x, label_y, font, antialias, tracking in self._deferred_labels:
-            self._blit_text_topdown(name, label_x, label_y, font,
-                                    antialias=antialias, tracking=tracking)
+        if getattr(self, 'draw_body_labels', True):
+            for name, label_x, label_y, font, antialias, tracking in self._deferred_labels:
+                self._blit_text_topdown(name, label_x, label_y, font,
+                                        antialias=antialias, tracking=tracking)
 
         hud_t0 = time.perf_counter()
         self._render_hud(camera, predictor)

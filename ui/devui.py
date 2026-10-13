@@ -18,6 +18,7 @@ Damit bleibt der GL-zustand vollstaendig unter der kontrolle von moderngl.
 
 import ctypes
 import math
+import os
 
 import moderngl
 import numpy as np
@@ -301,11 +302,12 @@ class DevContext:
 
     __slots__ = ("world", "camera", "predictor", "renderer", "ship_control",
                  "ship", "frame_dt", "sim_step_s", "tick_rate", "notes",
-                 "timings")
+                 "timings", "hud_visibility", "screenshot")
 
     def __init__(self, world=None, camera=None, predictor=None, renderer=None,
                  ship_control=None, ship=None, frame_dt=0.0, sim_step_s=0.0,
-                 tick_rate=60.0, timing_capacity=240):
+                 tick_rate=60.0, timing_capacity=240, hud_visibility=None,
+                 screenshot=None):
         self.world = world
         self.camera = camera
         self.predictor = predictor
@@ -317,6 +319,10 @@ class DevContext:
         self.tick_rate = tick_rate
         self.notes = []
         self.timings = TimingHistory(timing_capacity)
+        #: ui/hud/visibility.py::HudVisibility -- der "HUD visibility"-kopf.
+        self.hud_visibility = hud_visibility
+        #: runtime/screenshot.py::ScreenshotWriter -- der foto-knopf.
+        self.screenshot = screenshot
 
     def sample_timings(self, frame_ms=0.0):
         """Eine probe der vier zeitreihen. Je frame einmal, aus der hauptschleife.
@@ -535,6 +541,30 @@ def _draw_timing_graphs(c: "DevContext"):
             imgui.set_tooltip(tooltip)
 
 
+def _draw_hud_visibility(vis):
+    """Ein haken je HUD-element und welt-overlay, dazu "hide all".
+
+    Nur die ANZEIGE: jedes element rechnet weiter und veroeffentlicht seine
+    schirmpositionen (ui/hud/visibility.py).
+    """
+    from ui.hud.visibility import HUD_ELEMENTS, WORLD_OVERLAYS
+
+    changed, hide_all = imgui.checkbox("hide all", vis.all_hidden)
+    if changed:
+        vis.set_all(not hide_all)
+    imgui.separator()
+    imgui.text_disabled("HUD")
+    for key, label, _attrs in HUD_ELEMENTS:
+        changed, value = imgui.checkbox(label, vis.is_shown(key))
+        if changed:
+            vis.set(key, value)
+    imgui.text_disabled("world overlays")
+    for key, label, _attr in WORLD_OVERLAYS:
+        changed, value = imgui.checkbox(label, vis.is_shown(key))
+        if changed:
+            vis.set(key, value)
+
+
 def draw_dev_panels(c: "DevContext"):
     """Die eigentlichen panels. Rein werkzeug -- kein spieler-HUD."""
     imgui.set_next_window_size(imgui.ImVec2(460, 720), imgui.Cond_.first_use_ever)
@@ -553,6 +583,19 @@ def draw_dev_panels(c: "DevContext"):
     imgui.text(f"{io.framerate:6.1f} FPS   ({1000.0 / max(io.framerate, 1e-3):5.2f} ms/frame)")
     if c.world is not None:
         imgui.text(f"sim time: {_fmt_si(getattr(c.world, 'time', 0.0), 's')}")
+
+    # Das foto zeigt welt + spieler-HUD, NICHT dieses fenster: gezogen wird
+    # in runtime/loop.py nach build() und vor dem zeichnen von ImGui.
+    if c.screenshot is not None:
+        if imgui.button("Screenshot (F12)"):
+            c.screenshot.request()
+        if imgui.is_item_hovered():
+            imgui.set_tooltip(
+                "Welt + spieler-HUD in voller fensteraufloesung, ohne die\n"
+                "dev-oberflaeche. Ziel: config.json -> screenshot.directory.")
+        if c.screenshot.last_path:
+            imgui.same_line()
+            imgui.text_disabled(os.path.basename(c.screenshot.last_path))
 
     # ------------------------------------------------------------- Timing
     if imgui.collapsing_header("Timing", imgui.TreeNodeFlags_.default_open):
@@ -577,6 +620,8 @@ def draw_dev_panels(c: "DevContext"):
                     "-- unabhaengig von der bildrate."
                 )
             imgui.text(f"rate: {_fmt_si(cam.sim_dt * c.tick_rate, 's')}/s wall")
+        _checkbox("paused (Space)", cam, 'paused',
+                  "world.step() bekommt 0 s; sim_dt bleibt stehen.")
         imgui.text(f"this frame: +{_fmt_si(c.sim_step_s, 's')} sim "
                    f"(over {c.frame_dt * 1000.0:.1f} ms real)")
         world = c.world
@@ -591,6 +636,10 @@ def draw_dev_panels(c: "DevContext"):
                     1e-3, 1e4, "%.4f", log=True)
             _slider("vel tolerance", world, 'integrator_velocity_tolerance',
                     1e-6, 1e2, "%.6f", log=True)
+
+    # ------------------------------------------------------ HUD visibility
+    if c.hud_visibility is not None and imgui.collapsing_header("HUD visibility"):
+        _draw_hud_visibility(c.hud_visibility)
 
     # -------------------------------------------------------------- Camera
     if imgui.collapsing_header("Camera"):

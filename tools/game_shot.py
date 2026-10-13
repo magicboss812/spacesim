@@ -5,6 +5,7 @@ den framebuffer VOR present(), also genau das, was im fenster stuende.
 
     python tools/game_shot.py [breite hoehe] [-o datei.png] [--frames N]
                               [--node PRO,NRM] [--zoom SCALE]
+                              [--hide all|KEY,KEY,...]
 """
 import argparse
 import json
@@ -29,6 +30,10 @@ parser.add_argument('--node-at', type=float, default=0.25,
                     help='wo auf dem horizont der knoten sitzt (0..1)')
 parser.add_argument('--zoom', type=float, default=None,
                     help='kamera-massstab in px/m')
+parser.add_argument('--hide', default=None,
+                    help='nicht zeichnen (dev-UI "HUD visibility"): "all" '
+                         'oder schluessel aus ui/hud/visibility.py, z. B. '
+                         '"navball,apsis_block"')
 args = parser.parse_args()
 
 W, H = args.width, args.height
@@ -56,6 +61,14 @@ app = build_app(load_config())
 gl = app.window.ctx
 frame_dt = 1.0 / 60.0
 _wall = [0.0]
+
+if args.hide:
+    vis = app.hud_visibility
+    if args.hide.strip().lower() == 'all':
+        vis.set_all(False)
+    else:
+        for key in args.hide.split(','):
+            vis.set(key.strip(), False)
 
 if args.zoom is not None:
     app.camera.scale = float(args.zoom)

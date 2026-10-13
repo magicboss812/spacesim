@@ -798,6 +798,8 @@ class PredictionDrawMixin:
             if self.apsis_tooltip_enabled:
                 self.apsis_marker_hits.append(
                     (sx, sy, r_px, bool(is_apo), dist, t_abs, alpha_mult))
+            if not getattr(self, 'draw_apsis_markers', True):
+                continue
 
             label = "Ap" if is_apo else "Pe"
             base = (0.45, 0.75, 1.0) if is_apo else (1.0, 0.62, 0.25)

@@ -94,6 +94,7 @@ def run(app):
         app.maneuver_router_ref[0] = router
     timing = FrameTimingPrinter()
     devui_toggle_key = pygame.K_F1
+    screenshot_key = pygame.K_F12
 
     running = True
     frame_count = 0
@@ -139,6 +140,10 @@ def run(app):
                 # schliessen, sobald ein eingabefeld fokussiert ist.
                 if event.key == devui_toggle_key:
                     app.devui.toggle()
+                    continue
+                # F12 ebenso: ein foto stoert keine texteingabe.
+                if event.key == screenshot_key:
+                    app.screenshot.request()
                     continue
                 if ui_wants_keyboard:
                     # Tastatur gehoert der oberflaeche (texteingabe o.ae.).
@@ -212,6 +217,14 @@ def run(app):
         # frame_dt ist bereits auf max_frame_dt gekappt, ein stall kann also
         # keinen riesigen sprung einspeisen.
         sim_step = app.camera.sim_dt * app.tick_rate * frame_dt
+        # PAUSE: die welt bekommt 0 s, die missionsuhr steht. Bewusst ein
+        # eigener schalter und nicht sim_dt = 0 (boden min_sim_dt, divisionen
+        # durch sim_dt). Kamera, HUD und vorhersage laufen weiter; der schub
+        # ist ueber thrust_allowed() gesperrt, ein scharfer knoten rueckt
+        # nicht vor (der ausfuehrer bekommt den schritt gar nicht erst).
+        paused = app.camera.paused
+        if paused:
+            sim_step = 0.0
         # Ein scharfgeschalteter knoten deckelt den schritt: sonst rueckt ein
         # zeitraffer-frame um stunden vor und der ganze brennvorgang faellt
         # zwischen zwei bilder. Waehrend des brennens haelt die decke die
@@ -222,7 +235,7 @@ def run(app):
             sim_step = min(sim_step, max(1e-9, cap))
         # Das delta-v des SCHRITTES anlegen, BEVOR er gegangen wird -- so
         # traegt die positionsintegration dieses schrittes es bereits.
-        if app.maneuver_executor is not None:
+        if app.maneuver_executor is not None and not paused:
             app.maneuver_executor.update(app.world, sim_step)
         app.world.step(sim_step, app.max_substep)
 
@@ -257,8 +270,13 @@ def run(app):
         app.ui_root.render()
 
         app.dev_ctx.frame_dt = frame_dt
-        app.dev_ctx.sim_step_s = app.camera.sim_dt * app.tick_rate * frame_dt
+        app.dev_ctx.sim_step_s = sim_step
         app.devui.build(app.dev_ctx)
+        # Das foto HIER: welt und spieler-HUD stehen im framebuffer, ImGui
+        # noch nicht. build() liegt davor, damit der knopf der
+        # dev-oberflaeche noch im selben frame greift.
+        app.screenshot.capture_if_requested(
+            app.window.ctx, app.renderer.width, app.renderer.height)
         app.devui.render()
 
         app.renderer.present()
@@ -283,6 +301,8 @@ def run(app):
             running = False
 
     app.devui.shutdown()
+    # Ein foto, das gerade noch geschrieben wird, nicht abschneiden.
+    app.screenshot.shutdown()
     if getattr(app, 'maneuver_preview', None) is not None:
         # Der arbeiter der vorschau ist kein daemon-thread: ohne dieses
         # abmelden haengt der prozess am ende an einem laufenden neuaufbau.

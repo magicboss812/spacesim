@@ -81,8 +81,15 @@ class InputRouter:
         if key == pygame.K_ESCAPE:
             return False
 
+        # Leertaste: pause. Die welt bekommt 0 s (runtime/loop.py), sim_dt
+        # bleibt stehen -- das aufheben laeuft also mit der vorigen stufe
+        # weiter.
+        if key == pygame.K_SPACE:
+            paused = app.camera.toggle_pause()
+            print(f"PAUSE: {'an' if paused else 'aus'}")
+
         # Taste P fuer Predictive Orbit umschalten
-        if key == pygame.K_p:
+        elif key == pygame.K_p:
             if app.predictor.num_points > 0:
                 app.predictor.reset()
             else:

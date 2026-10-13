@@ -219,7 +219,9 @@ paths:
   face.
 - **`ui_hud_test.py`** — orbital elements against analytically known orbits,
   layout/overlap at real window sizes, and that controls actually move
-  simulation state. §8 opens the body drawer and runs the unfold out before
+  simulation state. The warp-bar clicks address CELLS: cell 1 is the slowest
+  step, cell 0 the pause (held `sim_dt`, thrust locked, second click
+  resumes). §8 opens the body drawer and runs the unfold out before
   clicking a row. §10: the attitude ring rejects all four corners of its square
   and the throttle arc's 4/50/96 % points route to `NavballCluster` (with a
   counter-check that the 96 % point really lies inside the ring's rect). §11:
@@ -449,6 +451,10 @@ Flaky — these come and go between runs of **identical code**:
 - "der puffer haelt die linie nicht auf"
 - "nach brennschluss rastet die linie wieder ein"
 - "tiefe 3 erneuert deutlich oefter als tiefe 1"
+- "die linie wird unter schub nicht geleert", "die vorhersage wird waehrend
+  des brennens erneuert", "unter schub haengt die linie nicht mehr
+  hinterher (latenzausgleich)" — all three failed on the untouched tree
+  2026-10-13 (8 failures there, 4 on the Task 2 tree, back to back).
 
 > **Measured 2026-09-03, three runs across the restructure.** Pre-restructure
 > baseline: **8** failures. Restructured, cold Numba cache: **6**.

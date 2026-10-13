@@ -77,6 +77,9 @@ class SegmentBar(Widget):
         # bis zur aktuellen stufe reicht. Eine raffungsstufe IST ein pegel;
         # als radiogruppe gezeichnet sagt sie weniger, als sie weiss.
         self.cumulative = bool(cumulative)
+        #: Erste zelle, die zum pegel zaehlt. Der zeitraffer setzt 1: seine
+        #: pause-zelle steht VOR der skala und ist keine stufe darauf.
+        self.cumulative_from = 0
         # Praedikat index -> bool. None heisst: alles erlaubt. Wird fuer den
         # zeitraffer benutzt, dessen obere stufen nahe an einem koerper die
         # bahn nicht mehr aufloesen (siehe Hud._warp_step_enabled).
@@ -176,7 +179,8 @@ class SegmentBar(Widget):
             usable = self.option_enabled(index)
             hover = 1.0 if (self.hovered and index == self._hover_index
                             and usable) else 0.0
-            below = self.cumulative and index < selected
+            below = (self.cumulative and self.cumulative_from <= index
+                     < selected)
             fill, text_color, _ = _button_colors(ctx, active, color, hover)
             if not usable:
                 # Gesperrt: keine flaeche, nur sehr blasse schrift -- der
@@ -194,15 +198,19 @@ class SegmentBar(Widget):
                 # reihe, nicht nur eine markierung.
                 ctx.draw.rect(bx, by, bw, bh, fill=fill,
                               radius=(cut, 0.0, cut, 0.0))
-            ctx.text.draw(
+            self._draw_option_label(
+                ctx, index,
                 str(options[index]) if index < len(options) else '',
-                bx + bw * 0.5, by + bh * 0.5, role=self.role,
-                color=text_color, align='center', valign='middle',
-            )
+                bx, by, bw, bh, text_color)
 
         if self.caption:
             chrome.tab(ctx, self.caption, fx + ctx.px(14), fy,
                        color=color, edge='top')
+
+    def _draw_option_label(self, ctx, index, text, bx, by, bw, bh, color):
+        """Inhalt einer zelle. Unterklassen setzen hier eine glyphe ein."""
+        ctx.text.draw(text, bx + bw * 0.5, by + bh * 0.5, role=self.role,
+                      color=color, align='center', valign='middle')
 
 
 class WarpBar(SegmentBar):
@@ -213,10 +221,35 @@ class WarpBar(SegmentBar):
     beides ebenfalls in einen block.
     """
 
+    #: Index der pause-zelle. Sie steht ganz links, vor der langsamsten
+    #: stufe, und traegt eine gezeichnete glyphe statt einer beschriftung.
+    PAUSE_INDEX = 0
+
     def __init__(self, telemetry, clock_height=22, **kwargs):
         super().__init__(**kwargs)
         self.telemetry = telemetry
         self.clock_height = float(clock_height)
+        self.cumulative_from = self.PAUSE_INDEX + 1
+
+    def _draw_option_label(self, ctx, index, text, bx, by, bw, bh, color):
+        """Die pause-zelle bekommt das pause-zeichen als zwei balken.
+
+        GEZEICHNET, nicht gesetzt -- dieselbe regel wie bei den symbolen der
+        rosette. Die balken stehen auf ganzen pixeln und sind so hoch wie
+        die versalhoehe der nachbarzellen, damit das zeichen in der reihe
+        wie eine beschriftung sitzt und nicht wie ein icon daneben.
+        """
+        if index != self.PAUSE_INDEX:
+            super()._draw_option_label(ctx, index, text, bx, by, bw, bh, color)
+            return
+        cap_h = ctx.text.measure('X', self.role)[1]
+        bar_h = float(max(4, round(cap_h * 0.62)))
+        bar_w = float(max(2, round(bar_h * 0.30)))
+        gap = float(max(2, round(bar_h * 0.30)))
+        left = float(round(bx + (bw - (bar_w * 2.0 + gap)) * 0.5))
+        top = float(round(by + (bh - bar_h) * 0.5))
+        for x in (left, left + bar_w + gap):
+            ctx.draw.rect(x, top, bar_w, bar_h, fill=color)
 
     def measure(self, ctx):
         width, height = super().measure(ctx)

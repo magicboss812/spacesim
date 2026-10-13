@@ -23,6 +23,11 @@ class Camera:
         self.min_sim_dt = 1.0
         self.max_sim_dt = 1e12
         self.sim_dt_factor = 1.5
+        # PAUSE als eigener schalter, NICHT als sim_dt = 0: sim_dt hat einen
+        # boden (min_sim_dt) und es wird mehrfach durch ihn geteilt. Die
+        # hauptschleife gibt world.step() bei pause 0 s; sim_dt bleibt
+        # stehen, das aufheben stellt damit die vorige stufe wieder her.
+        self.paused = False
 
         # Kamera-Position (Weltkoordinaten des Bildzentrums), gezeichnet + ziel
         self.position = Vec2(0.0, 0.0)
@@ -489,8 +494,19 @@ class Camera:
         """Schub nur in echtzeit -- siehe .claude/rules/camera-input.md.
 
         Kleine toleranz, damit die unterste stufe nicht an rundung scheitert.
+        In der pause gesperrt wie im zeitraffer: ohne vorrueckende zeit kaeme
+        ein impuls je frame unbegrenzt zusammen.
         """
+        if self.paused:
+            return False
         return self.warp_rate(tick_rate) <= float(realtime_warp_max) * 1.001
+
+    def set_paused(self, paused):
+        self.paused = bool(paused)
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        return self.paused
 
     def clamp_warp_to_timescale(self, t_char, tick_rate, divisor,
                                 realtime_warp_max):

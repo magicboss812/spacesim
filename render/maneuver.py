@@ -268,7 +268,11 @@ class ManeuverDrawMixin:
                 continue
 
             active = int(entry['index']) == selected
-            self._draw_maneuver_marker(sx, sy, marker_r, active)
+            # Ausgeblendet wird nur das zeichnen; die trefferliste unten
+            # entsteht trotzdem (ui/hud/visibility.py).
+            drawn = bool(getattr(self, 'draw_maneuver_markers', True))
+            if drawn:
+                self._draw_maneuver_marker(sx, sy, marker_r, active)
 
             pro = self._maneuver_screen_direction(
                 entry['pro_x'], entry['pro_y'], t_abs)
@@ -301,9 +305,10 @@ class ManeuverDrawMixin:
                 if (grab is not None and int(grab[0]) == int(entry['index'])
                         and grab[1] == kind):
                     push = float(grab[2])
-                self._draw_maneuver_handle(
-                    sx, sy, hx + dx * push, hy + dy * push, dx, dy, handle_r,
-                    color, active, deflection=push)
+                if drawn:
+                    self._draw_maneuver_handle(
+                        sx, sy, hx + dx * push, hy + dy * push, dx, dy,
+                        handle_r, color, active, deflection=push)
                 handles.append({
                     'kind': kind, 'sx': hx, 'sy': hy,
                     'radius_px': handle_r, 'dir_sx': dx, 'dir_sy': dy,

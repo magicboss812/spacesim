@@ -329,22 +329,41 @@ def click(widget, dx=0.5, dy=0.5):
 
 
 # --- zeitraffer -----------------------------------------------------------
+# Zelle 0 ist die pause, zelle 1 die langsamste stufe WARP_STEPS[0].
+def click_warp_cell(index):
+    bx, by, bw, bh = hud.warp._option_rects(ui)[index]
+    root._mouse_pos = (bx + bw * 0.5, by + bh * 0.5)
+    root.begin_frame(1 / 60)
+    root.handle_event(pygame.event.Event(
+        pygame.MOUSEBUTTONDOWN, {'pos': (int(bx + bw * 0.5), int(by + bh * 0.5)), 'button': 1}))
+    root.handle_event(pygame.event.Event(
+        pygame.MOUSEBUTTONUP, {'pos': (int(bx + bw * 0.5), int(by + bh * 0.5)), 'button': 1}))
+
+
 before = camera.sim_dt
-rects = hud.warp._option_rects(ui)
-bx, by, bw, bh = rects[0]
-root._mouse_pos = (bx + bw * 0.5, by + bh * 0.5)
-root.begin_frame(1 / 60)
-root.handle_event(pygame.event.Event(
-    pygame.MOUSEBUTTONDOWN, {'pos': (int(bx + bw * 0.5), int(by + bh * 0.5)), 'button': 1}))
-root.handle_event(pygame.event.Event(
-    pygame.MOUSEBUTTONUP, {'pos': (int(bx + bw * 0.5), int(by + bh * 0.5)), 'button': 1}))
+click_warp_cell(1)
 expected = WARP_STEPS[0][0] / 60.0   # sim-sekunden je tick
 check(abs(camera.sim_dt - expected) < 1e-9,
       'klick auf die langsamste stufe setzt camera.sim_dt',
       f"{before} -> {camera.sim_dt} (erwartet {expected})")
 frame()
-check(hud._warp_index() == 0, 'zeitraffer-knopf liest den neuen wert zurueck',
+check(hud._warp_index() == 1, 'zeitraffer-knopf liest den neuen wert zurueck',
       f"index {hud._warp_index()}")
+
+# Pause: die linke zelle haelt an, ohne sim_dt anzufassen, und ein zweiter
+# klick laesst die vorige stufe weiterlaufen.
+click_warp_cell(0)
+frame()
+check(camera.paused and hud._warp_index() == 0
+      and abs(camera.sim_dt - expected) < 1e-9,
+      'pause-zelle haelt an und laesst sim_dt stehen',
+      f"paused={camera.paused} index={hud._warp_index()} sim_dt={camera.sim_dt}")
+check(hud.telemetry.thrust_locked, 'in der pause ist der schub gesperrt')
+click_warp_cell(0)
+frame()
+check(not camera.paused and hud._warp_index() == 1,
+      'zweiter klick hebt die pause auf, die stufe bleibt',
+      f"paused={camera.paused} index={hud._warp_index()}")
 
 # --- orientierungs-autopilot ---------------------------------------------
 control.snap_mode = None
