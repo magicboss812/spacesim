@@ -56,5 +56,4 @@ Abb. 9 Numerische Integration einer Kreisbahn: Rechnung und Grafik KI-erstellt (
 Abb. 8 (Kap. 3.1, neue Zählung) Hohmann-Transfer zwischen zwei Kreisbahnen: KI-erstellt (Claude), Inhalt nach [34]
 Abb. 9 (Kap. 3.1, neue Zählung) Phasenwinkel beim Start: KI-erstellt (Claude), Inhalt nach [35], gezeichnet für $r_2 = 1{,}8\,r_1$
 Abb. 9 (Kap. 3.2) Abflug- und Ankunftshyperbel mit Zusammensetzung der Geschwindigkeiten: KI-erstellt (Claude), Inhalt nach [33] und [37], Hyperbelform aus dem Rechenbeispiel
-Abb. 10 (Kap. 3.3) Hohmann-Transfer und schnellerer Transfer mit Zerlegung der Geschwindigkeiten am Schnittpunkt: KI-erstellt (Claude), Inhalt nach [11], [15] und [38], Bahnen und Vektoren maßstäblich aus dem Rechenbeispiel
-Abb. 11 (Kap. 3.3) Geschwindigkeitsaufwand über der Flugzeit: Rechnung und Grafik KI-erstellt (Claude), Rechenweg nach [33], [37] und [39], Werte aus [17]
+Abb. 10 (Kap. 3.3) Hohmann-Transfer und schnellerer Transfer mit Zerlegung der Geschwindigkeiten am Schnittpunkt: KI-erstellt (Claude), Inhalt nach [11] und [38], Bahnen und Vektoren maßstäblich aus dem Rechenbeispiel
