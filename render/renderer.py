@@ -248,6 +248,14 @@ class Renderer(
         # apoapsis/periapsis-marker auf der prädiktionslinie (vom predictor
         # geliefert, hier nur gezeichnet).
         self.show_apsis_markers = True
+        # NUR-ANZEIGE-schalter der welt-overlays (dev-oberflaeche ->
+        # "HUD visibility", ui/hud/visibility.py). Anders als
+        # show_apsis_markers / maneuver_enabled schalten sie nur das ZEICHNEN
+        # ab: apsis_marker_hits und maneuver_node_hits werden weiter jeden
+        # frame gefuellt.
+        self.draw_apsis_markers = True
+        self.draw_body_labels = True
+        self.draw_maneuver_markers = True
         self.apsis_marker_radius_px = 5.0
         # Die marker blenden aus, wenn die bahn AM SCHIRM klein wird (nicht
         # nach zoom-schwelle): unter `fade_min_px` apsis-radius unsichtbar,
@@ -266,6 +274,19 @@ class Renderer(
         self.apsis_tooltip_hover_px = 14.0
         #: (sx, sy, radius_px, is_apoapsis, distance_m, t_abs, alpha)
         self.apsis_marker_hits = []
+        #: Dieselben treffer fuer die Ap/Pe der GEPLANTEN bahn
+        #: (render/maneuver.py), mit zwei feldern mehr:
+        #: `(..., alpha, True, v_rel)` -- kennung und tempo am marker.
+        self.preview_apsis_marker_hits = []
+        #: Der angeklickte punkt der vorhersagelinie (ui/hud/point_tooltip.py):
+        #: seine ZEIT, gesetzt vom zettel; der renderer wertet sie jedes bild
+        #: auf der linie aus und meldet `(sx, sy, x, y, vx, vy, t)` zurueck.
+        self.trajectory_pin_t = None
+        self.trajectory_pin_hit = None
+        #: Klick-reichweite auf die linie (px) und wie viele punkte dafuer
+        #: projiziert werden -- einmal je klick, nie je frame.
+        self.trajectory_pick_max_px = 10.0
+        self.trajectory_pick_points = 4000
 
         # -- manoeverknoten (render/maneuver.py) ---------------------------
         #: Vom bootstrap gesetzt; der renderer besitzt sie nicht.
@@ -958,6 +979,8 @@ class Renderer(
         # duenne linien und kleine pfeilspitzen, und ein kantenfilter
         # verschmiert genau die.
         self.draw_maneuver(camera, bodies)
+        # Der angeklickte bahnpunkt, aus demselben grund nach dem resolve.
+        self._draw_trajectory_pin(predictor, camera)
 
         # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
         # grund wie die beschriftungen -- und vor ihnen, damit ein label nicht
@@ -966,9 +989,10 @@ class Renderer(
 
         # Körper-beschriftungen erst jetzt zeichnen -- nach dem FXAA-resolve,
         # damit der kantenfilter den text nicht verschmiert (siehe _draw_body).
-        for name, label_x, label_y, font, antialias, tracking in self._deferred_labels:
-            self._blit_text_topdown(name, label_x, label_y, font,
-                                    antialias=antialias, tracking=tracking)
+        if getattr(self, 'draw_body_labels', True):
+            for name, label_x, label_y, font, antialias, tracking in self._deferred_labels:
+                self._blit_text_topdown(name, label_x, label_y, font,
+                                        antialias=antialias, tracking=tracking)
 
         hud_t0 = time.perf_counter()
         self._render_hud(camera, predictor)

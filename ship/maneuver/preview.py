@@ -25,6 +25,14 @@ die eingabe bezahlt, die ihn ausloest (das ziehen eines griffs). Wer die
 auftraege stellt und was dabei im hauptthread bleiben MUSS, steht an
 `ManeuverPreview`.
 
+Ap/Pe DER GEPLANTEN BAHN. Die gleitphase hinter dem LETZTEN brennbogen wird
+im arbeiter mit demselben scan abgesucht wie die vorhersagelinie
+(`_find_apsis_markers_numba`, verfeinert auf die kubik). Ergebnis:
+`ManeuverPreview.apsis_markers`, je zeile `x, y, t_abs, kind, r, v_rel` --
+`v_rel` gleich mit, weil der schwebezettel das tempo dort sonst aus der
+OSKULIERENDEN bahn von jetzt naehme, und die ist hier gerade nicht gemeint.
+Gerechnet wird beim neuaufbau, nie je frame.
+
 Zeitrechnung: die kernel rechnen LOKAL zur schnappschuss-epoche
 (`snapshot["sim_time"]`), die punktelisten hier aussen tragen ABSOLUTE
 sim-zeit in spalte 2 -- dieselbe konvention wie `ship/predictor/`.
@@ -35,7 +43,9 @@ import time
 
 import numpy as np
 
+from physics.kernels.apsis import _find_apsis_markers_numba
 from physics.kernels.burn import _burn_arc_numba
+from physics.kernels.kepler import _body_position_at_time_numba
 from physics.kernels.propagate import _compute_distance_points_rkn_numba
 
 from .plan import burn_direction_world, orbital_basis
@@ -170,7 +180,7 @@ class ManeuverPreview:
     def __init__(self, max_points=1500, burn_step_s=0.25, burn_min_steps=16,
                  burn_max_steps=512, min_interval_s=0.0, burn_draw_points=24,
                  length_mult=1.0, length_mult_min=0.25, length_mult_max=64.0,
-                 async_compute=True):
+                 async_compute=True, apsis_max_markers=16):
         self.max_points = max(64, int(max_points))
         self.burn_step_s = max(1e-3, float(burn_step_s))
         self.burn_min_steps = max(4, int(burn_min_steps))
@@ -203,6 +213,10 @@ class ManeuverPreview:
 
         self.points = None
         self.node_markers = []
+        #: Ap/Pe der geplanten bahn: (m, 6)-array `x, y, t_abs, kind, r,
+        #: v_rel` oder None. Siehe modulkopf.
+        self.apsis_markers = None
+        self.apsis_max_markers = max(0, int(apsis_max_markers))
         self.valid = False
         self.last_rebuild_ms = 0.0
         #: Zeitspanne der gezeichneten kette in sim-sekunden -- der regler
@@ -268,12 +282,14 @@ class ManeuverPreview:
         if result is None:
             self.points = None
             self.node_markers = []
+            self.apsis_markers = None
             self.valid = False
             self.span_seconds = None
             return True
-        points, markers, elapsed_ms = result
+        points, markers, apsides, elapsed_ms = result
         self.points = points
         self.node_markers = markers
+        self.apsis_markers = apsides
         self.valid = True
         self.last_rebuild_ms = elapsed_ms
         self.span_seconds = (
@@ -325,6 +341,7 @@ class ManeuverPreview:
         if job is None:
             self.points = None
             self.node_markers = []
+            self.apsis_markers = None
             self.valid = False
             self.span_seconds = None
             return True
@@ -350,6 +367,7 @@ class ManeuverPreview:
         if job is None:
             self.points = None
             self.node_markers = []
+            self.apsis_markers = None
             self.valid = False
             self.span_seconds = None
             return False
@@ -401,6 +419,7 @@ class ManeuverPreview:
             'burn_min_steps': int(self.burn_min_steps),
             'burn_max_steps': int(self.burn_max_steps),
             'burn_draw_points': int(self.burn_draw_points),
+            'apsis_max_markers': int(self.apsis_max_markers),
         }
 
 
@@ -442,7 +461,7 @@ def _thin_arc(arc, draw_points):
 def _run_preview_job(job):
     """Die kette rechnen. NUR arrays und zahlen -- laeuft im arbeiter.
 
-    Rueckgabe `(points, markers, ms)` oder None.
+    Rueckgabe `(points, markers, apsides, ms)` oder None.
     """
     t_start = time.perf_counter()
     try:
@@ -451,8 +470,9 @@ def _run_preview_job(job):
         result = None
     if result is None:
         return None
-    points, markers = result
-    return (points, markers, (time.perf_counter() - t_start) * 1000.0)
+    points, markers, apsides = result
+    return (points, markers, apsides,
+            (time.perf_counter() - t_start) * 1000.0)
 
 
 def _chain(job):
@@ -476,6 +496,9 @@ def _chain(job):
     segments = []
     markers = []
     source = job['base']
+    #: Index der GLEITphase in `segments`, die zuletzt angehaengt wurde --
+    #: nur sie kann die letzte sein, deren Ap/Pe gesucht wird.
+    coast_index = -1
     budget = int(job['max_points'])
 
     for entry in job['nodes']:
@@ -604,6 +627,7 @@ def _chain(job):
         coast[:, 2] += epoch
 
         segments.append(coast)
+        coast_index = len(segments) - 1
         budget -= len(coast)
 
         # Der naechste knoten liest seinen zustand von DIESER linie -- von
@@ -615,6 +639,69 @@ def _chain(job):
     if not segments:
         # Nur marker (platzhalter-knoten ohne delta-v): eine gueltige
         # antwort, nur ohne eigene linie.
-        return (None, markers) if markers else None
+        return (None, markers, None) if markers else None
 
-    return (np.concatenate(segments, axis=0), markers)
+    # Ap/Pe nur auf der gleitphase, mit der die kette ENDET. Steht hinten
+    # ein brennbogen (die gleitphase danach kam nicht zustande), gibt es
+    # keine fertige bahn, deren apsiden man zeigen koennte.
+    apsides = None
+    if coast_index == len(segments) - 1:
+        apsides = _coast_apsides(segments[coast_index], snapshot, epoch,
+                                 ref_index, use_time,
+                                 int(job.get('apsis_max_markers', 16)))
+    return (np.concatenate(segments, axis=0), markers, apsides)
+
+
+def _coast_apsides(coast, snapshot, epoch, ref_index, use_time, max_markers):
+    """Ap/Pe einer gleitphase -- derselbe scan wie die vorhersagelinie.
+
+    `skip_head = 0`: die gleitphase hat keinen kuenstlichen kopf, ihr erster
+    punkt ist der integrierte zustand am brennende. `use_tangents = 1`: der
+    RKN-kernel schreibt echte tangenten. Rueckgabe (m, 6) oder None.
+    """
+    if max_markers <= 0 or coast is None or len(coast) < 3:
+        return None
+    if ref_index < 0 or ref_index >= len(snapshot['body_x']):
+        return None
+    pts = np.ascontiguousarray(coast, dtype=np.float64)
+    G = float(snapshot['G'])
+    found, count = _find_apsis_markers_numba(
+        pts, float(epoch), ref_index,
+        snapshot['body_x'], snapshot['body_y'], snapshot['body_m'],
+        snapshot['body_scripted'], snapshot['body_a'], snapshot['body_e'],
+        snapshot['body_theta'], snapshot['body_arg'], snapshot['body_parent'],
+        G, int(use_time), int(max_markers), 0, 1,
+        np.empty(0, dtype=np.float64))
+    if count <= 0:
+        return None
+    out = np.zeros((count, 6), dtype=np.float64)
+    out[:, :5] = found[:count]
+    memo = np.zeros((0, 10), dtype=np.float64)
+    for i in range(count):
+        t_abs = float(out[i, 2])
+        state = state_on_curve(pts, t_abs)
+        if state is None:
+            out[i, 5] = math.nan
+            continue
+        vrx = vry = 0.0
+        if use_time:
+            # Zentrale differenz des bezugskoerpers, derselbe kepler-ort wie
+            # im scan (siehe body_state_at fuer den grund: kein
+            # velocity-feld eines skriptkoerpers ist gueltig).
+            h = 1.0
+            ax, ay = _body_position_at_time_numba(
+                ref_index, t_abs - epoch + h, snapshot['body_x'],
+                snapshot['body_y'], snapshot['body_m'],
+                snapshot['body_scripted'], snapshot['body_a'],
+                snapshot['body_e'], snapshot['body_theta'],
+                snapshot['body_arg'], snapshot['body_parent'], G, memo)
+            bx, by = _body_position_at_time_numba(
+                ref_index, t_abs - epoch - h, snapshot['body_x'],
+                snapshot['body_y'], snapshot['body_m'],
+                snapshot['body_scripted'], snapshot['body_a'],
+                snapshot['body_e'], snapshot['body_theta'],
+                snapshot['body_arg'], snapshot['body_parent'], G, memo)
+            vrx = (ax - bx) / (2.0 * h)
+            vry = (ay - by) / (2.0 * h)
+        out[i, 5] = math.hypot(state[2] - vrx, state[3] - vry)
+    return out

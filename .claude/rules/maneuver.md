@@ -486,6 +486,35 @@ Vorzeichen zwei Zeichen weit links. `palette.danger` ist dafür da und ist
 **keine fünfte Bedeutungsfarbe**: die vier Akzente tragen Bedeutung, `danger`
 trägt einen Zustand — wie `disabled`, das direkt daneben steht.
 
+## Ap/Pe der geplanten Bahn
+
+Die Gleitphase, mit der die Kette **endet**, wird im Arbeiter mit demselben
+Scan abgesucht wie die Vorhersagelinie (`preview._coast_apsides` →
+`_find_apsis_markers_numba`, `skip_head = 0`, `use_tangents = 1`, also auf
+der Kubik verfeinert). Nur dort: die Phasen zwischen zwei Knoten sind nicht
+die Bahn, die der Plan hinterlässt, und endet die Kette mit einem
+Brennbogen, gibt es keine. Ergebnis `ManeuverPreview.apsis_markers`, je
+Zeile `x, y, t_abs, kind, r, v_rel`; `v_rel` gleich mit (Hermite-Tempo
+minus zentrale Differenz des Bezugskörpers aus den Snapshot-Arrays), weil
+der Zettel sonst die oskulierende Bahn von **jetzt** nähme.
+
+Gezeichnet von `_draw_apsis_marker_rows(style='preview')` in
+`render/prediction.py` — eine Routine für Linie und Plan, gleiche Ausblendung,
+gleiche Transformation zur Markerzeit. Treffer in
+`renderer.preview_apsis_marker_hits`, mit zwei Feldern mehr als die der
+Linie: `(..., alpha, True, v_rel)`.
+
+**Farbe am Abzug entschieden, keine fünfte:** die Ap/Pe-Töne der Linie,
+45 % zum Grün der Planlinie gemischt (`_PREVIEW_AP_RGB` / `_PE_RGB`, im
+Zettel wortgleich), Beschriftung im selben Ton statt weiß. Rein grün verlöre
+die Unterscheidung Ap/Pe; die Linienfarben unverändert wären von den Markern
+der Vorhersage nicht zu trennen.
+
+Gemessen an `--zoom 1.2e-5`: 800 m/s prograde → Pe 16.36 Mm am Knoten, Ap
+34.06 Mm (Vis-viva mit Sofortimpuls 33.9 Mm; der Rest ist der endliche
+Brennbogen); 1500 m/s retrograd → Ap 16.36 Mm am Knoten, Pe 5.24 Mm (unter
+dem Erdradius: der Plan schlägt ein).
+
 ## Farben: keine fünfte
 
 `ROLE_INDEX` bekommt `'node': 2` (Amber, Energie — ein Brennvorgang) und

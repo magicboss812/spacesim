@@ -203,6 +203,7 @@ class ManeuverDrawMixin:
         """
         self.maneuver_node_hits = []
         self.maneuver_curve_screen = _EMPTY_SCREEN
+        self.preview_apsis_marker_hits = []
         if not getattr(self, 'maneuver_enabled', True):
             return
         preview = getattr(self, 'maneuver_preview', None)
@@ -226,6 +227,16 @@ class ManeuverDrawMixin:
                 )
                 self._draw_maneuver_end_caps(
                     bodies, camera, camera_frame_xy, points, run)
+
+        # -- Ap/Pe der geplanten bahn, mit der routine der vorhersagelinie.
+        #    VOR den knotenmarkern, damit ein griff nie unter einer raute
+        #    verschwindet.
+        apsides = getattr(preview, 'apsis_markers', None)
+        if (apsides is not None and len(apsides)
+                and getattr(self, 'show_apsis_markers', True)):
+            self._draw_apsis_marker_rows(
+                apsides, len(apsides), camera, camera_frame_xy,
+                self.preview_apsis_marker_hits, style='preview')
 
         # -- waehrend eines MARKER-zugs: die BASISlinie in schirmkoordinaten,
         #    damit der marker an ihr entlang geschoben werden kann.
@@ -268,7 +279,11 @@ class ManeuverDrawMixin:
                 continue
 
             active = int(entry['index']) == selected
-            self._draw_maneuver_marker(sx, sy, marker_r, active)
+            # Ausgeblendet wird nur das zeichnen; die trefferliste unten
+            # entsteht trotzdem (ui/hud/visibility.py).
+            drawn = bool(getattr(self, 'draw_maneuver_markers', True))
+            if drawn:
+                self._draw_maneuver_marker(sx, sy, marker_r, active)
 
             pro = self._maneuver_screen_direction(
                 entry['pro_x'], entry['pro_y'], t_abs)
@@ -301,9 +316,10 @@ class ManeuverDrawMixin:
                 if (grab is not None and int(grab[0]) == int(entry['index'])
                         and grab[1] == kind):
                     push = float(grab[2])
-                self._draw_maneuver_handle(
-                    sx, sy, hx + dx * push, hy + dy * push, dx, dy, handle_r,
-                    color, active, deflection=push)
+                if drawn:
+                    self._draw_maneuver_handle(
+                        sx, sy, hx + dx * push, hy + dy * push, dx, dy,
+                        handle_r, color, active, deflection=push)
                 handles.append({
                     'kind': kind, 'sx': hx, 'sy': hy,
                     'radius_px': handle_r, 'dir_sx': dx, 'dir_sy': dy,

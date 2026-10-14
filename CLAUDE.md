@@ -37,13 +37,13 @@ parts of one object sharing one `self`, not separate components.
 | folder | what lives there |
 |---|---|
 | `main.py` | the entry point — 27 lines: config → `bootstrap` → `loop` |
-| `runtime/` | `window` (display/GL/DPI/clock), `gl_device` (FXAA, present, resize), `bootstrap` (builds everything — **the construction order is load-bearing**), `loop` (the frame loop + `TIMING:`), `input` (keymap, click gesture), `system_loader` |
+| `runtime/` | `window` (display/GL/DPI/clock), `gl_device` (FXAA, present, resize), `bootstrap` (builds everything — **the construction order is load-bearing**), `loop` (the frame loop + `TIMING:`), `input` (keymap, click gesture), `screenshot` (F12, PNG on a worker), `warp_to` (WARP TO from a pinned tooltip), `system_loader` |
 | `physics/` | `world` (adaptive RKN4, `update_planets`/`update_dynamics`, `step`), `world_kernels` (the Numba fast path, **bit-identical** to the Python reference), `vec` (`Vec2`, `G`), `reference_frames` (Principia-style plot frames; **largest file, 1733**), `kernels/` (the predictor's `@njit` maths: `kepler`, `integrators`, `apsis`, `propagate`) |
 | `bodies/` | `body` (`body`/`schiff` + `kepler_relative_xy()`, the **one** scripted-orbit model), `style`, `icon`, `orbit_lines`. Pure numpy — **no GL here** |
 | `ship/` | `control` (`schiffcontrol`), `camera` (world↔screen, zoom, follow, `sim_dt`/warp), `art`, `horizon` (`HorizonPolicy`), `predictor/` (`core`, `hold`, `compute`, `jobs`, `view`), `maneuver/` (`profile` — **die** brenndauer, `plan`, `preview`, `executor`) |
 | `render/` | `renderer` (the class itself), `pipelines`, `draw`, `text`, and the five draw domains `bodies`/`ship`/`orbits`/`prediction`/`maneuver`; `background{,_draw}`, `line_kernels`, and `gl/` (GLSL 330, reached via `render.GL_DIR`) |
 | `config/` | `loader` (`ConfigLoader`), `config.json` (all tunables), `solar_system.json` (27 bodies + ship `SaturnV`) |
-| `ui/` | the player-facing HUD, plus `devui.py` — Dear ImGui **developer** tools (`F1`), a separate system |
+| `ui/` | the player-facing HUD (`hud/visibility.py`: draw-only toggles; `hud/apsis_tooltip.py` + `point_tooltip.py`: pinned tooltips), plus `devui.py` — Dear ImGui **developer** tools (`F1`), a separate system |
 
 ## Where the detailed notes live
 
@@ -191,7 +191,7 @@ from a measurement. Headless capture in the cloud: `TASKS.md` → Screenshots.
 The full key table lives in `.claude/rules/camera-input.md`. The essentials:
 `WASD` pans (**arrow keys drive the ship, not the camera**), `←` `→` rotate,
 `↑` `↓` thrust, `I` `K` `J` `L` orientation hold, `R` / `1` / `2` reference
-frame, `N` / `X` maneuver node / arm burn, `PageUp` `PageDown` sim_dt, `F1` devui.
+frame, `N` / `X` maneuver node / arm burn, `PageUp` `PageDown` sim_dt, `Space` pause, `F12` screenshot, `F1` devui.
 
 Warp steps run `1m/s … 1y/s`; those the orbit cannot resolve are greyed out.
 **Thrust is real-time only** (an armed node drops the warp itself); rotation

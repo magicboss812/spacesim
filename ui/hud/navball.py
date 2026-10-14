@@ -86,6 +86,10 @@ class NavballCluster(Widget):
         # zwischen ring und flanke die kamera darunter.
         self.blocks_mouse = True
         self._dragging_throttle = False
+        #: Der ORBITAL.INFO-block (AP/PE) ist teil dieses widgets, hat aber in
+        #: der dev-oberflaeche einen eigenen schalter (ui/hud/visibility.py).
+        #: Aus heisst: nicht gezeichnet und nicht treffbar.
+        self.show_info = True
         self.ring = self.add(AttitudeRing(
             telemetry, ship_control, size=(RING_SIZE, RING_SIZE),
         ))
@@ -117,7 +121,18 @@ class NavballCluster(Widget):
         self._draw_flank(ctx, cx, cy, side='right')
         self._draw_gauge_labels(ctx)
         self._draw_heading_badge(ctx, cx)
-        self._draw_info(ctx)
+        if self.show_info:
+            self._draw_info(ctx)
+
+    def hit_test(self, ctx, x, y):
+        if not super().hit_test(ctx, x, y):
+            return False
+        if self.show_info:
+            return True
+        # Ausgeblendeter AP/PE-block: sein streifen samt tab-band unter dem
+        # rahmen laesst die maus zur welt durch.
+        ix, iy, iw, _ih = self._info_rect(ctx)
+        return not (ix <= x < ix + iw and iy <= y <= self.rect.bottom)
 
     # ------------------------------------------------------------- eingabe
 

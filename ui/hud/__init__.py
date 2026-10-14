@@ -69,6 +69,8 @@ from .layout import WARP_STEPS, Hud
 from .navball import NavballCluster
 from .system_map import SystemMap
 from .telemetry import Telemetry, compass_from_theta
+from .visibility import HudVisibility
 
-__all__ = ['ApsisTooltip', 'AttitudeRing', 'Hud', 'NavballCluster', 'SystemMap',
-           'Telemetry', 'WARP_STEPS', 'compass_from_theta']
+__all__ = ['ApsisTooltip', 'AttitudeRing', 'Hud', 'HudVisibility',
+           'NavballCluster', 'SystemMap', 'Telemetry', 'WARP_STEPS',
+           'compass_from_theta']

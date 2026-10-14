@@ -248,6 +248,14 @@
     "star_motion_scale": 0.25,
     "star_zoom_influence": 0.26
   },
+  "warp_to": {
+    "apsis_margin_s": 1800.0,
+    "point_margin_s": 0.0,
+    "lead_real_seconds": 1.5
+  },
+  "screenshot": {
+    "directory": "screenshots"
+  },
   "debug": {
     "devui_visible": false,
     "print_frame_timings": true,

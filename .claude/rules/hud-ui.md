@@ -482,22 +482,74 @@ paths:
 > er auf `T+` springt — das ist ein ZUSTAND wie `disabled`, keine fuenfte
 > bedeutungsfarbe.
 
+## HUD visibility — draw-only toggles (`ui/hud/visibility.py`)
+
+`HudVisibility` (built in `runtime/bootstrap.py`, driven by the dev UI's
+"HUD visibility" header and `tools/game_shot.py --hide all|KEY,…`) hides
+HUD elements and the renderer's world overlays for clean figures.
+
+> **Hiding is `Widget.drawn = False`, never `visible = False`.**
+> `Widget.update` skips invisible children, so `visible` would freeze the
+> element. `drawn` is only read by `UIRoot.paint_order`, which drops the
+> whole subtree; `_pick` walks the same list, so a hidden element takes no
+> mouse input, while layout and update still run. The AP/PE block lives
+> inside `NavballCluster`, so it is a flag there (`show_info`, which also
+> carves its rect out of `hit_test`); hiding the navball hides it too.
+> The world overlays are `renderer.draw_apsis_markers`,
+> `draw_body_labels`, `draw_maneuver_markers`: they gate only the drawing,
+> `apsis_marker_hits` / `maneuver_node_hits` are filled every frame. The
+> apsis tooltip is drawn only while the markers are, and the
+> `ManeuverGizmo` (input only) follows `draw_maneuver_markers`. Verified at
+> 2560×1440: `--hide all` leaves world, line and ship only; `--hide navball`
+> removes the cluster and its four tiles, nothing else.
+
 ## Two HUD elements read the renderer instead of the world
 
 `hud/apsis_tooltip.py`, `hud/system_map.py` and `ManeuverGizmo` are the only
 widgets that take their geometry from outside `ui/`, and each for one reason:
 
 - **The apsis tooltip** hangs on the Ap/Pe diamond, whose screen position only
-  `Renderer._draw_apsis_markers` knows — it applies the *time-dependent* frame
-  transform that keeps the marker on the drawn line. The renderer therefore
-  publishes `renderer.apsis_marker_hits` (`sx, sy, radius_px, is_apoapsis,
-  distance_m, t_abs, alpha`, cleared and refilled every call) and the widget
-  hit-tests against it. The tooltip sets `blocks_mouse = False` and picks in
-  `update()` from `ctx.mouse_x/y`: it sits over the world, and a widget that
-  swallowed clicks there would block body selection and camera panning for a
-  pure readout. Its speed comes from `Telemetry.speed_at_radius()` — vis-viva
-  on the same osculating conic AP/PE and the countdowns come from, *not* the
-  predictor's velocity columns (the chord kernels write NaN there).
+  `Renderer._draw_apsis_marker_rows` knows — it applies the *time-dependent*
+  frame transform that keeps the marker on the drawn line. The renderer
+  therefore publishes `renderer.apsis_marker_hits` (`sx, sy, radius_px,
+  is_apoapsis, distance_m, t_abs, alpha`, cleared and refilled every call)
+  and `preview_apsis_marker_hits` for the planned orbit (two more fields,
+  `True, v_rel`; `.claude/rules/maneuver.md`), and the widget hit-tests
+  against both. Hovering is picked in `update()` from `ctx.mouse_x/y`, so the
+  tooltip blocks nothing over the world; `hit_test` is true **only on the
+  WARP TO button of a pinned tooltip**. Speed: `Telemetry.speed_at_radius()`
+  (vis-viva on the osculating conic AP/PE come from) for the line, the
+  preview's own `v_rel` for planned markers.
+
+  **Pinning goes through the world click, not through the widget.**
+  `InputRouter.handle_world_click` tries `apsis_tooltip.pin_at` first, then
+  the bodies, then `Renderer.pick_prediction_time` → `point_tooltip.pin`.
+  Unpinning is `dismiss()`, which `UIRoot` calls on every widget but the
+  pressed one at each mouse-down — "click anywhere else". A pinned marker is
+  re-found each frame by kind, line/plan and the nearest `t_abs` within
+  `max(120 s, 2 % of its ETA)`; past, or missing for 0.5 s, it closes.
+
+  **Position is re-read at DRAW time** (`_refresh_position`). `update()` runs
+  before `renderer.render()` and sees the previous frame's hits; with the
+  camera following the ship under 1 d/s the whole scene moves a quarter
+  orbit per frame, and the pinned tooltip stood ~180 px beside its marker
+  in the capture. `ui_root.render()` comes after `render()`, so the draw
+  reads this frame's hits.
+
+  **WARP TO** (`runtime/warp_to.py`, rules in `.claude/rules/camera-input.md`)
+  is offered on pinned line markers only, target `t_abs -
+  warp_to.apsis_margin_s`, greyed once that has passed. A press while a warp
+  to the same target runs is a stop: `on_mouse_down` notes it before the
+  loop's click-cancel, so the release does not restart it.
+- **The point tooltip** (`hud/point_tooltip.py`, subclass) is pinned by a
+  click on the prediction line; hovering the line shows nothing. It stores
+  only a TIME: `renderer.trajectory_pin_t` → `_draw_trajectory_pin` evaluates
+  it on the current line with `state_on_curve`, draws a cyan square with four
+  ticks (not a diamond) and publishes `trajectory_pin_hit = (sx, sy, x, y,
+  vx, vy, t)`. Rows R (centre distance, like AP/PE), REL V, ETA; notch tab
+  `ORBIT.POINT`; WARP TO targets `t - warp_to.point_margin_s` (0). The
+  line pick (`pick_prediction_time`) projects 4000 points without
+  refinement, once per click, nearest segment within 10 design units.
 - **The system map** hangs under the warp bar, whose height follows font size
   and notch tab. Its `layout()` therefore reads the warp widget's
   `rect.bottom` rather than carrying a fixed y offset. Body angles are

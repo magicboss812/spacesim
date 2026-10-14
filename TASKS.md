@@ -408,7 +408,7 @@ because first Pe of the near-circular default orbit is now 15336 s, against
 
 ---
 
-## Task 2: Screenshot key, time pause, HUD visibility toggles `[ ]`
+## Task 2: Screenshot key, time pause, HUD visibility toggles `[x]`
 
 Clean captures for the paper's figures.
 
@@ -450,11 +450,29 @@ Clean captures for the paper's figures.
 cluster hidden; one F12 capture opened and checked; a few seconds paused with
 `world.time` unchanged and the view still responsive.
 
-**Result:** _open_
+**Result:** `F12` / dev-UI button → `runtime/screenshot.py` reads the
+framebuffer between `ui_root.render()` and `devui.render()` (dev UI open:
+not in the PNG), PNG via numpy + `zlib` on a worker into
+`screenshot.directory` (default `screenshots/`, git-ignored).
+`pygame.image.save` was measured first and holds the GIL: main thread
+stalled up to 520 ms at 2560×1440; the zlib writer leaves 6–11 ms
+(readback itself 10 ms on llvmpipe). Pause = `camera.paused` (`Space`,
+warp-bar cell 0 with a two-bar glyph, dev-UI checkbox): `world.time`
+2871.72 s before and after 239 paused frames through `runtime.loop.run`,
+wheel zoom still moved `target_scale` 1e-6 → 3.375e-6, `sim_dt` kept.
+HUD visibility: `Widget.visible` skips `update()`, so a draw-only
+`Widget.drawn` was added (cut in `paint_order`, so no input either); three
+renderer flags gate world overlays, hit lists unchanged (16 apsis hits,
+1 node + 4 handles, hidden or not). `tools/game_shot.py --hide all|KEY,…`.
+Default shot differs from baseline only inside the warp bar. Tests: touched
+files all pass; `warp_predictor_test` 4 failures vs 8 on the untouched tree
+back to back (`tests.md`). Next tasks: warp-bar indices are CELLS now
+(cell = step + 1); Task 4's arrival may use `camera.paused`.
+
 
 ---
 
-## Task 3: Ap/Pe markers on the maneuver preview orbit `[ ]`
+## Task 3: Ap/Pe markers on the maneuver preview orbit `[x]`
 
 The planned orbit (`ship/maneuver/preview.py`, drawn in `render/maneuver.py`)
 has no apsis markers. The main line has them:
@@ -477,11 +495,23 @@ has no apsis markers. The main line has them:
 
 **Verify:** screenshots with `--node 800,0` and a retrograde node.
 
-**Result:** _open_
+**Result:** the preview worker scans the coast the chain ends
+with (`preview._coast_apsides`, same kernel, cubic refinement) into
+`ManeuverPreview.apsis_markers` (`x, y, t, kind, r, v_rel`), computed per
+rebuild only. Drawn by `_draw_apsis_marker_rows(style='preview')`, the routine
+now shared with the main line (default shot pixel-identical to before, 0 px).
+Colour picked by screenshot: Ap/Pe hues mixed 45 % toward the plan green,
+tinted labels. Hits in `renderer.preview_apsis_marker_hits` (+`True, v_rel`).
+Checked at `--zoom 1.2e-5`: 800 m/s prograde → Pe 16.36 Mm at the node, Ap
+34.06 Mm (impulsive vis-viva 33.9 Mm); 1500 m/s retrograde → Ap 16.36 Mm,
+Pe 5.24 Mm (below Erde's radius). Note for Task 5: both marker sets go
+through `_draw_apsis_marker_rows`; the colours are duplicated in
+`ui/hud/apsis_tooltip.py`.
+
 
 ---
 
-## Task 4: Pinned apsis tooltip with warp-to-apsis `[ ]`
+## Task 4: Pinned apsis tooltip with warp-to-apsis `[x]`
 
 **Read first:** `.claude/rules/hud-ui.md` (tooltip), `camera-input.md` and
 `physics-world.md` (warp steps and ceilings), `maneuver.md` → "Der
@@ -505,7 +535,21 @@ Zeitraffer zieht sich vor der Zündung selbst herunter".
 **Verify:** one warp to a distant apoapsis, one attempt on a periapsis less
 than 30 min away; print `world.time` at stop against the target.
 
-**Result:** _open_
+**Result:** clicks pin through `InputRouter.handle_world_click`
+(diamond → body → prediction line); `dismiss()` unpins on any other press.
+`runtime/warp_to.py` steps down `WARP_STEPS` (orbit cap, ≥ 1.5 s real time per
+step), caps the sim step at the remaining time, arrives on the lowest step
+(not pause: one warps to an apsis to burn), cancels on manual warp, pause,
+thrust or click. Config section `warp_to` (margin 1800 s apsis, 0 s point).
+Extra, asked by the user: a click on the prediction line pins a cyan point
+tooltip (R, REL V, ETA, WARP TO); hovering the line shows nothing. Measured
+through `runtime.loop.run` with posted clicks at 1280×800: Ap 171 043 s ahead
+→ 1d/s, 1h/s, 10m/s, 1m/s, stop at target −1800 s, difference 0.000e+00 s;
+Pe 1185 s ahead → button greyed, click starts nothing; line point 5370 s
+ahead → 0 s difference, ship 11.9 m from the point. Fixed on the way: the
+tooltip took last frame's hits (≈180 px off at 1 d/s in follow mode), now
+re-read at draw time. Tests: no new failure (`render_budget_test` §1 known).
+
 
 ---
 

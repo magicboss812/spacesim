@@ -10,6 +10,8 @@ import time
 
 import numpy as np
 
+from ship.maneuver.preview import state_on_curve
+
 from render.line_kernels import (
     _LINE_KERNELS_OK,
     _compact_min_step_numba,
@@ -17,6 +19,20 @@ from render.line_kernels import (
     _max_gap_refine_numba,
     _rdp_keep_numba,
 )
+
+#: Ap/Pe der GEPLANTEN bahn (render/maneuver.py). Keine fuenfte farbe: die
+#: Ap/Pe-toene der vorhersagelinie, zur hausfarbe der geplanten bahn (gruen,
+#: `render/maneuver.py::_GREEN`) hin gemischt. So liest sich die raute als
+#: "Ap" bzw. "Pe" UND als teil des plans. Ausgewaehlt am abzug, siehe
+#: `.claude/rules/maneuver.md`.
+#: Der angeklickte bahnpunkt: '#17b2c4', die datenfarbe (ui/theme.py SCHEME[0]).
+_PIN_RGB = (0.090, 0.698, 0.769)
+_PREVIEW_MIX = 0.45
+_PREVIEW_GREEN = (0.282, 0.851, 0.486)
+_PREVIEW_AP_RGB = tuple(a + (g - a) * _PREVIEW_MIX
+                        for a, g in zip((0.45, 0.75, 1.0), _PREVIEW_GREEN))
+_PREVIEW_PE_RGB = tuple(a + (g - a) * _PREVIEW_MIX
+                        for a, g in zip((1.0, 0.62, 0.25), _PREVIEW_GREEN))
 
 
 class PredictionDrawMixin:
@@ -750,7 +766,115 @@ class PredictionDrawMixin:
         if count == 0:
             return
 
+        self._draw_apsis_marker_rows(markers, count, camera, camera_frame_xy,
+                                     self.apsis_marker_hits)
+
+    # ------------------------------------------------- angeklickter bahnpunkt
+
+    def pick_prediction_time(self, screen_pos, camera, predictor, max_px=None):
+        """Zeit des punktes der vorhersagelinie unter `screen_pos`, oder None.
+
+        NUR AUF KLICK, nie je frame (ueberfahren zeigt nichts). Die linie
+        wird mit dem weg projiziert, den auch das verschieben eines
+        manoeverknotens benutzt (`_maneuver_screen_polyline`, ohne
+        verfeinerung, im stapel), dann das naechste SEGMENT gesucht und die
+        zeit linear auf ihm abgelesen -- die anzeige wertet danach die
+        kubik an genau dieser zeit aus (`state_on_curve`).
+        """
+        if predictor is None:
+            return None
+        try:
+            points = predictor.get_points()
+        except Exception:
+            return None
+        if points is None or len(points) < 2:
+            return None
+        # Design-einheiten wie das HUD, nicht rohe pixel.
+        reach = float(self.ui_px(self.trajectory_pick_max_px)
+                      if max_px is None else max_px)
+        curve = self._maneuver_screen_polyline(
+            points, camera, self._frame_camera_xy(camera),
+            int(self.trajectory_pick_points), refine=False)
+        if curve is None or len(curve) < 2:
+            return None
+        px, py = float(screen_pos[0]), float(screen_pos[1])
+        ax = curve[:-1, 0]
+        ay = curve[:-1, 1]
+        dx = curve[1:, 0] - ax
+        dy = curve[1:, 1] - ay
+        seg2 = dx * dx + dy * dy
+        with np.errstate(divide='ignore', invalid='ignore'):
+            s = np.where(seg2 > 0.0, ((px - ax) * dx + (py - ay) * dy) / seg2, 0.0)
+        s = np.clip(np.nan_to_num(s), 0.0, 1.0)
+        qx = ax + s * dx - px
+        qy = ay + s * dy - py
+        d2 = qx * qx + qy * qy
+        d2 = np.where(np.isfinite(d2), d2, np.inf)
+        k = int(np.argmin(d2))
+        if not (d2[k] <= reach * reach):
+            return None
+        t0 = float(curve[k, 2])
+        t1 = float(curve[k + 1, 2])
+        return t0 + (t1 - t0) * float(s[k])
+
+    def _draw_trajectory_pin(self, predictor, camera):
+        """Der angeklickte bahnpunkt (`trajectory_pin_t`): marke + treffer.
+
+        Der punkt ist eine ZEIT, kein ort: jedes bild wird er auf der
+        aktuellen linie ausgewertet (`state_on_curve`) und zur selben zeit
+        transformiert wie die linie -- so sitzt er auf ihr, in jedem rahmen
+        und waehrend die linie unter dem zeitraffer verbraucht wird.
+        Veroeffentlicht wird `trajectory_pin_hit = (sx, sy, x, y, vx, vy, t)`
+        (oder None), wie `apsis_marker_hits` auch bei ausgeblendeter marke.
+        """
+        self.trajectory_pin_hit = None
+        t_pin = self.trajectory_pin_t
+        if t_pin is None or predictor is None:
+            return
+        try:
+            points = predictor.get_points()
+        except Exception:
+            return
+        state = state_on_curve(points, float(t_pin))
+        if state is None:
+            return
+        x, y, vx, vy = state
+        sx, sy = self._world_to_screen_xy_at_time(
+            x, y, camera, float(t_pin), self._frame_camera_xy(camera))
+        if not (math.isfinite(sx) and math.isfinite(sy)):
+            return
+        self.trajectory_pin_hit = (sx, sy, x, y, vx, vy, float(t_pin))
+        if not getattr(self, 'draw_apsis_markers', True):
+            return
+        if not self._is_on_screen(sx, sy, 32.0):
+            return
+        # Ein QUADRAT mit vier kurzen strichen nach aussen: die rauten sind
+        # die apsiden, der punkt soll auf den ersten blick etwas anderes
+        # sein. Cyan ist die datenfarbe der bahn (ui/theme.py, 'orbit').
+        r = float(self.apsis_marker_radius_px)
+        col = (_PIN_RGB[0], _PIN_RGB[1], _PIN_RGB[2], 0.95)
+        a = (sx - r, sy - r)
+        b = (sx + r, sy - r)
+        c = (sx + r, sy + r)
+        d = (sx - r, sy + r)
+        t = r * 0.9
+        self._draw_line_segments(
+            (a, b, b, c, c, d, d, a,
+             (sx, sy - r), (sx, sy - r - t), (sx, sy + r), (sx, sy + r + t),
+             (sx - r, sy), (sx - r - t, sy), (sx + r, sy), (sx + r + t, sy)),
+            color=col, width=2.0)
+
+    def _draw_apsis_marker_rows(self, markers, count, camera, camera_frame_xy,
+                                hits, style='main'):
+        """Raute + abstands-fahne je zeile `(x, y, t_abs, kind, r[, v])`.
+
+        EINE routine fuer die vorhersagelinie und die geplante bahn
+        (`render/maneuver.py`, `style='preview'`): gleiche ausblendung nach
+        schirmgroesse, gleiche transformation zur markerzeit, gleiche
+        trefferliste -- nur farbe und kennung unterscheiden sich.
+        """
         r_px = float(self.apsis_marker_radius_px)
+        preview = style == 'preview'
 
         # AUSBLENDEN NACH SCHIRMGROESSE DER BAHN, NICHT NACH ZOOM-SCHWELLE.
         # `m[4]` ist der apsis-abstand zum bezugskoerper in metern, `* scale`
@@ -796,11 +920,25 @@ class PredictionDrawMixin:
             # (ui/hud/apsis_tooltip.py) trifft damit genau die raute, die
             # hier gezeichnet wird, und nicht eine selbst nachgerechnete.
             if self.apsis_tooltip_enabled:
-                self.apsis_marker_hits.append(
-                    (sx, sy, r_px, bool(is_apo), dist, t_abs, alpha_mult))
+                if preview:
+                    # Neun felder: dazu die kennung und das tempo, das die
+                    # vorschau am marker selbst gerechnet hat.
+                    speed = float(m[5]) if len(m) > 5 else math.nan
+                    hits.append((sx, sy, r_px, bool(is_apo), dist, t_abs,
+                                 alpha_mult, True, speed))
+                else:
+                    hits.append(
+                        (sx, sy, r_px, bool(is_apo), dist, t_abs, alpha_mult))
+            if not getattr(self, 'draw_apsis_markers', True):
+                continue
 
             label = "Ap" if is_apo else "Pe"
-            base = (0.45, 0.75, 1.0) if is_apo else (1.0, 0.62, 0.25)
+            if preview:
+                base = _PREVIEW_AP_RGB if is_apo else _PREVIEW_PE_RGB
+                label_rgb = base
+            else:
+                base = (0.45, 0.75, 1.0) if is_apo else (1.0, 0.62, 0.25)
+                label_rgb = (1.0, 1.0, 1.0)
             col = (base[0], base[1], base[2], 0.95 * alpha_mult)
 
             # Nord -> Ost -> Sued -> West -> Nord, als vier strecken.
@@ -822,7 +960,8 @@ class PredictionDrawMixin:
                 label_x = sx - tw / 2.0
                 self._blit_text_topdown(text, label_x, sy + r_px + 4.0,
                                         self.font_small,
-                                        color=(1.0, 1.0, 1.0, alpha_mult))
+                                        color=(label_rgb[0], label_rgb[1],
+                                               label_rgb[2], alpha_mult))
             except Exception:
                 pass
 

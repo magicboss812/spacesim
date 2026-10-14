@@ -94,6 +94,7 @@ def run(app):
         app.maneuver_router_ref[0] = router
     timing = FrameTimingPrinter()
     devui_toggle_key = pygame.K_F1
+    screenshot_key = pygame.K_F12
 
     running = True
     frame_count = 0
@@ -121,6 +122,14 @@ def run(app):
             # ereignis, bekommen weder ImGui noch die welt es zu sehen.
             consumed_by_hud = app.ui_root.handle_event(event)
 
+            # JEDER NEUE KLICK bricht ein laufendes "WARP TO" ab
+            # (runtime/warp_to.py, regel 3). NACH dem HUD: der knopf am
+            # zettel merkt sich in on_mouse_down, ob er gerade ein laufendes
+            # ziel stoppt. Rad-"knoepfe" 4/5 sind kein klick.
+            if (event.type == pygame.MOUSEBUTTONDOWN
+                    and getattr(event, 'button', 1) in (1, 2, 3)):
+                app.warp_to.cancel('klick')
+
             # ImGui sieht die uebrigen ereignisse, damit es seinen eigenen
             # eingabezustand fuehren kann. Ob es die eingabe auch VERBRAUCHT,
             # entscheiden ui_wants_mouse / ui_wants_keyboard.
@@ -139,6 +148,10 @@ def run(app):
                 # schliessen, sobald ein eingabefeld fokussiert ist.
                 if event.key == devui_toggle_key:
                     app.devui.toggle()
+                    continue
+                # F12 ebenso: ein foto stoert keine texteingabe.
+                if event.key == screenshot_key:
+                    app.screenshot.request()
                     continue
                 if ui_wants_keyboard:
                     # Tastatur gehoert der oberflaeche (texteingabe o.ae.).
@@ -188,14 +201,21 @@ def run(app):
                              or keys[pygame.K_LEFT] or keys[pygame.K_RIGHT])):
                     app.maneuver_executor.notify_manual_input()
                     print("MANEUVER: abgebrochen (handeingabe)")
+                if keys[pygame.K_UP] or keys[pygame.K_DOWN]:
+                    app.warp_to.cancel('schub')
                 if app.thrust_allowed():
                     app.ship_control.apply_thrust(keys, frame_dt)
 
         # Raffung auf die bahn-zeitskala begrenzen. Das HUD blendet gesperrte
         # stufen bereits ab; das hier ist der riegel fuer PageUp/PageDown und
         # die dev-oberflaeche, die daran vorbeigehen.
+        # "WARP TO" waehlt seine stufe VOR dem riegel: _clamp_warp und der
+        # ausfuehrer duerfen sie danach noch senken, und note_applied merkt
+        # sich, was am ende stehen blieb.
+        app.warp_to.update(app.world, app.ship)
         _clamp_warp(app)
         _apply_maneuver(app)
+        app.warp_to.note_applied()
         # Horizont an die raffung anpassen (no-op, solange die stufe steht).
         _apply_horizon(app)
 
@@ -212,6 +232,14 @@ def run(app):
         # frame_dt ist bereits auf max_frame_dt gekappt, ein stall kann also
         # keinen riesigen sprung einspeisen.
         sim_step = app.camera.sim_dt * app.tick_rate * frame_dt
+        # PAUSE: die welt bekommt 0 s, die missionsuhr steht. Bewusst ein
+        # eigener schalter und nicht sim_dt = 0 (boden min_sim_dt, divisionen
+        # durch sim_dt). Kamera, HUD und vorhersage laufen weiter; der schub
+        # ist ueber thrust_allowed() gesperrt, ein scharfer knoten rueckt
+        # nicht vor (der ausfuehrer bekommt den schritt gar nicht erst).
+        paused = app.camera.paused
+        if paused:
+            sim_step = 0.0
         # Ein scharfgeschalteter knoten deckelt den schritt: sonst rueckt ein
         # zeitraffer-frame um stunden vor und der ganze brennvorgang faellt
         # zwischen zwei bilder. Waehrend des brennens haelt die decke die
@@ -220,11 +248,16 @@ def run(app):
                if app.maneuver_executor is not None else None)
         if cap is not None:
             sim_step = min(sim_step, max(1e-9, cap))
+        # "WARP TO" deckelt genauso: nie ueber das ziel hinaus.
+        warp_cap = app.warp_to.max_sim_seconds(app.world)
+        if warp_cap is not None and not paused:
+            sim_step = min(sim_step, warp_cap)
         # Das delta-v des SCHRITTES anlegen, BEVOR er gegangen wird -- so
         # traegt die positionsintegration dieses schrittes es bereits.
-        if app.maneuver_executor is not None:
+        if app.maneuver_executor is not None and not paused:
             app.maneuver_executor.update(app.world, sim_step)
         app.world.step(sim_step, app.max_substep)
+        app.warp_to.after_step(app.world)
 
         # kamera mit echtem frame-delta fuer interaktives panning aktualisieren
         # (zoom/schwenk laufen ihren zielen geglaettet nach)
@@ -257,8 +290,13 @@ def run(app):
         app.ui_root.render()
 
         app.dev_ctx.frame_dt = frame_dt
-        app.dev_ctx.sim_step_s = app.camera.sim_dt * app.tick_rate * frame_dt
+        app.dev_ctx.sim_step_s = sim_step
         app.devui.build(app.dev_ctx)
+        # Das foto HIER: welt und spieler-HUD stehen im framebuffer, ImGui
+        # noch nicht. build() liegt davor, damit der knopf der
+        # dev-oberflaeche noch im selben frame greift.
+        app.screenshot.capture_if_requested(
+            app.window.ctx, app.renderer.width, app.renderer.height)
         app.devui.render()
 
         app.renderer.present()
@@ -283,6 +321,8 @@ def run(app):
             running = False
 
     app.devui.shutdown()
+    # Ein foto, das gerade noch geschrieben wird, nicht abschneiden.
+    app.screenshot.shutdown()
     if getattr(app, 'maneuver_preview', None) is not None:
         # Der arbeiter der vorschau ist kein daemon-thread: ohne dieses
         # abmelden haengt der prozess am ende an einem laufenden neuaufbau.

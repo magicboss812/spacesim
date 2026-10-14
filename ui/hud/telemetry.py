@@ -216,6 +216,7 @@ class Telemetry:
         # ist hier nur vorbelegt, damit das HUD auch allein lauffaehig bleibt.
         self.realtime_warp_max = 60.0
         self.thrust_locked = False
+        self.paused = False
 
         # Hoechste raffung, bei der die BAHN noch aufgeloest ist. Nahe an einem
         # koerper ist das keine frage der rechenleistung, sondern der physik:
@@ -283,7 +284,9 @@ class Telemetry:
         # Im zeitraffer ist der schub gesperrt: ein impuls je
         # frame waere dort weder dosierbar noch reproduzierbar. Der regler
         # zeigt das an, sonst drueckt der spieler 'Up' und nichts geschieht.
-        self.thrust_locked = self.warp_factor > self.realtime_warp_max * 1.001
+        self.paused = bool(getattr(self.camera, 'paused', False))
+        self.thrust_locked = (self.paused
+                              or self.warp_factor > self.realtime_warp_max * 1.001)
         self._sample_warp_limit(ship)
         self.snap_mode = getattr(self.ship_control, 'snap_mode', None)
         self._sample_maneuver()

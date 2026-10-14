@@ -173,6 +173,12 @@ class Widget:
         self.offset = (float(offset[0]), float(offset[1]))
         self.size = size
         self.visible = bool(visible)
+        # NUR-ANZEIGE-schalter (HUD-sichtbarkeit der dev-oberflaeche).
+        # `visible = False` ueberspringt auch update() -- das widget stuende
+        # still und veroeffentlichte nichts mehr. `drawn = False` nimmt es
+        # (samt kindern) nur aus zeichnen und treffertest: layout und
+        # update laufen weiter, die maus faellt durch.
+        self.drawn = True
         self.enabled = bool(enabled)
         self.z = int(z)
         self.name = name or self.__class__.__name__
@@ -387,13 +393,16 @@ class UIRoot(Widget):
         Die tiefensuche haelt eltern vor ihren kindern, das malprinzip
         (erst flaeche, dann inhalt) bleibt also erhalten. Bei gleichem z
         gewinnt das spaeter hinzugefuegte widget.
+
+        `drawn = False` schneidet den teilbaum hier ab -- nicht gezeichnet
+        heisst damit auch nicht treffbar (_pick liest dieselbe liste).
         """
         items = []
         counter = 0
 
         def visit(widget, parent_z):
             nonlocal counter
-            if not widget.visible:
+            if not widget.visible or not widget.drawn:
                 return
             z = parent_z + widget.z
             if widget is not self:

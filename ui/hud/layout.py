@@ -31,6 +31,7 @@ from ..core import (
 from ..widgets import Stack
 from ..widgets.rate_slider import HorizonSlider
 from .apsis_tooltip import ApsisTooltip
+from .point_tooltip import PointTooltip
 from .body_browser import BodyBrowser
 from .maneuver import (ManeuverAxesBlock, ManeuverBurnBlock, ManeuverGizmo,
                        ManeuverNodesBar, ManeuverPlanBlock)
@@ -163,6 +164,8 @@ class Hud:
         # und steht deshalb ausserhalb jeder gruppe -- sein platz kommt aus
         # der weltposition des markers, nicht aus der verankerung.
         self.apsis_tooltip = root.add(ApsisTooltip(telemetry))
+        # Sein bruder am ANGEKLICKTEN bahnpunkt (ui/hud/point_tooltip.py).
+        self.point_tooltip = root.add(PointTooltip(telemetry))
         self.target_rail = root.add(IconRail(
             [{'key': 'TG'}, {'key': 'D'}, {'key': 'V'}],
             color_role='target', anchor=CENTER_LEFT, offset=(MARGIN, 0),
@@ -171,7 +174,9 @@ class Hud:
         # --- oben rechts: zeitraffer + missionsuhr -----------------------
         self.warp = root.add(WarpBar(
             telemetry,
-            options=[label for _, label in WARP_STEPS],
+            # Zelle 0 ist die PAUSE (WarpBar.PAUSE_INDEX), zelle i > 0 die
+            # stufe WARP_STEPS[i - 1].
+            options=[''] + [label for _, label in WARP_STEPS],
             value=self._warp_index,
             on_select=self._set_warp,
             enabled=self._warp_step_enabled,
@@ -324,11 +329,19 @@ class Hud:
     # ------------------------------------------------------------- aktionen
 
     def _warp_index(self):
-        """Naechstliegende zeitraffer-stufe zum AKTUELLEN sim_dt.
+        """Zelle der leiste: 0 in der pause, sonst 1 + die naechstliegende
+        zeitraffer-stufe zum AKTUELLEN sim_dt.
 
-        Zurueckgelesen statt gemerkt: PageUp/PageDown und das dev-panel
-        verstellen sim_dt ebenfalls, und der knopf soll dann mitwandern.
+        Zurueckgelesen statt gemerkt: PageUp/PageDown, die leertaste und das
+        dev-panel verstellen sim_dt bzw. die pause ebenfalls, und der knopf
+        soll dann mitwandern.
         """
+        if getattr(self.camera, 'paused', False):
+            return WarpBar.PAUSE_INDEX
+        return WarpBar.PAUSE_INDEX + 1 + self._warp_step_index()
+
+    def _warp_step_index(self):
+        """Index in WARP_STEPS der stufe, die sim_dt am naechsten liegt."""
         current = max(self.telemetry.warp_factor, 1e-9)
         best = 0
         best_error = None
@@ -342,22 +355,36 @@ class Hud:
         return best
 
     def _warp_step_enabled(self, index):
-        """Ist diese stufe momentan erlaubt? (bahn-zeitskala, siehe
-        Telemetry._sample_warp_limit)"""
-        if index < 0 or index >= len(WARP_STEPS):
+        """Ist diese ZELLE momentan waehlbar? Die pause immer, eine stufe nur,
+        wenn die bahn sie aufloest (Telemetry._sample_warp_limit)."""
+        if index == WarpBar.PAUSE_INDEX:
+            return True
+        step = index - WarpBar.PAUSE_INDEX - 1
+        if step < 0 or step >= len(WARP_STEPS):
             return False
-        return self.telemetry.warp_step_allowed(WARP_STEPS[index][0])
+        return self.telemetry.warp_step_allowed(WARP_STEPS[step][0])
 
     def _set_warp(self, index):
-        index = max(0, min(index, len(WARP_STEPS) - 1))
+        """Klick auf eine zelle der leiste.
+
+        Die pause-zelle schaltet um: ein zweiter klick hebt die pause auf und
+        laesst die vorige stufe weiterlaufen (sim_dt wurde nie angefasst).
+        Eine stufe beendet eine pause und setzt sim_dt.
+        """
+        camera = self.camera
+        if camera is None:
+            return
+        if index == WarpBar.PAUSE_INDEX:
+            camera.toggle_pause()
+            return
+        index = max(WarpBar.PAUSE_INDEX + 1,
+                    min(index, WarpBar.PAUSE_INDEX + len(WARP_STEPS)))
         # Gesperrte stufe: nichts tun. Der knopf ist bereits abgeblendet, ein
         # klick darf die bahn nicht zerlegen.
         if not self._warp_step_enabled(index):
             return
-        factor = WARP_STEPS[index][0]
-        camera = self.camera
-        if camera is None:
-            return
+        factor = WARP_STEPS[index - WarpBar.PAUSE_INDEX - 1][0]
+        camera.paused = False
         tick_rate = max(1.0, self.telemetry.tick_rate)
         target = factor / tick_rate
         low = float(getattr(camera, 'min_sim_dt', 1e-6) or 1e-6)
