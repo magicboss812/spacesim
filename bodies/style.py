@@ -646,6 +646,59 @@ def _build_star(seed, color, detail):
     return _pack(tri_rows, seg_rows, 0, seed, 'star', detail, 1)
 
 
+#: (hue-versatz, saettigung %, helligkeit %, alpha) je stufe eines gasriesen.
+_GAS_LOOKS = ((-4.0, 34.0, 74.0, 0.62),    # zone: hell, blass
+              (6.0, 52.0, 52.0, 0.56),     # guertel
+              (12.0, 58.0, 36.0, 0.52))    # dunkler guertel
+
+#: Baender, die `gas_params` als tabelle ausgibt: index 0 = band GAS_BAND_MIN.
+GAS_BAND_MIN = -12
+GAS_BAND_COUNT = 24
+
+
+def _gas_band_tiers(s, lo, hi):
+    tier_of = {}
+    prev = -1
+    for b in range(lo, hi + 1):
+        t = int(_hash3(b + 40, 7, 3, s + 1213) * 3.0) % 3
+        if t == prev:
+            t = (t + 1) % 3
+        tier_of[b] = t
+        prev = t
+    return tier_of
+
+
+def gas_params(seed, color=(255, 255, 255)):
+    """Die gewuerfelten groessen eines gasriesen -- dieselbe zufallsfolge wie
+    `_build_gas`, damit der pixel-weg (`render/body_pixel.py`) die baender
+    je ZELLE aus denselben zahlen rechnet wie die vektor-zeichnung je
+    facette: achse (bildraum), dichte, phase, wirbel, frequenz, drehung,
+    stufe je band (tabelle ab `GAS_BAND_MIN`) und die drei stufenfarben."""
+    seed = int(seed) & _MASK32
+    rnd = _Rng((seed * 2654435761 + 98765) & _MASK32)
+    s = seed & 0xffff
+    tilt = (rnd() - 0.5) * 2.0 * math.radians(24.0)
+    tip = (rnd() - 0.5) * 2.0 * math.radians(22.0)
+    axis = np.asarray([-math.sin(tilt) * math.cos(tip),
+                       math.cos(tilt) * math.cos(tip),
+                       math.sin(tip)], dtype=np.float64)
+    density = 3.4 + rnd() * 2.2          # baender je halbkugel
+    phase = rnd()
+    swirl = 0.55 + rnd() * 0.35
+    freq = 2.2 + rnd() * 1.2
+    rot = _euler_matrix(rnd() * TAU, math.acos(2.0 * rnd() - 1.0), rnd() * TAU)
+    tier_of = _gas_band_tiers(s, GAS_BAND_MIN, GAS_BAND_MIN + GAS_BAND_COUNT - 1)
+    hue, sat_factor = _color_basis(color)
+    colors = tuple(_hsl(hue, sat_factor, dh, sat, light)
+                   for dh, sat, light, _alpha in _GAS_LOOKS)
+    return {
+        'axis': axis, 'density': density, 'phase': phase, 'swirl': swirl,
+        'freq': freq, 'rot': rot,
+        'tiers': [tier_of[GAS_BAND_MIN + i] for i in range(GAS_BAND_COUNT)],
+        'colors': colors,
+    }
+
+
 def _build_gas(seed, color, detail):
     """Der gasriese: breitenbaender, verwirbelt nur an ihren raendern.
 
@@ -664,18 +717,10 @@ def _build_gas(seed, color, detail):
       darunter, keine figuren und keine grosskreis-ringe.
     """
     seed = int(seed) & _MASK32
-    rnd = _Rng((seed * 2654435761 + 98765) & _MASK32)
     s = seed & 0xffff
-    tilt = (rnd() - 0.5) * 2.0 * math.radians(24.0)
-    tip = (rnd() - 0.5) * 2.0 * math.radians(22.0)
-    axis = np.asarray([-math.sin(tilt) * math.cos(tip),
-                       math.cos(tilt) * math.cos(tip),
-                       math.sin(tip)], dtype=np.float64)
-    density = 3.4 + rnd() * 2.2          # baender je halbkugel
-    phase = rnd()
-    swirl = 0.55 + rnd() * 0.35
-    freq = 2.2 + rnd() * 1.2
-    rot = _euler_matrix(rnd() * TAU, math.acos(2.0 * rnd() - 1.0), rnd() * TAU)
+    gp = gas_params(seed, color)
+    axis, density, phase = gp['axis'], gp['density'], gp['phase']
+    swirl, freq, rot = gp['swirl'], gp['freq'], gp['rot']
 
     verts, faces, centers, edge_map = _visible_sphere(seed, detail, rot)
     # Das rauschen im ungedrehten raum, die geometrie dann gedreht -- wie
@@ -688,22 +733,11 @@ def _build_gas(seed, color, detail):
     band = np.floor(lat * density + phase + turb * swirl).astype(np.int64)
 
     # Stufe je band: gewuerfelt, ohne zwei gleiche nachbarn.
-    lo, hi = int(band.min()), int(band.max())
-    tier_of = {}
-    prev = -1
-    for b in range(lo, hi + 1):
-        t = int(_hash3(b + 40, 7, 3, s + 1213) * 3.0) % 3
-        if t == prev:
-            t = (t + 1) % 3
-        tier_of[b] = t
-        prev = t
+    tier_of = _gas_band_tiers(s, int(band.min()), int(band.max()))
     tiers = np.asarray([tier_of[int(b)] for b in band.tolist()], dtype=np.int64)
 
     hue, sat_factor = _color_basis(color)
-    #: (hue-versatz, saettigung %, helligkeit %, alpha) je stufe.
-    looks = ((-4.0, 34.0, 74.0, 0.62),    # zone: hell, blass
-             (6.0, 52.0, 52.0, 0.56),     # guertel
-             (12.0, 58.0, 36.0, 0.52))    # dunkler guertel
+    looks = _GAS_LOOKS
     vlist = verts.tolist()
     clist = centers.tolist()
     flist = faces.tolist()

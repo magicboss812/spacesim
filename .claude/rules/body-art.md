@@ -163,64 +163,102 @@ res display and upscaled": the semi-transparent stack (disc, grid, fills at
 square cells packed edge to edge are exactly what an upscaled image looks
 like. The rules below are what replaced it; each one fixes a seen failure.
 
-Per body, two passes, then one blit per frame:
+Per body, three passes, then one blit per frame:
 
 1. **Cell pass** (`body_cell_disc.frag` on `body.vert`, `body_cell_fill.frag`
    on `body_surface.vert`): a small buffer with one texel per cell, blending
-   **off**. Each cell is opaque and writes two targets: colour + halftone size
-   (`o_cell`) and an unlit region id (`o_id`, the fill's own colour). The grid
-   hangs on the **body**: centre rounded to whole pixels, cells counted from
-   there, so the body moves in 1-px steps with its orbit line and nothing
-   shimmers while panning. Only the on-screen part of the disc is allocated.
-2. **Compose** (`body_pixel.frag`, native resolution, into a window-size
+   **off**. Each cell is opaque and writes colour + halftone size (`o_cell`)
+   and an unlit region id + tag (`o_id`). The grid hangs on the **body**:
+   centre rounded to whole pixels, cells counted from there, so the body moves
+   in 1-px steps with its orbit line and nothing shimmers while panning.
+2. **Clean pass** (`body_cell_clean.frag`, cell resolution): a cell that
+   matches none of its four neighbours while two of them match each other
+   takes their colour, keeping its own brightness. Tiny figures rasterised to
+   one cell were scattered specks. It is a separate pass because the compose
+   runs per *screen* pixel, k² times per cell.
+3. **Compose** (`body_pixel.frag`, native resolution, window-size
    premultiplied layer):
-   - **LED cells**: a chamfered square with a 1-px gap. The gap is the
-     body's grout colour mixed 55 % toward the cell, not transparent, so the
-     disc stays solid. At 22 % it was a screen door over the whole body.
-     Cells with gaps cannot come from upscaling, which is the point.
-   - **Halftone**: light sets the cell size (full, −2, −4, 1-px dot) on top
-     of 4 tone steps. The night side keeps dots so the silhouette survives.
-   - **1-px strokes** in the gap where the region id differs (right/bottom
-     edge only, so each border is drawn once), and on the silhouette edge
-     facing the light. Night-side strokes fade into the grout, or the dark
-     side carries a net.
-   - **Outside the disc**: one row of half-size atmosphere dots on the lit
-     side, and the halo as a **dot matrix** (Bayer-thinned, one dot per cell,
-     denser toward the light). Stars: 3× radius, 2-px dots.
-3. `_end_body_layer` blits the layer after the FXAA resolve (FXAA would
-   soften every stair), then draws the deferred markers on top.
+   - **LED cells**: a chamfered square with a 1-px gap. The gap only opens on
+     the lit side (`lit` 0.55 → 0.85) and toward the limb (`dist` 0.80 →
+     0.97); inside the body it takes the cell colour. A gap everywhere laid
+     one screen texture over every body.
+   - **Halftone**: light sets the cell size (full, −2, −4, 1-px dot); the
+     night side keeps dots so the silhouette survives.
+   - **1-px strokes**: on the lit silhouette edge, and between regions only
+     when the region **brightness** differs by more than 0.045 luma *and*
+     both cells carry the same tag. Night-side strokes fade into the grout.
+   - **Outside**: atmosphere dots, a dot-matrix halo; stars add two stepped
+     glow rings (large dots, then smaller ones) before the matrix.
+   - Early discard beyond `max(halo, 1 + 3.5 cells)`, and edge strokes via
+     one function called only on edge pixels. With local arrays and a
+     four-neighbour loop per pixel the compose dominated the cost in
+     software GL.
 
-Load-bearing details:
-- **Palette** (`ramp()` in both cell shaders; GLSL has no include, keep the
-  two copies equal). 4 steps per colour, shadow cooler and pulled toward HUD
-  ground `#04070c`, light warmer and pulled toward HUD text `#dceaf4`. Only
-  the day/night step (0/1) is Bayer-dithered; the others are hard. Stars use
-  their own warm ramp: the cool shadow step turned the solar limb olive.
-- **No cross-fades in this path.** Two detail levels, or art and ground, in
-  a Bayer split gave neighbouring cells different region ids. Every cell then
-  got its own border and the body became a mesh. The heavier level wins
-  outright, and the art switches in at `fade >= 0.5`.
-- **Lines of the style are not drawn.** Tier contours and figure outlines are
-  replaced by the region strokes. Lost on purpose: the faint grid, the
-  great-circle rings (alpha 0.16) and the inner triangle of `nested`.
-- **Grid sizes sit on one ladder.** `body_pixel_size` 6 and
-  `body_pixel_size_small` 3 design units; the small cell is used below
-  `body_pixel_small_cells` (16) big cells of radius, so a small body is not a
-  four-cell blob. `background.pixel_size` was moved 2.7 → 3.0, so the
-  background pitch equals the small cell and is half the big one.
-- **Detail is set in cells**: `_body_facet_target_px` makes the facet target
-  `max(body_vector_facet_px, body_pixel_facet_cells · k)` (4 cells). At 8
-  cells Jupiter was four flat patches.
+`_end_body_layer` blits the layer after the FXAA resolve (FXAA would soften
+every stair), then draws the deferred markers.
+
+**Lighting is per cell, not per facet.** `cell_normal()` puts the sphere
+point under each cell centre against the light. Flat-lit facets laid
+triangles of tone over the whole night side. The facets now only carry the
+pattern (region colour).
+
+**Stars and gas giants are procedural per cell** (`u_kind` in
+`body_cell_disc.frag`), so they have no detail levels and nothing to switch:
+- **Star**: four limb rings from `I = 1 − 0.62(1 − μ)` and a warm ramp of
+  its own (the cool planet shadow step turned the limb olive). Granulation is
+  3D Worley on the sphere (10 grains per radius, lanes one step darker). It
+  is attached to the surface and fades in only once a grain is ≥ 3 cells
+  wide; below that it is noise.
+- **Gas giant**: the same seeded numbers as the vector style
+  (`bodies/style.py::gas_params`: axis, density, phase, swirl, frequency,
+  rotation, tier table from `GAS_BAND_MIN`, three tier colours). The band is
+  `floor(lat·density + phase + fbm·swirl·1.6 + fine)`, where the fine term
+  (cell scale) frays the band edges in whole cells. `_build_gas` uses
+  `gas_params` too, and its output stayed byte-identical (md5 checked). The
+  tier table starts its no-equal-neighbour chain at −12 rather than at the
+  facet minimum, so the pixel bands may differ from the vector bands in
+  which tier a band gets.
+
+**No jumps: every transition is a radial wipe.** The new state grows from the
+body centre outward with a clean cell boundary, keyed on the cell centre's
+distance from the centre:
+- **Art fade-in** (ground → drawing) over `fade`.
+- **Detail level**: the higher level inside, over `body_pixel_detail_blend`
+  (0.2). Each level writes its own tag (1.0 / 0.8 by subdivision parity), and
+  no stroke is drawn across a tag change, so the wipe front has no line.
+- **Cell size** (3 → 6 px): both versions are composed, split by the big
+  cell's distance (`u_dissolve`, band `body_pixel_cell_blend` 1.25 either side
+  of `body_pixel_small_cells` big cells). k_big is always an exact multiple
+  of k_small, so the boundary runs cleanly on both grids.
+- The first version used a Bayer dissolve per cell. Its midpoint was pure
+  speckle, and a 0.35 blend band left a body *at rest* speckled (Erde at
+  255 px sat at medium 0.83 / fine 0.17).
+
+**The ladder only goes up.** The facet target is `body_pixel_facet_cells ·
+k_big` (4 cells), never the cell size currently in use. Tied to the current
+cell, the target doubled at the 3 → 6 switch and the ladder stepped back a
+level while zooming in. A 400-step sweep from 10 to 3000 px radius now has
+0 back-steps.
+
+Other load-bearing details:
+- **Palette** (`ramp()` in both cell shaders; GLSL has no include, so keep
+  the copies equal). Shadow is cooler and pulled toward HUD ground `#04070c`.
+  Light brightens within its own hue (`c·(1.30, 1.24, 1.10) + 0.10·ink`); a
+  30 % mix toward HUD text turned every highlight grey. Only the day/night
+  step is Bayer-dithered.
+- **Lines of the style are not drawn.** Region strokes replace contours and
+  outlines. Lost on purpose: the faint grid, the great-circle rings and the
+  inner triangle of `nested`.
+- **Grid sizes on one ladder**: `body_pixel_size` 6 and
+  `body_pixel_size_small` 3 design units; `background.pixel_size` is 3.0.
 - **The selected body's lit edge is HUD cyan**, tied to
-  `selection_marker_enabled`. `selection_camera_test` §8 requires the frame
-  with the marker switched off to be identical to the unselected one.
-- **Gas giants**: in compose, a seeded 32 % of cell rows read their
-  neighbour one cell left or right (interior only, so the silhouette stays
-  round). That is the turbulence, as row offsets.
+  `selection_marker_enabled` (`selection_camera_test` §8).
+- **Uniforms in the cell pass are written via `_put`** (skips names the
+  compiler removed). Each body kind leaves different ones unused, and a
+  plain `prog[...]` raised `KeyError: 'u_tag'`.
 
-Cost (900×700, Erde at 200 px, llvmpipe, `gl.finish()`): 2.9 ms with the
-pixel path off, 4.7 ms on. Almost all of it is the per-pixel compose in
-software GL.
+Cost (900×700, Erde at 200 px, llvmpipe, `gl.finish()`): about 3.0–3.5 ms
+off, 5.6–7.3 ms on; this machine's noise is ±2 ms between runs.
 
 ## Die Marke — `bodies/icon.py`
 

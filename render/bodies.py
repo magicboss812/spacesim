@@ -327,7 +327,9 @@ class BodyDrawMixin:
 
         radius_px = max(1e-3, float(radius_px))
         target = self._body_facet_target_px(radius_px)
-        blend = max(1e-3, min(0.9, float(self.body_vector_detail_blend)))
+        blend = max(1e-3, min(0.9, float(
+            self.body_pixel_detail_blend if self._body_layer_active
+            else self.body_vector_detail_blend)))
 
         position = 0.0
         for index in range(len(levels) - 1):

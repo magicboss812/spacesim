@@ -412,12 +412,11 @@ irgendetwas geprueft wird. Das ist kein befund ueber den code, den sie
 pruefen sollten — wer sie braucht, muss zuerst die pfade nachziehen.
 
 `body_style_test.py` §8 "und kosten entsprechend wenig" (budget 4 ms) gives
-~5.5 ms here with the pixel bodies on (2026-10-14), against 1.0–1.1 ms
+5.5–6 ms here with the pixel bodies on (2026-10-14), against 1.0–1.1 ms
 before. It times `render()` on the CPU, and in llvmpipe that includes the
-per-pixel compose of `body_pixel.frag`. Measured with `gl.finish()`, the
-pixel path adds 1.7 ms for one 200-px body. `renderer.body_pixel_size = 0`
-brings back the old number. The rest of the file still passes, because §5
-and §7 do not go through `render()`'s pixel path.
+per-pixel compose of `body_pixel.frag` (about +2 to +3 ms for one 200-px
+body, `.claude/rules/body-art.md`). `renderer.body_pixel_size = 0` brings
+back the old number. The rest of the file still passes.
 
 `body_icon_test.py` §5 misst hier **±2.24 % gegen eine grenze von 2 %**,
 reproduzierbar ueber mehrere laeufe (die notiz oben nennt ±0.10 %). Der test

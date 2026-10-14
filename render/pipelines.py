@@ -134,6 +134,8 @@ class ShaderPipelineMixin:
             'body.vert', 'body_cell_disc.frag', 'body_cell_disc')
         self._body_cell_fill_program = self._compile_shader_program(
             'body_surface.vert', 'body_cell_fill.frag', 'body_cell_fill')
+        self._body_cell_clean_program = self._compile_shader_program(
+            'body_pixel.vert', 'body_cell_clean.frag', 'body_cell_clean')
         quad = self._ensure_quad_vbo()
         try:
             if self._body_layer_program is not None:
@@ -145,6 +147,11 @@ class ShaderPipelineMixin:
                     self._body_pixel_program, [(quad, '2f', 'a_pos')])
                 self._body_pixel_program['u_cells'].value = 0
                 self._body_pixel_program['u_ids'].value = 1
+            if self._body_cell_clean_program is not None:
+                self._body_cell_clean_vao = self.ctx.vertex_array(
+                    self._body_cell_clean_program, [(quad, '2f', 'a_pos')])
+                self._body_cell_clean_program['u_cells'].value = 0
+                self._body_cell_clean_program['u_ids'].value = 1
             if self._body_cell_disc_program is not None:
                 self._body_cell_disc_vao = self.ctx.vertex_array(
                     self._body_cell_disc_program, [(quad, '2f', 'a_corner')])
@@ -154,6 +161,7 @@ class ShaderPipelineMixin:
             self._body_layer_vao = None
             self._body_pixel_vao = None
             self._body_cell_disc_vao = None
+            self._body_cell_clean_vao = None
 
     def _init_body_icon_pipeline(self):
         """Programm der positions-marke.

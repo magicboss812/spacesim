@@ -2,13 +2,11 @@
 
 // Pixel-pass, fuellungen der vektor-zeichnung (vertex: body_surface.vert).
 // Deckend: die farbe der stufe ist eine WAHL aus der rampe, kein
-// durchscheinender schleier -- daher kommen die wenigen, klaren toene.
+// durchscheinender schleier. Das licht kommt aus der zellmitte auf der
+// kugel, nicht aus der facette (siehe cell_normal).
 
 in vec3 v_color;
 in float v_alpha;
-in float v_lit;
-
-uniform float u_emissive;
 
 // ---- gemeinsam mit body_cell_disc.frag / body_cell_fill.frag ----------
 // (GLSL 330 hat kein #include; die beiden kopien muessen gleich bleiben.)
@@ -16,15 +14,22 @@ uniform float u_emissive;
 // Jedes fragment dieses passes ist EINE ZELLE des koerper-rasters. Es
 // schreibt zwei ziele:
 //   o_cell = (farbe der stufe, halbton-groesse 0.25 / 0.5 / 0.75 / 1.0)
-//   o_id   = (regions-kennung = unbeleuchtete grundfarbe, 1 = belegt)
-// Der zusammenbau (body_pixel.frag) formt daraus die zellen, die striche
-// zwischen regionen und den rand.
+//   o_id   = (regions-kennung = unbeleuchtete grundfarbe, kennzeichen)
+// Kennzeichen: 1.0 / 0.8 = zeichnung (die zwei stufen einer detail-
+// ueberblendung), 0.4 = grund ohne grenzstriche. Der zusammenbau
+// (body_pixel.frag) zieht striche nur zwischen gleichen kennzeichen -- eine
+// ueberblendung erzeugt so keine striche um jede gewechselte zelle.
 
 uniform vec2 u_center_px;
 uniform vec2 u_viewport;
 uniform float u_cell;
 uniform float u_seed;
 uniform vec2 u_dither_range;   // zelle nur, wenn lo <= bayer < hi
+uniform float u_tag;
+uniform float u_body_radius;   // kernradius in pixeln
+uniform vec3 u_light;
+uniform float u_light_exp;
+uniform float u_emissive;
 
 layout(location = 0) out vec4 o_cell;
 layout(location = 1) out vec4 o_id;
@@ -55,17 +60,35 @@ ivec2 local_cell() {
     return ivec2(floor(gl_FragCoord.xy)) - ivec2(floor(ref + 0.5));
 }
 
+// Kugelpunkt unter der ZELLMITTE (y nach oben). Die beleuchtung haengt
+// daran und nicht an der facette: flach beleuchtete facetten lagen als
+// dreiecke aus stufen ueber der nachtseite.
+vec3 cell_normal() {
+    vec2 cpx = vec2((floor(gl_FragCoord.x) + 0.5) * u_cell,
+                    u_viewport.y - (floor(gl_FragCoord.y) + 0.5) * u_cell);
+    vec2 p = (cpx - u_center_px) / max(u_body_radius, 1e-3);
+    p.y = -p.y;
+    float rr = min(dot(p, p), 1.0);
+    return vec3(p, sqrt(1.0 - rr));
+}
+
+float cell_lit(vec3 n) {
+    float d = max(dot(n, u_light), 0.0);
+    return mix(pow(d, u_light_exp), 1.0, u_emissive);
+}
+
 // Vier stufen je farbe: schatten kuehl und zum HUD-grund, licht warm und
-// zur HUD-schrift. Der farbton-versatz ist, was es GEMALT aussehen laesst.
+// zur HUD-schrift.
 vec3 ramp(vec3 c, int t) {
     if (t <= 0) return mix(HUD_GROUND * 2.0, c * vec3(0.80, 0.88, 1.10), 0.34);
     if (t == 1) return c * vec3(0.64, 0.70, 0.82);
     if (t == 2) return c;
-    return mix(c * vec3(1.08, 1.03, 0.94), HUD_INK, 0.30);
+    // Licht: in der eigenen farbe heller und waermer, nur ein hauch zur
+    // HUD-schrift -- staerker gemischt wurde jede farbe zu grau.
+    return min(c * vec3(1.30, 1.24, 1.10) + HUD_INK * 0.10, vec3(1.0));
 }
 
-// Licht -> stufe. Gedithert wird NUR die grenze tag/nacht (0/1); die
-// uebrigen grenzen sind hart.
+// Licht -> stufe. Gedithert wird NUR die grenze tag/nacht (0/1).
 int tone_of(float lit, float b) {
     if (lit < 0.07 + (b - 0.5) * 0.10) return 0;
     if (lit < 0.30) return 1;
@@ -82,30 +105,22 @@ float fill_of(float lit) {
     return 0.25;
 }
 
-void emit(vec3 base, float lit, float emissive, vec3 region) {
+// Ueberblendungen (einblendung der zeichnung, detailstufe) sind ein
+// RADIALER WISCH: der schluessel ist der abstand der zellmitte zur
+// koerpermitte, der neuere zustand waechst von innen nach aussen mit einer
+// sauberen zellgrenze. Ein bayer-dissolve zweier verschiedener muster war in
+// der mitte des uebergangs reines rauschen.
+bool dither_skip(ivec2 c) {
+    vec3 n = cell_normal();
+    float key = min(length(n.xy), 0.9999);
+    return key < u_dither_range.x || key >= u_dither_range.y;
+}
+
+void emit_lit(vec3 base, vec3 region, float tag) {
     ivec2 c = local_cell();
-    float b = bayer4(c);
-    if (b < u_dither_range.x || b >= u_dither_range.y) {
-        discard;
-    }
-    if (emissive >= 0.5) {
-        // Stern: helligkeit traegt die randverdunklung der zeichnung, keine
-        // nachtseite, kein halbton. Wenige zellen eine stufe tiefer sind
-        // die granulation.
-        // Eigene, WARME rampe: die kuehle schattenstufe der planeten machte
-        // den sonnenrand oliv.
-        float l = dot(base, vec3(0.299, 0.587, 0.114));
-        int t = l > 0.66 ? 3 : (l > 0.46 ? 2 : 1);
-        if (cell_hash(c, u_seed + 3.0) < 0.12) t = max(t - 1, 1);
-        vec3 star = t == 3 ? mix(base, vec3(1.0, 0.98, 0.90), 0.55)
-                  : (t == 2 ? base * vec3(1.05, 0.80, 0.45)
-                            : base * vec3(1.0, 0.60, 0.28));
-        o_cell = vec4(min(star, vec3(1.0)), 1.0);
-        o_id = vec4(0.5, 0.5, 0.5, 1.0);
-        return;
-    }
-    o_cell = vec4(ramp(base, tone_of(lit, b)), fill_of(lit));
-    o_id = vec4(region, 1.0);
+    float lit = cell_lit(cell_normal());
+    o_cell = vec4(ramp(base, tone_of(lit, bayer4(c))), fill_of(lit));
+    o_id = vec4(region, tag);
 }
 // ---- ende gemeinsam -------------------------------------------------------
 
@@ -114,5 +129,8 @@ void main() {
     if (v_alpha <= 0.002) {
         discard;
     }
-    emit(v_color, v_lit, u_emissive, v_color);
+    if (dither_skip(local_cell())) {
+        discard;
+    }
+    emit_lit(v_color, v_color, u_tag);
 }
