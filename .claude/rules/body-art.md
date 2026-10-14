@@ -168,7 +168,8 @@ Per body, three passes, then one blit per frame:
 1. **Cell pass** (`body_cell_disc.frag` on `body.vert`, `body_cell_fill.frag`
    on `body_surface.vert`): a small buffer with one texel per cell, blending
    **off**. Each cell is opaque and writes colour + halftone size (`o_cell`)
-   and an unlit region id + tag (`o_id`). The grid hangs on the **body**:
+   and an unlit region id + tag (`o_id`: 1.0 drawing / procedural, 0.4
+   ground; no strokes between different tags). The grid hangs on the **body**:
    centre rounded to whole pixels, cells counted from there, so the body moves
    in 1-px steps with its orbit line and nothing shimmers while panning.
 2. **Clean pass** (`body_cell_clean.frag`, cell resolution): a cell that
@@ -219,20 +220,34 @@ pattern (region colour).
   facet minimum, so the pixel bands may differ from the vector bands in
   which tier a band gets.
 
-**No jumps: every transition is a radial wipe.** The new state grows from the
-body centre outward with a clean cell boundary, keyed on the cell centre's
-distance from the centre:
-- **Art fade-in** (ground → drawing) over `fade`.
-- **Detail level**: the higher level inside, over `body_pixel_detail_blend`
-  (0.2). Each level writes its own tag (1.0 / 0.8 by subdivision parity), and
-  no stroke is drawn across a tag change, so the wipe front has no line.
-- **Cell size** (3 → 6 px): both versions are composed, split by the big
-  cell's distance (`u_dissolve`, band `body_pixel_cell_blend` 1.25 either side
-  of `body_pixel_small_cells` big cells). k_big is always an exact multiple
-  of k_small, so the boundary runs cleanly on both grids.
-- The first version used a Bayer dissolve per cell. Its midpoint was pure
-  speckle, and a 0.35 blend band left a body *at rest* speckled (Erde at
-  255 px sat at medium 0.83 / fine 0.17).
+**Transitions are crossfades in REAL TIME, never tied to the zoom.** Each body
+keeps a state `(cell k, detail level, art on/off)` in `_body_pixel_states`.
+When the zoom moves the target state across a threshold, old and new are both
+composed: the old at full alpha, the new on top at `smoothstep(t)` (`u_alpha`
+in `body_pixel.frag`, alpha only). `t` advances by `real_dt /
+body_pixel_fade_s` (0.35 s). At rest exactly one state is drawn. Two failed
+versions:
+- **Bayer dissolve over the zoom.** Its midpoint was pure speckle.
+- **Radial wipe over the zoom.** A body at rest inside the blend band kept a
+  visible circle of the higher level, at practically every zoom.
+
+Supporting rules:
+- **Hysteresis** `body_pixel_hysteresis` (×1.06 on every threshold), so a
+  zoom resting on a boundary does not fade back and forth.
+- **A level switches only once its build exists.** Otherwise the body would
+  show the bare ground for the build time.
+- **A capture** (`capture_scale != 1`) draws the target state directly and
+  leaves the window's state alone.
+- **`real_dt = 0` switches immediately.** The GL tests render without a
+  clock, and a transition begun there stayed at `t = 0` forever:
+  `body_style_test` §7 then saw the 200-px art state at 10 px.
+
+Measured with a scripted zoom 250 → 420 px and back, and over the cell
+(70 ↔ 140 px) and art (10 ↔ 30 px) thresholds:
+- **One switch each way.** Down happens later than up, because of the
+  hysteresis.
+- **The fade takes 21 frames** at 60 fps.
+- **Held frames change 0 pixels.**
 
 **The ladder only goes up.** The facet target is `body_pixel_facet_cells ·
 k_big` (4 cells), never the cell size currently in use. Tied to the current

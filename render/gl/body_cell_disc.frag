@@ -7,7 +7,7 @@
 //               als zusammenhaengende zellen (voronoi auf der kugel);
 //  2 gasriese -- prozedural je zelle: breitenbaender aus denselben zahlen wie
 //               die vektor-zeichnung (`bodies/style.py::gas_params`).
-// Stern und gasriese brauchen damit KEINE detailstufen -- nichts springt.
+// Stern und gasriese brauchen damit KEINE detailstufen.
 
 in vec2 v_local;
 
@@ -29,16 +29,14 @@ uniform vec3 u_gas_col[3];
 // schreibt zwei ziele:
 //   o_cell = (farbe der stufe, halbton-groesse 0.25 / 0.5 / 0.75 / 1.0)
 //   o_id   = (regions-kennung = unbeleuchtete grundfarbe, kennzeichen)
-// Kennzeichen: 1.0 / 0.8 = zeichnung (die zwei stufen einer detail-
-// ueberblendung), 0.4 = grund ohne grenzstriche. Der zusammenbau
-// (body_pixel.frag) zieht striche nur zwischen gleichen kennzeichen -- eine
-// ueberblendung erzeugt so keine striche um jede gewechselte zelle.
+// Kennzeichen: 1.0 = zeichnung bzw. prozedurale flaeche, 0.4 = grund ohne
+// grenzstriche. Der zusammenbau (body_pixel.frag) zieht striche nur
+// zwischen gleichen kennzeichen.
 
 uniform vec2 u_center_px;
 uniform vec2 u_viewport;
 uniform float u_cell;
 uniform float u_seed;
-uniform vec2 u_dither_range;   // zelle nur, wenn lo <= bayer < hi
 uniform float u_tag;
 uniform float u_body_radius;   // kernradius in pixeln
 uniform vec3 u_light;
@@ -119,17 +117,6 @@ float fill_of(float lit) {
     return 0.25;
 }
 
-// Ueberblendungen (einblendung der zeichnung, detailstufe) sind ein
-// RADIALER WISCH: der schluessel ist der abstand der zellmitte zur
-// koerpermitte, der neuere zustand waechst von innen nach aussen mit einer
-// sauberen zellgrenze. Ein bayer-dissolve zweier verschiedener muster war in
-// der mitte des uebergangs reines rauschen.
-bool dither_skip(ivec2 c) {
-    vec3 n = cell_normal();
-    float key = min(length(n.xy), 0.9999);
-    return key < u_dither_range.x || key >= u_dither_range.y;
-}
-
 void emit_lit(vec3 base, vec3 region, float tag) {
     ivec2 c = local_cell();
     float lit = cell_lit(cell_normal());
@@ -179,9 +166,6 @@ void main() {
         discard;
     }
     ivec2 c = local_cell();
-    if (dither_skip(c)) {
-        discard;
-    }
     vec3 n = cell_normal();
 
     if (u_kind == 1) {
