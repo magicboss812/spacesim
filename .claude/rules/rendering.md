@@ -75,6 +75,10 @@ Two independent causes of soft, ghosted labels, both fixed 2026-08-15:
    `Renderer._deferred_labels` and drawn in `render()` **after**
    `_apply_fxaa`, where the ship and apsis labels already were.
 
+Bodies get the same treatment: they draw into a 1/k-resolution pixel layer
+that is composited after `_apply_fxaa`, with their markers deferred behind it
+(`.claude/rules/body-art.md`, "Pixel raster").
+
 ## The renderer no longer swaps buffers
 
 `Renderer.render()` draws the world and stops; `Renderer.present()` does the `pygame.display.flip()` and fills in

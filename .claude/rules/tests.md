@@ -411,6 +411,14 @@ Alle drei brechen mit `ModuleNotFoundError` bzw. `FileNotFoundError` ab, bevor
 irgendetwas geprueft wird. Das ist kein befund ueber den code, den sie
 pruefen sollten — wer sie braucht, muss zuerst die pfade nachziehen.
 
+`body_style_test.py` §8 "und kosten entsprechend wenig" (budget 4 ms) gives
+3.2–4.8 ms here since the body pixel raster (2026-10-14), against 1.0–1.1 ms
+before. It times `render()` on the CPU without `finish()`. In llvmpipe,
+sampling the body layer that was just rendered makes the CPU wait for the
+rasterizer. With `gl.finish()` both trees cost the same (6.47 against 6.53 ms,
+`.claude/rules/body-art.md`). Setting `renderer.body_pixel_size = 0` brings
+back the old number.
+
 `body_icon_test.py` §5 misst hier **±2.24 % gegen eine grenze von 2 %**,
 reproduzierbar ueber mehrere laeufe (die notiz oben nennt ±0.10 %). Der test
 ruft `renderer._draw_body_icon` direkt auf und geht **nie** durch

@@ -104,6 +104,20 @@ class Renderer(
         # je koerper und nichts, was pro frame belegt wuerde.
         self._body_icon_program = None
         self._body_icon_vao = None
+        # Koerper-raster: die koerper zeichnen in eine ebene mit 1/k der
+        # aufloesung und werden NACH dem FXAA-resolve ohne filter hochgezogen
+        # (`_begin_body_layer`). Die marken warten so lange in
+        # `_deferred_icons`, weil sie ueber den koerpern liegen muessen.
+        self._body_layer_program = None
+        self._body_layer_vao = None
+        self._body_layer_fbo = None
+        self._body_layer_tex = None
+        self._body_layer_cells = None
+        self._body_layer_cell = 0
+        self._body_layer_viewport = None
+        self._body_layer_used = False
+        self._body_layer_rect = None
+        self._deferred_icons = []
         self._body_icon_cache = {}
         self._icon_viewport = None
         self._icon_tier_alpha = None
@@ -521,6 +535,15 @@ class Renderer(
         # Grundglimmen jedes koerpers in seiner eigenen farbe. Sterne bekommen
         # ueber `light_intensity` zusaetzlich einen groesseren halo.
         self.body_glow_alpha = 0.16
+        # Pixel-optik der koerper, passend zum HUD: kantenlaenge einer
+        # koerper-zelle in DESIGN-einheiten (ganze pixel nach ui_px; unter 2
+        # aus). Dazu die handgesetzten zuege: zellstreuung, lichtstufen mit
+        # bayer-dither, lichtkante und geditherter nachtschatten.
+        self.body_pixel_size = 2.0
+        self.body_pixel_jitter = 0.07
+        self.body_pixel_levels = 5.0
+        self.body_pixel_rim = 0.55
+        self.body_pixel_shade = 0.45
 
         # Bildschirm-bounding-box kleiner als dieser wert (px) => referenz-spur
         # wird nicht gezeichnet (sub-pixel, ohnehin unsichtbar).
@@ -944,6 +967,10 @@ class Renderer(
 
         # Render all non-ship bodies first (they may be FXAA-processed).
         bodies_t0 = time.perf_counter()
+        # Koerper-raster (`_begin_body_layer`): die koerper landen in einer
+        # eigenen ebene, die erst NACH dem FXAA-resolve hochgezogen wird --
+        # der kantenfilter wuerde genau die harten pixeltreppen verwischen.
+        body_layer = self._begin_body_layer()
         for body in bodies:
             if getattr(body, 'is_ship', False):
                 continue
@@ -953,8 +980,17 @@ class Renderer(
 
         prediction_has_points = self._points_count(prediction_points) > 0
         prediction_drawn = False
+        fxaa_pass = bool(self.enable_fxaa and self.fbo)
+        prediction_in_fxaa = (prediction_has_points and fxaa_pass
+                              and not self.prediction_bypass_fxaa)
 
-        if prediction_has_points and self.enable_fxaa and self.fbo and not self.prediction_bypass_fxaa:
+        if body_layer and (not fxaa_pass or prediction_in_fxaa):
+            # Ohne FXAA gibt es kein "danach"; und liegt die bahn im
+            # FXAA-pass, muss die ebene darunter, also jetzt hinein.
+            self._end_body_layer(target_fbo)
+            body_layer = False
+
+        if prediction_in_fxaa:
             self.draw_prediction(prediction_points, camera, predictor=predictor)
             prediction_drawn = True
 
@@ -964,6 +1000,10 @@ class Renderer(
             fxaa_t0 = time.perf_counter()
             self._apply_fxaa()
             timings['fxaa_ms'] += (time.perf_counter() - fxaa_t0) * 1000.0
+            if body_layer:
+                bodies_t0 = time.perf_counter()
+                self._end_body_layer(output_fbo)
+                timings['bodies_ms'] += (time.perf_counter() - bodies_t0) * 1000.0
 
         # Ab hier wird direkt in den haupt-framebuffer gezeichnet (predictor,
         # schiff, HUD). Blending ist global aktiv (ctx.enable in _init_opengl,

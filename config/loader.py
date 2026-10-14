@@ -587,6 +587,11 @@ class ConfigLoader:
             ('body_light_exponent', 'body_light_exponent', float),
             ('body_light_tilt', 'body_light_tilt', float),
             ('body_glow_alpha', 'body_glow_alpha', float),
+            ('body_pixel_size', 'body_pixel_size', float),
+            ('body_pixel_jitter', 'body_pixel_jitter', float),
+            ('body_pixel_levels', 'body_pixel_levels', float),
+            ('body_pixel_rim', 'body_pixel_rim', float),
+            ('body_pixel_shade', 'body_pixel_shade', float),
             # Bahnlinien der koerper (orbit_lines.py)
             ('orbit_lines_enabled', 'orbit_lines_enabled', bool),
             ('orbit_line_tolerance_px', 'orbit_line_tolerance_px', float),
