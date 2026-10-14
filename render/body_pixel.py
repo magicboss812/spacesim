@@ -69,20 +69,6 @@ class BodyPixelMixin:
                                  / max(1e-6, float(self.body_pixel_size_small)))))
         return small, small * ratio
 
-    def _body_pixel_cell_mix(self, radius_px):
-        """Anteil der grossen zelle, 0..1. Um `body_pixel_small_cells`
-        grosse zellen radius herum ein band in log(radius) -- dort werden
-        beide fassungen gezeichnet und per dissolve aufgeteilt."""
-        small, big = self._body_pixel_cells()
-        if big == small:
-            return 1.0
-        switch = float(self.body_pixel_small_cells) * big
-        band = max(1.01, float(self.body_pixel_cell_blend))
-        t = (math.log(max(float(radius_px), 1e-3)) - math.log(switch / band)) / (
-            2.0 * math.log(band))
-        t = max(0.0, min(1.0, t))
-        return t * t * (3.0 - 2.0 * t)
-
     def _body_facet_target_px(self, radius_px):
         """Facettenziel der detailleiter, im pixel-stil in GROSSEN zellen.
 
@@ -204,32 +190,108 @@ class BodyPixelMixin:
 
     # ---- ein koerper ------------------------------------------------------
 
+    # ---- zustand je koerper: welche zelle, welche stufe, zeichnung an? ----
+    #
+    # Ein koerper in RUHE zeigt immer genau EINEN zustand. Wechselt der zoom
+    # ihn, wird ueber `body_pixel_fade_s` ECHTZEIT ueberblendet -- nicht ueber
+    # den zoom: an den zoom gebunden stand ein ruhender koerper dauerhaft
+    # mitten in einer ueberblendung (erst als gesprenkel, dann als sichtbarer
+    # kreis eines radialen wischs). Jede schwelle hat eine hysterese, damit
+    # ein zoom genau an der grenze nicht hin und her blendet.
+
+    def _pixel_target_state(self, body, radius_px, cur):
+        """(k, stufen-index, zeichnung) fuer diesen radius; `cur` ist der
+        zustand des letzten frames (fuer die hysterese) oder None."""
+        r = float(radius_px)
+        hyst = max(1.0, float(self.body_pixel_hysteresis))
+        small, big = self._body_pixel_cells()
+
+        switch = float(self.body_pixel_small_cells) * big
+        k = cur[0] if cur else (big if r >= switch else small)
+        if k == small and r > switch * hyst:
+            k = big
+        elif k == big and r < switch / hyst:
+            k = small
+
+        if getattr(body, 'is_star', False) or getattr(body, 'is_gas', False) \
+                or not self.body_vector_style:
+            return (k, -1, False)
+
+        lo = float(self.body_vector_min_radius_px)
+        hi = max(lo, float(self.body_vector_full_radius_px))
+        art_r = 0.5 * (lo + hi)
+        art = cur[2] if cur else r >= art_r
+        if art and r < art_r / hyst:
+            art = False
+        elif not art and r > art_r * hyst:
+            art = True
+        if not art:
+            return (k, -1, False)
+
+        levels = body_style.DETAIL_LEVELS
+        forced = self.body_vector_detail
+        if forced in levels:
+            return (k, levels.index(forced), True)
+        target = self._body_facet_target_px(r)
+        switches = [target / body_style.FACET_FRACTION[levels[i + 1]]
+                    for i in range(len(levels) - 1)]
+        idx = cur[1] if (cur and cur[1] >= 0) else sum(1 for s in switches if r >= s)
+        while idx < len(levels) - 1 and r > switches[idx] * hyst:
+            idx += 1
+        while idx > 0 and r < switches[idx - 1] / hyst:
+            idx -= 1
+        return (k, idx, True)
+
+    def _pixel_entry(self, body, state):
+        if not state[2]:
+            return None
+        return self._body_style_entry(body, body_style.DETAIL_LEVELS[state[1]])
+
     def _draw_body_pixel(self, body, x, y, radius_px, style_layers, fade,
                          light, emissive, rgb, atmos_rgb, has_atmos,
                          light_intensity):
         """Ein koerper im pixel-stil. True, wenn gezeichnet.
 
-        Im uebergang zwischen kleiner und grosser zelle wird er zweimal
-        gezeichnet und radial aufgeteilt: innen die grosse zelle, aussen die
-        kleine, die grenze waechst mit dem zoom nach aussen -- statt dass die
-        zelle in einem frame umspringt."""
-        small, big = self._body_pixel_cells()
-        t = self._body_pixel_cell_mix(radius_px)
-        if t <= 0.0:
-            return self._draw_body_pixel_at(small, None, body, x, y, radius_px,
-                                            style_layers, fade, light, emissive,
-                                            rgb, atmos_rgb, has_atmos, light_intensity)
-        if t >= 1.0:
-            return self._draw_body_pixel_at(big, None, body, x, y, radius_px,
-                                            style_layers, fade, light, emissive,
-                                            rgb, atmos_rgb, has_atmos, light_intensity)
-        a = self._draw_body_pixel_at(big, (0.0, t, big), body, x, y, radius_px,
-                                     style_layers, fade, light, emissive,
-                                     rgb, atmos_rgb, has_atmos, light_intensity)
-        b = self._draw_body_pixel_at(small, (t, 1.0, big), body, x, y, radius_px,
-                                     style_layers, fade, light, emissive,
-                                     rgb, atmos_rgb, has_atmos, light_intensity)
-        return a or b
+        Waehrend eines wechsels liegen alter und neuer zustand uebereinander,
+        der neue mit wachsender deckkraft; beide sind fuer sich scharfe
+        pixel-bilder. In ruhe wird nur einer gezeichnet."""
+        states = self._body_pixel_states
+        key = id(body)
+        st = states.get(key)
+        capture = float(getattr(self, 'capture_scale', 1.0) or 1.0) != 1.0
+        target = self._pixel_target_state(body, radius_px, st['cur'] if st else None)
+        # Erst wechseln, wenn die neue stufe gebaut ist -- sonst stuende
+        # sekundenlang nur der grund da.
+        if target[2] and self._pixel_entry(body, target) is None:
+            target = st['cur'] if st else (target[0], -1, False)
+        if capture:
+            # Das hochaufgeloeste foto zeigt den ruhezustand und laesst den
+            # zustand des fensters unangetastet.
+            st = {'cur': target, 'prev': None, 't': 1.0}
+        elif st is None:
+            st = {'cur': target, 'prev': None, 't': 1.0}
+            states[key] = st
+        else:
+            if target != st['cur']:
+                st['prev'] = st['cur']
+                st['cur'] = target
+                st['t'] = 0.0
+            dur = max(1e-3, float(self.body_pixel_fade_s))
+            dt = float(getattr(self, '_frame_real_dt', 0.0))
+            # Ohne uhr (render() ohne real_dt, wie in den GL-tests) gibt es
+            # nichts zu animieren: dann gilt der neue zustand sofort. Sonst
+            # blieb ein einmal begonnener wechsel fuer immer stehen.
+            st['t'] = min(1.0, st['t'] + dt / dur) if dt > 0.0 else 1.0
+
+        args = (body, x, y, radius_px, light, emissive, rgb, atmos_rgb,
+                has_atmos, light_intensity)
+        t = st['t']
+        if st['prev'] is not None and t < 1.0:
+            a = t * t * (3.0 - 2.0 * t)
+            drew = self._draw_body_pixel_at(st['prev'], 1.0, *args)
+            return self._draw_body_pixel_at(st['cur'], a, *args) or drew
+        st['prev'] = None
+        return self._draw_body_pixel_at(st['cur'], 1.0, *args)
 
     def _gas_uniforms(self, body):
         key = self._body_style_key(body, 'gas')
@@ -248,9 +310,14 @@ class BodyPixelMixin:
             self._body_gas_params[key] = cached
         return cached
 
-    def _draw_body_pixel_at(self, k, dissolve, body, x, y, radius_px,
-                            style_layers, fade, light, emissive, rgb,
-                            atmos_rgb, has_atmos, light_intensity):
+    def _draw_body_pixel_at(self, state, alpha, body, x, y, radius_px,
+                            light, emissive, rgb, atmos_rgb, has_atmos,
+                            light_intensity):
+        """Zellpass, putzpass und zusammenbau EINES zustands mit deckkraft
+        `alpha` (1 in ruhe, waehrend eines wechsels die einblendung)."""
+        k = int(state[0])
+        entry = self._pixel_entry(body, state)
+        fade = 1.0 if state[2] else 0.0
         w, h = int(self.width), int(self.height)
         # Die mitte auf ganze pixel: der koerper bewegt sich in 1-px-schritten
         # mit seiner bahnlinie, und das zellraster haengt an IHM.
@@ -285,7 +352,7 @@ class BodyPixelMixin:
             fbo.clear(0.0, 0.0, 0.0, 0.0, viewport=(0, 0, gw, gh))
             ctx.disable(moderngl.BLEND)
 
-            art = (kind == 0 and bool(style_layers) and fade > 0.0)
+            art = (kind == 0 and entry is not None)
             prog = self._body_cell_disc_program
             _put(prog, 'u_center_px', center_rel)
             _put(prog, 'u_outer_radius_px', float(radius_px))
@@ -298,7 +365,6 @@ class BodyPixelMixin:
             _put(prog, 'u_ground', 1.0 if art else 0.0)
             _put(prog, 'u_cell', float(k))
             _put(prog, 'u_seed', seed)
-            _put(prog, 'u_dither_range', (0.0, 1.0))
             _put(prog, 'u_tag', 0.4)
             _put(prog, 'u_kind', int(kind))
             if kind == 2:
@@ -312,12 +378,6 @@ class BodyPixelMixin:
             self._body_cell_disc_vao.render(moderngl.TRIANGLE_STRIP)
 
             if art:
-                # Ueberblendungen als geordneter dissolve JE ZELLE: die
-                # zeichnung belegt den bayer-bereich [0, fade), darin jede
-                # detailstufe ihren anteil. Jede stufe traegt ihr eigenes
-                # kennzeichen, und der zusammenbau zieht keine striche
-                # zwischen verschiedenen -- sonst bekaeme jede gewechselte
-                # zelle einen rahmen.
                 prog = self._body_cell_fill_program
                 _put(prog, 'u_center_px', center_rel)
                 _put(prog, 'u_radius_px', float(radius_px))
@@ -329,23 +389,11 @@ class BodyPixelMixin:
                 _put(prog, 'u_fade', 1.0)
                 _put(prog, 'u_cell', float(k))
                 _put(prog, 'u_seed', seed)
-                # Innen die HOEHERE stufe (sie kommt beim heranzoomen dazu),
-                # aussen die niedrigere, dahinter der grund.
-                acc = 0.0
-                for entry, weight in reversed(style_layers):
-                    lo = acc * fade
-                    acc += weight
-                    hi = acc * fade
-                    if hi - lo < 1e-4:
-                        continue
-                    vao = self._body_cell_vao(entry)
-                    if vao is None:
-                        continue
-                    level = entry['style'].subdiv if entry.get('style') is not None else 0
-                    # Volle einblendung deckt auch den groessten bayer-wert (15.5/16).
-                    _put(prog, 'u_dither_range', (lo, 1.01 if (acc >= 0.9999 and fade >= 0.9999) else hi))
-                    _put(prog, 'u_tag', 0.8 if int(level) % 2 else 1.0)
+                _put(prog, 'u_tag', 1.0)
+                vao = self._body_cell_vao(entry)
+                if vao is not None:
                     vao.render(moderngl.TRIANGLES)
+
             # Putz-pass: waisen weg, im zellraster statt je bildschirmpixel.
             clean = self._body_clean_fbo
             clean.use()
@@ -367,7 +415,7 @@ class BodyPixelMixin:
         if is_star and float(light_intensity) > 0.0:
             halo_r, halo_a, halo_d = 3.0, 0.85, float(self.body_pixel_halo_density) * 1.4
         else:
-            glow = float(self.body_glow_alpha) * max(fade, 0.5)
+            glow = float(self.body_glow_alpha)
             halo_r = 1.45 if glow > 0.0 else 0.0
             halo_a = min(1.0, glow * 4.5)
             halo_d = float(self.body_pixel_halo_density)
@@ -400,12 +448,7 @@ class BodyPixelMixin:
             prog['u_origin'].value = (float(origin[0]), float(origin[1]))
             prog['u_grid'].value = (int(gw), int(gh))
             prog['u_k'].value = int(k)
-            if dissolve is None:
-                prog['u_dissolve'].value = (0.0, 1.0, 0.0)
-                prog['u_k_big'].value = int(k)
-            else:
-                prog['u_dissolve'].value = (float(dissolve[0]), float(dissolve[1]), 1.0)
-                prog['u_k_big'].value = int(dissolve[2])
+            prog['u_alpha'].value = float(alpha)
             prog['u_center'].value = (float(ox), float(oy))
             prog['u_radius'].value = float(radius_px)
             prog['u_light'].value = light3

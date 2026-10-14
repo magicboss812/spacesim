@@ -8,9 +8,9 @@
 //    unterscheiden, und am beleuchteten rand;
 //  - ausserhalb: atmosphaere als punktreihe, halo als punktmatrix, beim
 //    stern davor zwei gestufte glutringe.
-//  - u_dissolve: beim wechsel der zellgroesse werden zwei fassungen gezeichnet
-//    und je GROSSER zelle (bayer) aufgeteilt -- ein pixel-dissolve statt
-//    eines sprungs.
+//  - u_alpha: beim wechsel von zellgroesse, detailstufe oder zeichnung liegen
+//    alter und neuer zustand uebereinander, der neue blendet in ECHTZEIT ein
+//    (`render/body_pixel.py`). In ruhe ist u_alpha 1.
 //
 // Koordinaten: top-down-pixel; u_origin ist die linke obere ecke der zelle
 // (0, 0) des zellpuffers, eine GANZE pixelposition.
@@ -21,8 +21,7 @@ uniform vec2 u_target;
 uniform vec2 u_origin;
 uniform ivec2 u_grid;
 uniform int u_k;
-uniform int u_k_big;           // zelle, nach der der dissolve aufteilt
-uniform vec3 u_dissolve;       // lo, hi, an (> 0.5): pixel nur, wenn lo <= bayer < hi
+uniform float u_alpha;         // deckkraft dieses zustands (ueberblendung in echtzeit)
 uniform vec2 u_center;
 uniform float u_radius;
 uniform vec3 u_light;
@@ -42,6 +41,12 @@ float bayer4(ivec2 p) {
     int i = (p.x & 3) + 4 * (p.y & 3);
     int m[16] = int[16](0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5);
     return (float(m[i]) + 0.5) / 16.0;
+}
+
+// Ausgabe mit der deckkraft dieses zustands -- nur alpha, die farbe nicht:
+// gemischt wird ueber SRC_ALPHA.
+vec4 shade(vec3 c, float a) {
+    return vec4(c, a * u_alpha);
 }
 
 float luma(vec3 c) {
@@ -95,18 +100,6 @@ void main() {
     vec2 ptd = vec2(gl_FragCoord.x, u_target.y - gl_FragCoord.y);
     ivec2 rel = ivec2(floor(ptd - u_origin));
     int k = u_k;
-
-    if (u_dissolve.z > 0.5) {
-        // Radialer wisch nach der GROSSEN zelle relativ zur koerpermitte:
-        // beide fassungen haengen an derselben mitte, und die grosse zelle
-        // ist genau 2 x 2 kleine -- die grenze laeuft also auf beiden rastern
-        // sauber. Innen die neuere fassung (die grosse beim heranzoomen).
-        vec2 bigc = (floor((ptd - u_center) / float(u_k_big)) + 0.5) * float(u_k_big);
-        float key = min(length(bigc) / max(u_radius, 1.0), 0.9999);
-        if (key < u_dissolve.x || key >= u_dissolve.y) {
-            discard;
-        }
-    }
 
     ivec2 c = ivec2(floor(vec2(rel) / float(k)));
     ivec2 sub = rel - c * k;
@@ -171,7 +164,7 @@ void main() {
         else if (sub.x == k - 1) col = edge_stroke(c, ivec2(1, 0), true, cell, id, grout, col);
         if (sub.y == 0) col = edge_stroke(c, ivec2(0, -1), false, cell, id, grout, col);
         else if (sub.y == k - 1) col = edge_stroke(c, ivec2(0, 1), true, cell, id, grout, col);
-        fragColor = vec4(col, 1.0);
+        fragColor = shade(col, 1.0);
         return;
     }
 
@@ -182,11 +175,11 @@ void main() {
         // Gestufte glut direkt am sternenrand: zwei ringe aus ganzen zellen,
         // erst gross und hell, dann kleiner -- danach die punktmatrix.
         if (dist < 1.0 + 1.6 * cellr && dot_at(sub, s, max(s - 1, 1))) {
-            fragColor = vec4(mix(u_halo.rgb, vec3(1.0), 0.25), 0.92);
+            fragColor = shade(mix(u_halo.rgb, vec3(1.0), 0.25), 0.92);
             return;
         }
         if (dist < 1.0 + 3.2 * cellr && dot_at(sub, s, max(s - 3, 1))) {
-            fragColor = vec4(u_halo.rgb, 0.80);
+            fragColor = shade(u_halo.rgb, 0.80);
             return;
         }
     }
@@ -197,7 +190,7 @@ void main() {
                   || fetch(c + ivec2(0, -1), nc, ni) || fetch(c + ivec2(0, 1), nc, ni);
         float side = u_emissive >= 0.5 ? 1.0 : dot(dir_up, u_light.xy);
         if (touch && side > -0.15 && dot_at(sub, s, max(s / 2, 1))) {
-            fragColor = vec4(u_atmos.rgb, 0.85);
+            fragColor = shade(u_atmos.rgb, 0.85);
             return;
         }
     }
@@ -209,7 +202,7 @@ void main() {
         float dens = u_halo_density * (1.0 - t) * (1.0 - t) * bias;
         int n = (u_kind == 1 && k >= 5) ? 2 : 1;
         if (bayer4(c) < dens && dot_at(sub, s, n)) {
-            fragColor = vec4(u_halo.rgb, u_halo.a * (1.0 - 0.6 * t));
+            fragColor = shade(u_halo.rgb, u_halo.a * (1.0 - 0.6 * t));
             return;
         }
     }
