@@ -21,6 +21,9 @@ uniform float u_emissive;  // 1 = selbstleuchtend (stern)
 
 out vec3 v_color;
 out float v_alpha;
+// Nur fuer den pixel-pass (body_cell_fill.frag): das licht allein, ohne
+// deckkraft. body_surface.frag liest es nicht.
+out float v_lit;
 
 void main() {
     // Der bildschirm zaehlt y nach unten, die scheibe nach oben.
@@ -35,4 +38,5 @@ void main() {
     float lit = mix(pow(d, u_light_exp), 1.0, u_emissive);
     v_color = a_col;
     v_alpha = a_alpha * mix(a_dark, 1.0, lit) * u_fade;
+    v_lit = lit;
 }

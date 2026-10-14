@@ -5,7 +5,6 @@ GLSL-scheibe, als vektor-form oder nur noch als gesaete pixel-marke erscheint
 -- siehe .claude/rules/body-art.md.
 """
 import math
-import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import moderngl
@@ -14,10 +13,6 @@ import numpy as np
 
 from bodies import icon as body_icon
 from bodies import style as body_style
-
-
-class _NothingToDraw(Exception):
-    """Die koerper-ebene liegt komplett ausserhalb des bildes."""
 
 
 class BodyDrawMixin:
@@ -29,7 +24,7 @@ class BodyDrawMixin:
 
     def _draw_body_glsl(self, x, y, radius, base_color, atmos_color, atmos_density,
                         light_intensity, light=(0.0, 0.0, 1.0), emissive=1.0,
-                        surface_mix=0.0, glow=0.0, seed=0, mode=0):
+                        surface_mix=0.0, glow=0.0):
         """Zeichnet einen körper als shader-gesteuertes quad (scheibe + optional atmosphäre + glow).
 
         `light` ist die richtung ZUR lichtquelle im scheiben-raum (y nach oben);
@@ -37,10 +32,6 @@ class BodyDrawMixin:
         `surface_mix` verdunkelt die scheibe, sobald die vektor-zeichnung
         darueber liegt -- ohne das leuchtet die volle koerperfarbe durch die
         linien hindurch und die facetten verschwinden.
-
-        `mode = 1` ist der schattierungs-pass des koerper-rasters (lichtkante,
-        nachtschatten, glanzpunkte), gezeichnet NACH der vektor-zeichnung;
-        ausserhalb des rasters zeichnet er nichts.
         """
         if self._body_vao is None:
             return False
@@ -69,9 +60,6 @@ class BodyDrawMixin:
             outer_radius = max(outer_radius, glow_radius)
             glow_alpha = min(1.0, float(glow))
 
-        if self._body_layer_cell:
-            self._grow_body_layer_rect(x, y, outer_radius)
-
         core_norm = max(0.001, min(1.0, radius_px / max(outer_radius, 1e-6)))
         if atmos_alpha > 0.0:
             atmos_norm = max(core_norm, min(1.0, atmos_radius / max(outer_radius, 1e-6)))
@@ -82,7 +70,7 @@ class BodyDrawMixin:
             prog = self._body_program
             prog['u_center_px'].value = (float(x), float(y))
             prog['u_outer_radius_px'].value = float(outer_radius)
-            prog['u_viewport'].value = self._body_viewport()
+            prog['u_viewport'].value = (float(self.width), float(self.height))
             prog['u_base_color'].value = (
                 float(base_color[0]), float(base_color[1]), float(base_color[2])
             )
@@ -97,10 +85,6 @@ class BodyDrawMixin:
             prog['u_ambient'].value = float(self.body_ambient)
             prog['u_emissive'].value = float(emissive)
             prog['u_surface_mix'].value = float(surface_mix)
-            self._set_body_pixel_uniforms(prog, seed)
-            self._try_uniform(prog, 'u_mode', int(mode))
-            self._try_uniform(prog, 'u_rim', float(self.body_pixel_rim))
-            self._try_uniform(prog, 'u_shade', float(self.body_pixel_shade))
 
             self._body_vao.render(moderngl.TRIANGLE_STRIP)
             return True
@@ -160,10 +144,9 @@ class BodyDrawMixin:
         der gleitkomma-position der marke hängt, kann das muster nicht über
         die marke wandern.
         """
-        if self._body_layer_cell:
-            # Im koerper-raster liegt die marke UEBER der ebene, die erst
-            # nach dem FXAA-resolve auf den schirm kommt -- siehe
-            # `_end_body_layer`. Die marke selbst bleibt im vollen raster.
+        if self._body_layer_active:
+            # Pixel-stil: die marke liegt UEBER der koerper-ebene, die erst
+            # nach dem FXAA-resolve auf den schirm kommt (`_end_body_layer`).
             self._deferred_icons.append((body, x, y, radius, r, g, b, fade))
             return
         if (self.body_icon_style != "pixel"
@@ -343,7 +326,7 @@ class BodyDrawMixin:
             return ((str(forced), 1.0),)
 
         radius_px = max(1e-3, float(radius_px))
-        target = max(1.0, float(self.body_vector_facet_px))
+        target = self._body_facet_target_px(radius_px)
         blend = max(1e-3, min(0.9, float(self.body_vector_detail_blend)))
 
         position = 0.0
@@ -455,6 +438,7 @@ class BodyDrawMixin:
             'line_vao': line_vao,
             'under_count': int(under.shape[0]),
             'over_count': int(over.shape[0]),
+            'tri_vbo': tri_vbo,
             'buffers': [b for b in (tri_vbo, line_vbo) if b is not None],
             'style': style,
         }
@@ -489,8 +473,7 @@ class BodyDrawMixin:
         # bildschirm zaehlt y nach unten, die scheibe nach oben
         return (dx * plane, -dy * plane, tilt), 0.0
 
-    def _draw_body_vector(self, entry, x, y, radius_px, light, emissive, fade,
-                          seed=0):
+    def _draw_body_vector(self, entry, x, y, radius_px, light, emissive, fade):
         """Zeichnet die vektor-zeichnung eines koerpers: drei draw-calls.
 
         Gitternetz -> fuellungen -> konturen/figuren/ringe, in genau dieser
@@ -504,12 +487,11 @@ class BodyDrawMixin:
             for prog in (prog_surface, prog_line):
                 prog['u_center_px'].value = (float(x), float(y))
                 prog['u_radius_px'].value = float(radius_px)
-                prog['u_viewport'].value = self._body_viewport()
+                prog['u_viewport'].value = (float(self.width), float(self.height))
                 prog['u_light'].value = (float(light[0]), float(light[1]), float(light[2]))
                 prog['u_light_exp'].value = float(self.body_light_exponent)
                 prog['u_fade'].value = float(fade)
                 prog['u_emissive'].value = float(emissive)
-                self._set_body_pixel_uniforms(prog, seed)
 
             line_vao = entry.get('line_vao')
             under = int(entry.get('under_count', 0))
@@ -525,146 +507,6 @@ class BodyDrawMixin:
         except Exception as exc:
             self.debug_info['body_style_error'] = f"draw: {exc}"
             return False
-
-    # ---- koerper-raster ---------------------------------------------------
-    #
-    # Die koerper sollen aussehen wie das HUD: harte pixelkanten, keine
-    # halbdeckenden saeume. Eine textur je koerper wuerde beim heranzoomen
-    # verschwimmen (der filter glaettet die pixelkanten), also bleibt die
-    # zeichnung GEOMETRIE und nur ihr raster wird grob: alle koerper zeichnen
-    # in eine ebene mit 1/k der fenster-aufloesung, k = ganze bildschirm-pixel
-    # je zelle, und die ebene wird ohne filter hochgezogen. Weil k in
-    # bildschirm-pixeln feststeht, ist eine zelle bei jedem zoom gleich gross
-    # und jede kante eine scharfe treppe.
-
-    def _body_pixel_cell(self):
-        """Zellgroesse k in ganzen bildschirm-pixeln, 0 = raster aus."""
-        if self._body_layer_program is None or self._body_layer_vao is None:
-            return 0
-        size = float(self.body_pixel_size)
-        if size <= 0.0:
-            return 0
-        k = int(round(self.ui_px(size)))
-        return k if k >= 2 else 0
-
-    def _body_viewport(self):
-        if self._body_layer_viewport is not None:
-            return self._body_layer_viewport
-        return (float(self.width), float(self.height))
-
-    @staticmethod
-    def _try_uniform(prog, name, value):
-        """Ein uniform, das der compiler wegoptimiert hat, ist kein fehler."""
-        member = prog.get(name, None)
-        if member is not None:
-            member.value = value
-
-    def _set_body_pixel_uniforms(self, prog, seed):
-        k = float(self._body_layer_cell)
-        self._try_uniform(prog, 'u_cell', k)
-        self._try_uniform(prog, 'u_seed', float(int(seed) & 0xFFFF))
-        self._try_uniform(prog, 'u_jitter', float(self.body_pixel_jitter))
-        self._try_uniform(prog, 'u_levels', float(self.body_pixel_levels))
-
-    @staticmethod
-    def _body_pixel_seed(body):
-        return zlib.crc32(str(getattr(body, 'name', '')).encode('utf-8')) & 0xFFFF
-
-    def _begin_body_layer(self):
-        """Bindet die koerper-ebene als ziel. False, wenn das raster aus ist."""
-        self._body_layer_cell = 0
-        self._body_layer_viewport = None
-        self._body_layer_used = False
-        self._body_layer_rect = None
-        self._deferred_icons = []
-        k = self._body_pixel_cell()
-        if k == 0:
-            return False
-        cells = (-(-int(self.width) // k), -(-int(self.height) // k))
-        try:
-            if self._body_layer_cells != cells or self._body_layer_fbo is None:
-                self._release_body_layer()
-                tex = self.ctx.texture(cells, 4)
-                tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
-                self._body_layer_tex = tex
-                self._body_layer_fbo = self.ctx.framebuffer(color_attachments=[tex])
-                self._body_layer_cells = cells
-            self._body_layer_fbo.use()
-            self._body_layer_fbo.clear(0.0, 0.0, 0.0, 0.0)
-        except Exception as exc:
-            self.debug_info['body_layer_error'] = f"{type(exc).__name__}: {exc}"
-            self._release_body_layer()
-            return False
-        # Vormultipliziert sammeln: die ebene startet durchsichtig, und nur so
-        # ergibt "ebene ueber szene" dasselbe wie "koerper direkt gezeichnet".
-        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA,
-                               moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA)
-        self._body_layer_cell = k
-        # Das virtuelle fenster ist ein ganzes vielfaches von k; was rechts
-        # und unten uebersteht, faellt beim hochziehen weg.
-        self._body_layer_viewport = (float(cells[0] * k), float(cells[1] * k))
-        return True
-
-    def _grow_body_layer_rect(self, x, y, radius):
-        """Merkt das bildschirm-rechteck (top-down px), das ein koerper
-        belegt. Scheibe, halo und zeichnung liegen alle in `radius`."""
-        x0, y0, x1, y1 = x - radius, y - radius, x + radius, y + radius
-        rect = self._body_layer_rect
-        if rect is not None:
-            x0, y0 = min(x0, rect[0]), min(y0, rect[1])
-            x1, y1 = max(x1, rect[2]), max(y1, rect[3])
-        self._body_layer_rect = (x0, y0, x1, y1)
-
-    def _end_body_layer(self, dest_fbo):
-        """Zieht die ebene auf `dest_fbo` hoch und zeichnet danach die
-        zurueckgestellten marken. Ohne aktives raster: nichts."""
-        k = self._body_layer_cell
-        if not k:
-            return
-        self._body_layer_cell = 0
-        self._body_layer_viewport = None
-        self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
-        dest_fbo.use()
-        rect = self._body_layer_rect
-        if self._body_layer_used and rect is not None:
-            try:
-                prog = self._body_layer_program
-                # Auf ganze zellen nach aussen, dann in NDC des ziels.
-                w, h = float(self.width), float(self.height)
-                x0 = max(0.0, math.floor(rect[0] / k) * k)
-                y0 = max(0.0, math.floor(rect[1] / k) * k)
-                x1 = min(w, math.ceil(rect[2] / k) * k)
-                y1 = min(h, math.ceil(rect[3] / k) * k)
-                if x1 <= x0 or y1 <= y0:
-                    raise _NothingToDraw
-                prog['u_rect'].value = (x0 / w * 2.0 - 1.0, 1.0 - y1 / h * 2.0,
-                                        x1 / w * 2.0 - 1.0, 1.0 - y0 / h * 2.0)
-                prog['u_cell'].value = float(k)
-                prog['u_height_px'].value = float(self.height)
-                prog['u_cells'].value = tuple(int(c) for c in self._body_layer_cells)
-                self._body_layer_tex.use(location=0)
-                self.ctx.blend_func = (moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA)
-                self._body_layer_vao.render(moderngl.TRIANGLE_STRIP)
-            except _NothingToDraw:
-                pass
-            except Exception as exc:
-                self.debug_info['body_layer_error'] = f"{type(exc).__name__}: {exc}"
-            finally:
-                self.ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
-        icons, self._deferred_icons = self._deferred_icons, []
-        for args in icons:
-            self._draw_body_icon(*args)
-
-    def _release_body_layer(self):
-        for name in ('_body_layer_fbo', '_body_layer_tex'):
-            obj = getattr(self, name, None)
-            if obj is not None:
-                try:
-                    obj.release()
-                except Exception:
-                    pass
-            setattr(self, name, None)
-        self._body_layer_cells = None
 
     def _find_light_source(self, bodies):
         """Der koerper, der das system beleuchtet.
@@ -785,24 +627,27 @@ class BodyDrawMixin:
                 style_layers = [(entry, weight / total)
                                 for entry, weight in style_layers]
 
-        # Im koerper-raster sitzt die mitte auf einer zellecke: dann ist die
-        # treppe der silhouette symmetrisch, und beim schwenken springt der
-        # ganze koerper um ganze zellen, statt dass seine kanten bei jedem
-        # sub-zellen-schritt neu ausfallen und flimmern.
-        dx, dy = x, y
-        k = self._body_layer_cell
-        if k:
-            dx = round(x / k) * k
-            dy = round(y / k) * k
-            self._body_layer_used = True
-        seed = self._body_pixel_seed(body)
+        if self._body_layer_active and self._draw_body_pixel(
+                body, x, y, radius_px, style_layers, fade, light, emissive,
+                (r, g, b), (r1, g1, b1), atmos_density > 0.0, light_intensity):
+            # Pixel-stil (`render/body_pixel.py`): scheibe, zeichnung, halo
+            # und atmosphaere in einem zug; die marke wird zurueckgestellt.
+            if style_layers:
+                self.debug_info['bodies_vector'] = (
+                    self.debug_info.get('bodies_vector', 0) + 1)
+            icon_fade = self._body_icon_fade(true_radius_px)
+            if icon_fade > 0.0:
+                icon_draw_radius_px = self._body_icon_draw_radius_px(float(body.radius))
+                self._draw_body_icon(body, x, y, icon_draw_radius_px, r, g, b, icon_fade)
+            self._queue_body_label(body, x, y, radius_px, screen_pos)
+            return
 
         # GLSL-Shader zeichnet Scheibe + Glow + Atmosphäre in einem Quad.
         # Ohne body-shader wird der körper nicht gezeichnet; der fehler steht
         # in debug_info['shader_error'].
         self._draw_body_glsl(
-            dx,
-            dy,
+            x,
+            y,
             radius_px,
             (r, g, b),
             (r1, g1, b1),
@@ -815,20 +660,13 @@ class BodyDrawMixin:
             # dunkler ring zwischen scheibe und korona durch.
             surface_mix=0.0 if getattr(body, 'is_star', False) else fade,
             glow=float(self.body_glow_alpha) * fade,
-            seed=seed,
         )
 
         drawn = False
         for entry, weight in style_layers:
-            if self._draw_body_vector(entry, dx, dy, radius_px,
-                                      light, emissive, fade * weight, seed=seed):
+            if self._draw_body_vector(entry, x, y, radius_px,
+                                      light, emissive, fade * weight):
                 drawn = True
-        if k:
-            # Die handgesetzten pixel UEBER der zeichnung: lichtkante,
-            # geditherter nachtschatten, glanzpunkte (body.frag, u_mode 1).
-            self._draw_body_glsl(dx, dy, radius_px, (r, g, b), (r1, g1, b1),
-                                 atmos_density, light_intensity, light=light,
-                                 emissive=emissive, seed=seed, mode=1)
         if drawn:
             self.debug_info['bodies_vector'] = (
                 self.debug_info.get('bodies_vector', 0) + 1)

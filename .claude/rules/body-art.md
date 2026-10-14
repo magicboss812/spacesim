@@ -149,60 +149,78 @@ are 30+ px away.
   per body are grid → fills → contours/figures/rings, in that order, because
   alphas add.
 
-## Pixel raster: bodies draw at 1/k resolution (2026-10-14)
+## Pixel bodies: a body-local cell grid, composed at native resolution (2026-10-14)
 
-The geometry above is unchanged; only the **raster** it lands on is coarse, so
-the bodies match the HUD's hard-edged pixel face. `_begin_body_layer`
-(`render/bodies.py`) binds an offscreen layer of `ceil(w/k) × ceil(h/k)`
-cells, `k = round(ui_px(renderer.body_pixel_size))` whole screen px (2 at
-1280×800; below 2 the layer is off and the old smooth path runs). Every body
-draws into it, and `_end_body_layer` pulls it up with `texelFetch` (no
-filter) **after the FXAA resolve**. Two rules are load-bearing:
+`render/body_pixel.py` (`BodyPixelMixin`) draws every non-ship body in the
+HUD's pixel idiom; `renderer.body_pixel_size = 0` (or a missing shader) falls
+back to the smooth path above, whose shaders are untouched. The style
+geometry is the same; what changed is how it reaches the screen.
 
-- **Never a texture per body.** A cached sprite blurs when the zoom magnifies
-  it, because filtering smooths the pixel edges. Here the vector geometry is
-  re-rasterised every frame at a fixed *screen* cell size, so an edge is a
-  crisp k-px stair at any zoom.
-- **The layer must miss FXAA.** It runs on the whole scene and softens exactly
-  those stairs. Only when the prediction line itself goes through FXAA
-  (`prediction_bypass_fxaa = false`) or FXAA is off does the layer go in before
-  the resolve, so the line still lies on top.
+**Why not a coarse screen raster.** The first version rasterised all bodies
+into one 1/k-resolution layer and stretched it. It read as "rendered on a low-
+res display and upscaled": the semi-transparent stack (disc, grid, fills at
+~0.5 alpha, contours) was point-sampled into dozens of in-between colours, and
+square cells packed edge to edge are exactly what an upscaled image looks
+like. The rules below are what replaced it; each one fixes a seen failure.
 
-Consequences in the draw path:
-- **Premultiplied accumulation:** separate blend func `(SRC_ALPHA,
-  1-SRC_ALPHA, ONE, 1-SRC_ALPHA)` into the cleared layer, then
-  `(ONE, 1-SRC_ALPHA)` for the composite.
-- **Body centres snap to a cell corner** (`round(x/k)*k`). Without that, every
-  sub-cell pan step re-rasterises the edges and they crawl.
-- **Markers are deferred** (`_deferred_icons`) and drawn after the composite.
-  They must lie over the bodies, and they keep their own full-res cell grid.
-- **The composite covers only the bounding box** of what was drawn
-  (`_grow_body_layer_rect`, from each disc quad's outer radius). As a
-  full-screen pass in software GL it was the largest cost.
-- **Lines in raster mode** (`body_line.vert`, `u_cell > 0`): the quad is the
-  line itself with no AA fringe, at least half a cell wide, and every covered
-  cell is full. To keep the ink per length, alpha scales by `width / k`, with a
-  floor of 0.45 so 0.6-px hairlines do not vanish.
+Per body, two passes, then one blit per frame:
 
-**Hand-set pixel touches**, all computed per cell *relative to the body
-centre* (so nothing swims while panning) and seeded by `crc32(name)`:
-- **Cell jitter** `body_pixel_jitter` (±7 % brightness) on disc, fills and
-  lines.
-- **Disc lighting in `body_pixel_levels` steps with a Bayer 4×4 dither**, only
-  while the disc carries the picture (`surface_mix < 0.5`). Under the
-  half-transparent fills the same dither showed through as a checkerboard
-  over the whole planet.
-- **The glow halo in dithered steps.**
-- **A shading pass** (`body.frag`, `u_mode 1`), drawn after the vector art. It
-  adds a one-cell lit-limb highlight (`body_pixel_rim`), a Bayer shadow band
-  confined to the terminator (`lambert` ≈ 0–0.26, `body_pixel_shade`) and
-  sparse gloss cells around the subsolar point. Stars get only random bright
-  limb cells.
-- **Fills are not dithered**: each facet is already flat-lit, and a Bayer
-  pattern across every fill is the same checkerboard failure.
+1. **Cell pass** (`body_cell_disc.frag` on `body.vert`, `body_cell_fill.frag`
+   on `body_surface.vert`): a small buffer with one texel per cell, blending
+   **off**. Each cell is opaque and writes two targets: colour + halftone size
+   (`o_cell`) and an unlit region id (`o_id`, the fill's own colour). The grid
+   hangs on the **body**: centre rounded to whole pixels, cells counted from
+   there, so the body moves in 1-px steps with its orbit line and nothing
+   shimmers while panning. Only the on-screen part of the disc is allocated.
+2. **Compose** (`body_pixel.frag`, native resolution, into a window-size
+   premultiplied layer):
+   - **LED cells**: a chamfered square with a 1-px gap. The gap is the
+     body's grout colour mixed 55 % toward the cell, not transparent, so the
+     disc stays solid. At 22 % it was a screen door over the whole body.
+     Cells with gaps cannot come from upscaling, which is the point.
+   - **Halftone**: light sets the cell size (full, −2, −4, 1-px dot) on top
+     of 4 tone steps. The night side keeps dots so the silhouette survives.
+   - **1-px strokes** in the gap where the region id differs (right/bottom
+     edge only, so each border is drawn once), and on the silhouette edge
+     facing the light. Night-side strokes fade into the grout, or the dark
+     side carries a net.
+   - **Outside the disc**: one row of half-size atmosphere dots on the lit
+     side, and the halo as a **dot matrix** (Bayer-thinned, one dot per cell,
+     denser toward the light). Stars: 3× radius, 2-px dots.
+3. `_end_body_layer` blits the layer after the FXAA resolve (FXAA would
+   soften every stair), then draws the deferred markers on top.
 
-Cost, measured with `gl.finish()` (900×700, Erde at 200 px, llvmpipe): 6.47 ms
-with the layer off and 6.53 ms with it on.
+Load-bearing details:
+- **Palette** (`ramp()` in both cell shaders; GLSL has no include, keep the
+  two copies equal). 4 steps per colour, shadow cooler and pulled toward HUD
+  ground `#04070c`, light warmer and pulled toward HUD text `#dceaf4`. Only
+  the day/night step (0/1) is Bayer-dithered; the others are hard. Stars use
+  their own warm ramp: the cool shadow step turned the solar limb olive.
+- **No cross-fades in this path.** Two detail levels, or art and ground, in
+  a Bayer split gave neighbouring cells different region ids. Every cell then
+  got its own border and the body became a mesh. The heavier level wins
+  outright, and the art switches in at `fade >= 0.5`.
+- **Lines of the style are not drawn.** Tier contours and figure outlines are
+  replaced by the region strokes. Lost on purpose: the faint grid, the
+  great-circle rings (alpha 0.16) and the inner triangle of `nested`.
+- **Grid sizes sit on one ladder.** `body_pixel_size` 6 and
+  `body_pixel_size_small` 3 design units; the small cell is used below
+  `body_pixel_small_cells` (16) big cells of radius, so a small body is not a
+  four-cell blob. `background.pixel_size` was moved 2.7 → 3.0, so the
+  background pitch equals the small cell and is half the big one.
+- **Detail is set in cells**: `_body_facet_target_px` makes the facet target
+  `max(body_vector_facet_px, body_pixel_facet_cells · k)` (4 cells). At 8
+  cells Jupiter was four flat patches.
+- **The selected body's lit edge is HUD cyan**, tied to
+  `selection_marker_enabled`. `selection_camera_test` §8 requires the frame
+  with the marker switched off to be identical to the unselected one.
+- **Gas giants**: in compose, a seeded 32 % of cell rows read their
+  neighbour one cell left or right (interior only, so the silhouette stays
+  round). That is the turbulence, as row offsets.
+
+Cost (900×700, Erde at 200 px, llvmpipe, `gl.finish()`): 2.9 ms with the
+pixel path off, 4.7 ms on. Almost all of it is the per-pixel compose in
+software GL.
 
 ## Die Marke — `bodies/icon.py`
 

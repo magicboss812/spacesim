@@ -124,27 +124,36 @@ class ShaderPipelineMixin:
         self._init_body_layer_pipeline()
 
     def _init_body_layer_pipeline(self):
-        """Hochziehen der koerper-ebene auf den schirm (siehe
-        `_begin_body_layer`). Ohne dieses programm bleibt das raster aus."""
+        """Die programme des pixel-stils (`render/body_pixel.py`). Fehlt
+        eines, bleibt es beim glatten zeichenweg."""
         self._body_layer_program = self._compile_shader_program(
             'body_layer.vert', 'body_layer.frag', 'body_layer')
-        self._body_layer_vao = None
-        if self._body_layer_program is None:
-            return
+        self._body_pixel_program = self._compile_shader_program(
+            'body_pixel.vert', 'body_pixel.frag', 'body_pixel')
+        self._body_cell_disc_program = self._compile_shader_program(
+            'body.vert', 'body_cell_disc.frag', 'body_cell_disc')
+        self._body_cell_fill_program = self._compile_shader_program(
+            'body_surface.vert', 'body_cell_fill.frag', 'body_cell_fill')
+        quad = self._ensure_quad_vbo()
         try:
-            self._body_layer_vao = self.ctx.vertex_array(
-                self._body_layer_program,
-                [(self._ensure_quad_vbo(), '2f', 'a_pos')])
-            self._body_layer_program['u_layer'].value = 0
+            if self._body_layer_program is not None:
+                self._body_layer_vao = self.ctx.vertex_array(
+                    self._body_layer_program, [(quad, '2f', 'a_pos')])
+                self._body_layer_program['u_layer'].value = 0
+            if self._body_pixel_program is not None:
+                self._body_pixel_vao = self.ctx.vertex_array(
+                    self._body_pixel_program, [(quad, '2f', 'a_pos')])
+                self._body_pixel_program['u_cells'].value = 0
+                self._body_pixel_program['u_ids'].value = 1
+            if self._body_cell_disc_program is not None:
+                self._body_cell_disc_vao = self.ctx.vertex_array(
+                    self._body_cell_disc_program, [(quad, '2f', 'a_corner')])
         except Exception as exc:
-            self.debug_info['shader_error'] = f"body_layer: {exc}"
-            print(f"Shader pipeline fallback (body_layer): {exc}")
-            try:
-                self._body_layer_program.release()
-            except Exception:
-                pass
-            self._body_layer_program = None
+            self.debug_info['shader_error'] = f"body_pixel: {exc}"
+            print(f"Shader pipeline fallback (body_pixel): {exc}")
             self._body_layer_vao = None
+            self._body_pixel_vao = None
+            self._body_cell_disc_vao = None
 
     def _init_body_icon_pipeline(self):
         """Programm der positions-marke.
