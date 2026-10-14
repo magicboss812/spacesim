@@ -155,6 +155,12 @@ class Renderer(
         self.ui_scale_max = 3.0
         self.ui_scale_user = 1.0
         self.ui_scale = 1.0
+        # Hochaufgeloestes foto (runtime/screenshot.py::render_scaled): das
+        # ziel statt ctx.screen, und der faktor k gegenueber dem fenster --
+        # liniendicken wachsen mit, die schiffs-schrumpfung rechnet mit dem
+        # massstab des FENSTERS. Ausserhalb des fotos None / 1.0.
+        self.output_framebuffer = None
+        self.capture_scale = 1.0
 
         # Pygame Fonts für HUD. Die hier hinterlegten größen sind DESIGN-größen;
         # die tatsächlich erzeugten font-objekte tragen größe * ui_scale und
@@ -831,7 +837,8 @@ class Renderer(
         self.selected_body = selected_body
         self._advance_selection_phases(real_dt)
         self._ship_zoom_factor = self._ship_zoom_shrink_factor(
-            getattr(camera, 'scale', None))
+            float(getattr(camera, 'scale', 0.0) or 0.0)
+            / max(1e-9, float(self.capture_scale)))
         # Fuer alles, was tief im zeichenweg ein echtes zeit-delta braucht
         # (die abgasfahne des schiffs) und keinen eigenen parameter hat.
         self._frame_real_dt = max(0.0, float(real_dt))
@@ -908,10 +915,13 @@ class Renderer(
 
         self._deferred_labels.clear()
 
+        # Das endziel: das fenster, beim hochaufgeloesten foto dessen
+        # offscreen-framebuffer.
+        output_fbo = self.output_framebuffer or self.ctx.screen
         if self.enable_fxaa and self.fbo:
             target_fbo = self.fbo
         else:
-            target_fbo = self.ctx.screen
+            target_fbo = output_fbo
         target_fbo.use()
         target_fbo.clear(*self._clear_color)
 
@@ -950,7 +960,7 @@ class Renderer(
 
         if self.enable_fxaa and self.fbo:
             # Zurück zum Standard-Framebuffer and apply FXAA post-process
-            self.ctx.screen.use()
+            output_fbo.use()
             fxaa_t0 = time.perf_counter()
             self._apply_fxaa()
             timings['fxaa_ms'] += (time.perf_counter() - fxaa_t0) * 1000.0

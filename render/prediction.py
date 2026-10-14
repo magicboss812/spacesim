@@ -888,6 +888,7 @@ class PredictionDrawMixin:
         scale = abs(float(getattr(camera, 'scale', 0.0)))
         fade_min = float(self.apsis_marker_fade_min_px)
         fade_full = float(self.apsis_marker_fade_full_px)
+        capture_scale = max(1e-9, float(getattr(self, 'capture_scale', 1.0)))
 
         for i in range(count):
             try:
@@ -900,7 +901,9 @@ class PredictionDrawMixin:
             except Exception:
                 continue
 
-            size_px = dist * scale
+            # In FENSTER-pixeln: beim hochaufgeloesten foto ist `scale`
+            # k-fach (runtime/screenshot.py), die blende soll gleich bleiben.
+            size_px = dist * scale / capture_scale
             if fade_full > fade_min:
                 u = (size_px - fade_min) / (fade_full - fade_min)
                 u = max(0.0, min(1.0, u))

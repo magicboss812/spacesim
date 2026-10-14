@@ -401,6 +401,13 @@ class ConfigLoader:
             path = Path(__file__).resolve().parent.parent / path
         return str(path)
 
+    def screenshot_resolution(self) -> str:
+        """Vorgewaehlte foto-aufloesung (`screenshot.resolution`): "window"
+        (fensteraufloesung) oder "2K"/"4K"/"6K"/"8K" -- feste HOEHEN 1440 /
+        2160 / 3240 / 4320 px, die breite folgt aus fenster und zuschnitt
+        (runtime/screenshot.py). In der dev-oberflaeche umschaltbar."""
+        return self.get_str('screenshot.resolution', 'window') or 'window'
+
     def apply_to_predictor(self, predictor):
         """predictor-abschnitt -> predictor.py (genauigkeit, reichweite, marker)."""
         if predictor is None:

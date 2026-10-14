@@ -36,7 +36,8 @@ One per line, strict JSON with no comments. Sections: `window`, `simulation`,
 `warp_to` (`apsis_margin_s`, `point_margin_s`, `lead_real_seconds`, via
 `warp_to_kwargs()`), `screenshot` (`directory`, read by `ConfigLoader.screenshot_dir()`; relative
 paths resolve from the repo root, since `SPACESIM_CONFIG` may point into a
-temp folder), `debug`.
+temp folder; `resolution`: `window`/`2K`/`4K`/`6K`/`8K`, the preselected
+capture height, an unknown value warns and falls back to `window`), `debug`.
 
 **New tunables belong here, not hardcoded in `main.py`.** Missing keys fall
 back to the in-code default; unknown keys are reported at startup

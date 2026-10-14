@@ -386,6 +386,12 @@ literally".
 
 ## Fallstricke
 
+> **Beim hochaufgelösten Foto läuft `update()` nicht** (`capture_scale != 1`,
+> siehe `.claude/rules/rendering.md`). Der k-fache Maßstab sah für die
+> Zoom-Ruhe wie ein Zoom aus: das Gitter blendete auf und blieb danach im
+> Fenster stehen. Gezeichnet wird der Zustand des Fensters, Dekaden bei
+> `scale / k`, Pixelweiten und Sternversatz mal k.
+
 > **`u_level_phase` ist ein `vec2`-Array — moderngl will eine Liste von
 > PAAREN.** Eine flache Liste wirft `Value after * must be an iterable, not
 > float`. Der Fehler war einmal drin und sah aus wie ein Shader-Bug: der

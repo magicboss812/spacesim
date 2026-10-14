@@ -341,6 +341,24 @@ alone.
 > longest main-thread gap **6–11 ms** (idle 0.8 ms).
 > Folder `screenshot.directory` (relative = repo root, git-ignored), name
 > `spacesim_YYYY-MM-DD_HHMMSS.png`, `_2`… within the same second.
+>
+> **Resolution and crop** (dev UI → "screenshot settings", default
+> `screenshot.resolution` = `window`). `2K/4K/6K/8K` are fixed **heights**
+> 1440/2160/3240/4320; only the **width** is cropped (left/right edge as a
+> fraction of the window, "symmetric", "snap to centre", "full width"), so
+> the PNG is `crop width × height / window height` wide. The crop overlay
+> (shade outside, 2-px border lines, constants in `runtime/screenshot.py`,
+> deliberately not in config) is drawn after the capture point, so it never
+> lands in the image. Any height other than the window's goes through
+> `ScreenshotWriter.render_scaled`, which runs **before** the normal
+> `renderer.render()` of the frame: the renderer publishes screen positions
+> while drawing (`apsis_marker_hits` …), and the next clicks must see the
+> window's. A dev-UI click therefore lands one frame later; F12 the same
+> frame. Measured on llvmpipe: 4K 450 ms and 8K 1.3–1.5 s from a 1920×1081
+> window, 6K 690 ms from 1280×801, one hitch per capture; a window shot taken after an 8K
+> capture differs from one before by a mean 0.18/255 inside the crop
+> (nothing left behind). The rules for drawing at k× are in
+> `.claude/rules/rendering.md`.
 - **WARP TO** (`runtime/warp_to.py`, from a pinned tooltip). Per frame,
   before `_clamp_warp`, the highest step that the orbit allows (same cap as
   `clamp_warp_to_timescale`) and on which the remaining time still takes

@@ -217,6 +217,11 @@ paths:
   pixel face rasters to exactly two alpha values and snaps onto the five-pixel
   ladder at every `ui_scale`, with a non-zero-fringe counter-check on the text
   face.
+- **`screenshot_test.py`** — pure maths of `runtime/screenshot.py`: the
+  2K–8K steps are heights with the width following the window, the crop
+  clamps to 0..1 and `CROP_MIN_FRACTION`, "snap to centre" keeps the width,
+  "symmetric" mirrors about 0.5. The offscreen re-render itself needs GL and
+  is checked through `runtime.loop.run` (F12 note in `camera-input.md`).
 - **`ui_hud_test.py`** — orbital elements against analytically known orbits,
   layout/overlap at real window sizes, and that controls actually move
   simulation state. The warp-bar clicks address CELLS: cell 1 is the slowest

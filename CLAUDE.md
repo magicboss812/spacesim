@@ -37,7 +37,7 @@ parts of one object sharing one `self`, not separate components.
 | folder | what lives there |
 |---|---|
 | `main.py` | the entry point — 27 lines: config → `bootstrap` → `loop` |
-| `runtime/` | `window` (display/GL/DPI/clock), `gl_device` (FXAA, present, resize), `bootstrap` (builds everything — **the construction order is load-bearing**), `loop` (the frame loop + `TIMING:`), `input` (keymap, click gesture), `screenshot` (F12, PNG on a worker), `warp_to` (WARP TO from a pinned tooltip), `system_loader` |
+| `runtime/` | `window` (display/GL/DPI/clock), `gl_device` (FXAA, present, resize), `bootstrap` (builds everything — **the construction order is load-bearing**), `loop` (the frame loop + `TIMING:`), `input` (keymap, click gesture), `screenshot` (F12: 2K–8K offscreen re-render, width crop, PNG on a worker), `warp_to` (WARP TO from a pinned tooltip), `system_loader` |
 | `physics/` | `world` (adaptive RKN4, `update_planets`/`update_dynamics`, `step`), `world_kernels` (the Numba fast path, **bit-identical** to the Python reference), `vec` (`Vec2`, `G`), `reference_frames` (Principia-style plot frames; **largest file, 1733**), `kernels/` (the predictor's `@njit` maths: `kepler`, `integrators`, `apsis`, `propagate`) |
 | `bodies/` | `body` (`body`/`schiff` + `kepler_relative_xy()`, the **one** scripted-orbit model), `style`, `icon`, `orbit_lines`. Pure numpy — **no GL here** |
 | `ship/` | `control` (`schiffcontrol`), `camera` (world↔screen, zoom, follow, `sim_dt`/warp), `art`, `horizon` (`HorizonPolicy`), `predictor/` (`core`, `hold`, `compute`, `jobs`, `view`), `maneuver/` (`profile` — **die** brenndauer, `plan`, `preview`, `executor`) |

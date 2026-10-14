@@ -269,17 +269,18 @@ def run(app):
         # linie des vorframes saesse sie einen frame lang daneben.
         _update_maneuver_preview(app)
 
-        # Rendern. Der Orientierungs-snap wird INNERHALB von render() angewendet,
-        # unmittelbar bevor der Schiffspfeil gezeichnet wird, mit demselben Frame
-        # und derselben Frame-Zeit wie die gezeichneten prograde/normal-Vektoren
-        # -- so ist die Nase exakt an diese Vektoren gebunden. ship_control und
-        # frame_dt werden dafuer durchgereicht.
-        app.renderer.render(
-            app.world.body, app.camera, points, predictor=app.predictor,
-            sim_time=app.world.time, reference_body=reference_body,
-            ship_control=app.ship_control, real_dt=frame_dt,
-            selected_body=app.ui_state.selected_body,
-        )
+        # Foto in 2K..8K: derselbe frame offscreen in der zielhoehe, VOR dem
+        # normalen zeichnen -- danach ueberschreibt der fenster-frame alles,
+        # was der renderer an schirmpositionen veroeffentlicht
+        # (runtime/screenshot.py). real_dt = 0: das foto darf keine
+        # animation weiterdrehen.
+        if app.screenshot.pending:
+            def draw_scaled():
+                _render_world(app, points, reference_body, 0.0)
+                app.ui_root.render()
+            app.screenshot.render_scaled(app, draw_scaled)
+
+        _render_world(app, points, reference_body, frame_dt)
 
         # Overlays NACH der welt und VOR dem swap (renderer.present() unten).
         #
@@ -297,6 +298,9 @@ def run(app):
         # dev-oberflaeche noch im selben frame greift.
         app.screenshot.capture_if_requested(
             app.window.ctx, app.renderer.width, app.renderer.height)
+        # Zuschnitt-overlay NACH dem foto: es zeigt den rahmen, gehoert aber
+        # nicht ins bild.
+        app.screenshot.draw_crop_overlay(app.ui_root.ui)
         app.devui.render()
 
         app.renderer.present()
@@ -328,6 +332,23 @@ def run(app):
         # abmelden haengt der prozess am ende an einem laufenden neuaufbau.
         app.maneuver_preview.shutdown()
     app.window.close()
+
+
+def _render_world(app, points, reference_body, real_dt):
+    """Die welt zeichnen (ohne HUD und dev-oberflaeche).
+
+    Der Orientierungs-snap wird INNERHALB von render() angewendet,
+    unmittelbar bevor der Schiffspfeil gezeichnet wird, mit demselben Frame
+    und derselben Frame-Zeit wie die gezeichneten prograde/normal-Vektoren
+    -- so ist die Nase exakt an diese Vektoren gebunden. ship_control und
+    real_dt werden dafuer durchgereicht.
+    """
+    app.renderer.render(
+        app.world.body, app.camera, points, predictor=app.predictor,
+        sim_time=app.world.time, reference_body=reference_body,
+        ship_control=app.ship_control, real_dt=real_dt,
+        selected_body=app.ui_state.selected_body,
+    )
 
 
 def _clamp_warp(app):

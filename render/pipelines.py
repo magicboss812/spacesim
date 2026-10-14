@@ -296,7 +296,9 @@ class ShaderPipelineMixin:
                 print(f"Uniform array write failed ({name}): {exc}")
 
     def _set_line_width(self, width):
-        width = float(width)
+        # Beim hochaufgeloesten foto k-fach (runtime/screenshot.py), damit
+        # eine linie im 8K-bild so dick wirkt wie im fenster.
+        width = float(width) * float(getattr(self, 'capture_scale', 1.0))
         if self._gl_line_width == width:
             return
         self.ctx.line_width = width

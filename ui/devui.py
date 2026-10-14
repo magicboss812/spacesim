@@ -565,6 +565,55 @@ def _draw_hud_visibility(vis):
             vis.set(key, value)
 
 
+def _draw_screenshot_settings(shot, renderer):
+    """Aufloesung (feste HOEHE) und zuschnitt (nur die BREITE).
+
+    Die hoehe ist bewusst nicht zuschneidbar: 2K..8K sind hoehen, und die
+    breite folgt aus dem zuschnitt (runtime/screenshot.py).
+    """
+    from runtime.screenshot import RESOLUTIONS
+
+    win_w = int(getattr(renderer, 'width', 0) or 0)
+    win_h = int(getattr(renderer, 'height', 0) or 0)
+    labels = []
+    for label, height in RESOLUTIONS:
+        labels.append(f"{label} ({win_h} px)" if height is None
+                      else f"{label} ({height} px)")
+    changed, idx = imgui.combo("resolution (height)", shot.resolution_index,
+                               labels)
+    if changed:
+        shot.set_resolution(idx)
+    if imgui.is_item_hovered():
+        imgui.set_tooltip(
+            "Feste ausgabehoehe. Ausser 'window' wird der frame dafuer\n"
+            "offscreen neu gezeichnet: gleicher weltausschnitt, HUD und\n"
+            "linien k-fach -- ein einzelner haenger beim ausloesen.")
+
+    changed, value = imgui.slider_float(
+        "left edge", float(shot.crop_left) * 100.0, 0.0, 100.0, "%.1f %%")
+    if changed:
+        shot.set_crop_edge('left', value / 100.0)
+    changed, value = imgui.slider_float(
+        "right edge", float(shot.crop_right) * 100.0, 0.0, 100.0, "%.1f %%")
+    if changed:
+        shot.set_crop_edge('right', value / 100.0)
+    _checkbox("symmetric", shot, 'crop_symmetric',
+              "Beide raender gespiegelt um die bildmitte ziehen.")
+    if imgui.button("snap to centre"):
+        shot.centre_crop()
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Zuschnitt bei gleicher breite mittig setzen.")
+    imgui.same_line()
+    if imgui.button("full width"):
+        shot.reset_crop()
+    _checkbox("show crop overlay", shot, 'show_crop_overlay',
+              "Ausserhalb des zuschnitts abdunkeln und die raender zeigen.\n"
+              "Nur im fenster -- das foto selbst enthaelt es nie.")
+    if win_w > 0 and win_h > 0:
+        out_w, out_h = shot.output_size(win_w, win_h)
+        imgui.text(f"output: {out_w} x {out_h} px")
+
+
 def draw_dev_panels(c: "DevContext"):
     """Die eigentlichen panels. Rein werkzeug -- kein spieler-HUD."""
     imgui.set_next_window_size(imgui.ImVec2(460, 720), imgui.Cond_.first_use_ever)
@@ -591,11 +640,15 @@ def draw_dev_panels(c: "DevContext"):
             c.screenshot.request()
         if imgui.is_item_hovered():
             imgui.set_tooltip(
-                "Welt + spieler-HUD in voller fensteraufloesung, ohne die\n"
-                "dev-oberflaeche. Ziel: config.json -> screenshot.directory.")
+                "Welt + spieler-HUD ohne die dev-oberflaeche, in der\n"
+                "aufloesung und dem zuschnitt darunter.\n"
+                "Ziel: config.json -> screenshot.directory.")
         if c.screenshot.last_path:
             imgui.same_line()
             imgui.text_disabled(os.path.basename(c.screenshot.last_path))
+        if imgui.tree_node("screenshot settings"):
+            _draw_screenshot_settings(c.screenshot, c.renderer)
+            imgui.tree_pop()
 
     # ------------------------------------------------------------- Timing
     if imgui.collapsing_header("Timing", imgui.TreeNodeFlags_.default_open):
