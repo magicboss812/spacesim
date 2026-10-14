@@ -441,7 +441,12 @@ def build_app(config):
 
     # F12 / dev-knopf. Gezogen wird in runtime/loop.py zwischen HUD und
     # dev-oberflaeche.
-    app.screenshot = ScreenshotWriter(config.screenshot_dir())
+    try:
+        app.screenshot = ScreenshotWriter(
+            config.screenshot_dir(), resolution=config.screenshot_resolution())
+    except ValueError as exc:
+        print(f"CONFIG WARNING: screenshot.resolution ({exc}) -- window")
+        app.screenshot = ScreenshotWriter(config.screenshot_dir())
     # Die nur-anzeige-schalter der dev-oberflaeche. Auch ohne HUD da: die
     # welt-overlays des renderers haengen nicht am HUD.
     app.hud_visibility = HudVisibility(app.hud, app.renderer)

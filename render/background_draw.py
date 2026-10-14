@@ -124,21 +124,30 @@ class BackgroundDrawMixin:
                     getattr(focus, 'name', None)
                     if bg.grid_anchor == "focus" else None)
 
-        bg.update(
-            real_dt,
-            camera.scale,
-            getattr(camera, 'target_scale', camera.scale),
-            (float(camera.position.x), float(camera.position.y)),
-            focus_world_xy=focus_world_xy,
-            # Nur der KOERPER, nicht der rahmen: die sterne rechnen in
-            # absoluten weltkoordinaten, ein rahmenwechsel aendert daran
-            # nichts und darf die ableitung nicht neu ansetzen.
-            focus_key=(id(focus), getattr(focus, 'name', None)),
-            sim_time=self._frame_time_s,
-            grid_target=grid_target,
-            grid_key=grid_key,
-            viewport=(self.width, self.height),
-        )
+        # Hochaufgeloestes foto (runtime/screenshot.py): die ebene ist
+        # ZUSTANDSBEHAFTET (gitter-ausblendung nach zoom-ruhe, sterndrift,
+        # anker-nachfuehrung), und der k-fache massstab saehe fuer sie wie
+        # ein zoom aus -- das gitter blendete auf und bliebe danach im
+        # fenster sichtbar stehen. Waehrend des fotos deshalb KEIN update;
+        # gezeichnet wird der zustand des fensters, alle pixelgroessen k-fach.
+        k = max(1e-9, float(getattr(self, 'capture_scale', 1.0)))
+        capturing = abs(k - 1.0) > 1e-9
+        if not capturing:
+            bg.update(
+                real_dt,
+                camera.scale,
+                getattr(camera, 'target_scale', camera.scale),
+                (float(camera.position.x), float(camera.position.y)),
+                focus_world_xy=focus_world_xy,
+                # Nur der KOERPER, nicht der rahmen: die sterne rechnen in
+                # absoluten weltkoordinaten, ein rahmenwechsel aendert daran
+                # nichts und darf die ableitung nicht neu ansetzen.
+                focus_key=(id(focus), getattr(focus, 'name', None)),
+                sim_time=self._frame_time_s,
+                grid_target=grid_target,
+                grid_key=grid_key,
+                viewport=(self.width, self.height),
+            )
 
         anchor_xy = bg.anchor_xy()
 
@@ -151,7 +160,9 @@ class BackgroundDrawMixin:
 
         # ------------------------------------------------- gitter/grundflaeche
         if self._background_program is not None and self._background_vao is not None:
-            levels = bg.levels(camera.scale, anchor_xy[0], anchor_xy[1]) \
+            # Die dekaden waehlt der massstab des FENSTERS (beim foto
+            # camera.scale / k); ihre pixelweite waechst dann k-fach mit.
+            levels = bg.levels(camera.scale / k, anchor_xy[0], anchor_xy[1]) \
                 if bg.grid_enabled else []
             count = min(len(levels), background.MAX_LEVELS)
 
@@ -169,7 +180,7 @@ class BackgroundDrawMixin:
                 # u_level_count wieder steigt.
                 pad = background.MAX_LEVELS - count
                 self._write_uniform(program, 'u_level_sp',
-                                    [lv.spacing_px for lv in levels[:count]] + [0.0] * pad)
+                                    [lv.spacing_px * k for lv in levels[:count]] + [0.0] * pad)
                 self._write_uniform(program, 'u_level_alpha',
                                     [lv.alpha for lv in levels[:count]] + [0.0] * pad)
                 self._write_uniform(program, 'u_level_node',
@@ -197,7 +208,8 @@ class BackgroundDrawMixin:
         program = self._star_program
         self._set_uniform(program, 'u_viewport', '_star_viewport', viewport)
         self._write_uniform(program, 'u_pan',
-                            (float(bg.star_pan_px[0]), float(bg.star_pan_px[1])))
+                            (float(bg.star_pan_px[0]) * k,
+                             float(bg.star_pan_px[1]) * k))
         self._write_uniform(program, 'u_time', float(bg.time_s))
         self._write_uniform(program, 'u_opacity', float(bg.star_opacity))
         self._write_uniform(program, 'u_star_zoom', float(bg.star_zoom))

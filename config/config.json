@@ -254,7 +254,8 @@
     "lead_real_seconds": 1.5
   },
   "screenshot": {
-    "directory": "screenshots"
+    "directory": "screenshots",
+    "resolution": "window"
   },
   "debug": {
     "devui_visible": false,

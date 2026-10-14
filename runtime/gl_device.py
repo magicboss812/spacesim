@@ -202,7 +202,11 @@ class GLDeviceMixin:
                 # differenz unsinnig gross oder negativ.
                 timings['overlay_ms'] = overlay_ms if overlay_ms >= 0.0 else 0.0
 
-    def resize(self, width, height):
+    def resize(self, width, height, ui_scale=None):
+        """Neue zielgroesse. `ui_scale` setzt die skala FEST, statt sie aus
+        der hoehe abzuleiten -- nur fuer das hochaufgeloeste foto
+        (runtime/screenshot.py), das das HUD k-fach braucht, auch jenseits
+        von `ui_scale_max`."""
 
         self.width = width
         self.height = height
@@ -237,7 +241,12 @@ class GLDeviceMixin:
         # UI-skala an die neue fensterhöhe anpassen. Nur bei echter änderung
         # die fonts neu aufbauen -- _rebuild_fonts leert die text-caches
         # ohnehin, und beim reinen breiten-resize wäre das verschwendet.
-        if self._recompute_ui_scale():
+        if ui_scale is not None:
+            changed = abs(float(ui_scale) - float(self.ui_scale)) > 1e-3
+            self.ui_scale = max(0.1, float(ui_scale))
+            if changed:
+                self._rebuild_fonts()
+        elif self._recompute_ui_scale():
             self._rebuild_fonts()
 
         # Clear HUD and label texture caches (will be recreated lazily)

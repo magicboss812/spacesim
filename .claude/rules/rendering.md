@@ -107,6 +107,34 @@ only grows on larger displays. Use `Renderer.ui_px(design_units)` to convert.
 Fonts are **re-rasterised** at the new pixel size on every scale change
 (`_rebuild_fonts`) rather than stretched, so text stays sharp at any resolution.
 
+## High-resolution capture draws the WINDOW's picture at k× pixels
+
+`runtime/screenshot.py::render_scaled` (2K–8K) resizes renderer, camera and
+HUD by `k = target height / window height`, points
+`Renderer.output_framebuffer` at an offscreen FBO (`render()` uses it in place
+of `ctx.screen`, after the FXAA pass too) and sets `Renderer.capture_scale =
+k`, then restores all of it. Three rules follow; the second and third were
+seen in the first 4K/8K shots:
+
+- **The HUD scale is SET to `ui_scale × k`** (`resize(..., ui_scale=)`), not
+  derived from the height: `ui_scale_max` (3.0) would clamp it and the HUD
+  would shrink relative to the picture at 8K.
+- **Anything that compares `camera.scale`-derived pixels against a pixel
+  threshold divides by `capture_scale`.** At k× scale the orbit is k× larger
+  in pixels, so the apsis-label fade (`render/prediction.py`, `size_px`) went
+  fully opaque in the 4K shot. It and the ship's zoom shrink
+  (`_ship_zoom_shrink_factor`, same shape) read window pixels.
+  `glLineWidth` is multiplied by `capture_scale` in `_set_line_width`.
+- **The background layer is stateful and is NOT updated during the capture**
+  (`render/background_draw.py`): the k× scale looked like a zoom to its
+  idle-fade, the grid faded in, and it stayed visible in the window after
+  the capture. Levels are picked at `camera.scale / k`, spacing and star pan
+  are multiplied by k.
+
+Not compensated on purpose: body disc/icon thresholds and the line-detail
+budget see the larger pixel radius and draw more detail, which is what a
+higher resolution is for.
+
 ## `render/renderer.py`
 
 - `render/renderer.py` — moderngl `Renderer`: bodies, trajectories, HUD, FXAA.
