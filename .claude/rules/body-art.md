@@ -149,6 +149,61 @@ are 30+ px away.
   per body are grid → fills → contours/figures/rings, in that order, because
   alphas add.
 
+## Pixel raster: bodies draw at 1/k resolution (2026-10-14)
+
+The geometry above is unchanged; only the **raster** it lands on is coarse, so
+the bodies match the HUD's hard-edged pixel face. `_begin_body_layer`
+(`render/bodies.py`) binds an offscreen layer of `ceil(w/k) × ceil(h/k)`
+cells, `k = round(ui_px(renderer.body_pixel_size))` whole screen px (2 at
+1280×800; below 2 the layer is off and the old smooth path runs). Every body
+draws into it, and `_end_body_layer` pulls it up with `texelFetch` (no
+filter) **after the FXAA resolve**. Two rules are load-bearing:
+
+- **Never a texture per body.** A cached sprite blurs when the zoom magnifies
+  it, because filtering smooths the pixel edges. Here the vector geometry is
+  re-rasterised every frame at a fixed *screen* cell size, so an edge is a
+  crisp k-px stair at any zoom.
+- **The layer must miss FXAA.** It runs on the whole scene and softens exactly
+  those stairs. Only when the prediction line itself goes through FXAA
+  (`prediction_bypass_fxaa = false`) or FXAA is off does the layer go in before
+  the resolve, so the line still lies on top.
+
+Consequences in the draw path:
+- **Premultiplied accumulation:** separate blend func `(SRC_ALPHA,
+  1-SRC_ALPHA, ONE, 1-SRC_ALPHA)` into the cleared layer, then
+  `(ONE, 1-SRC_ALPHA)` for the composite.
+- **Body centres snap to a cell corner** (`round(x/k)*k`). Without that, every
+  sub-cell pan step re-rasterises the edges and they crawl.
+- **Markers are deferred** (`_deferred_icons`) and drawn after the composite.
+  They must lie over the bodies, and they keep their own full-res cell grid.
+- **The composite covers only the bounding box** of what was drawn
+  (`_grow_body_layer_rect`, from each disc quad's outer radius). As a
+  full-screen pass in software GL it was the largest cost.
+- **Lines in raster mode** (`body_line.vert`, `u_cell > 0`): the quad is the
+  line itself with no AA fringe, at least half a cell wide, and every covered
+  cell is full. To keep the ink per length, alpha scales by `width / k`, with a
+  floor of 0.45 so 0.6-px hairlines do not vanish.
+
+**Hand-set pixel touches**, all computed per cell *relative to the body
+centre* (so nothing swims while panning) and seeded by `crc32(name)`:
+- **Cell jitter** `body_pixel_jitter` (±7 % brightness) on disc, fills and
+  lines.
+- **Disc lighting in `body_pixel_levels` steps with a Bayer 4×4 dither**, only
+  while the disc carries the picture (`surface_mix < 0.5`). Under the
+  half-transparent fills the same dither showed through as a checkerboard
+  over the whole planet.
+- **The glow halo in dithered steps.**
+- **A shading pass** (`body.frag`, `u_mode 1`), drawn after the vector art. It
+  adds a one-cell lit-limb highlight (`body_pixel_rim`), a Bayer shadow band
+  confined to the terminator (`lambert` ≈ 0–0.26, `body_pixel_shade`) and
+  sparse gloss cells around the subsolar point. Stars get only random bright
+  limb cells.
+- **Fills are not dithered**: each facet is already flat-lit, and a Bayer
+  pattern across every fill is the same checkerboard failure.
+
+Cost, measured with `gl.finish()` (900×700, Erde at 200 px, llvmpipe): 6.47 ms
+with the layer off and 6.53 ms with it on.
+
 ## Die Marke — `bodies/icon.py`
 
 Sinkt ein Körper unter `renderer.body_icon_min_radius_px`, wird er de-gerendert und

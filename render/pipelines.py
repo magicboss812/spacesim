@@ -121,6 +121,30 @@ class ShaderPipelineMixin:
 
         self._init_body_style_pipeline()
         self._init_body_icon_pipeline()
+        self._init_body_layer_pipeline()
+
+    def _init_body_layer_pipeline(self):
+        """Hochziehen der koerper-ebene auf den schirm (siehe
+        `_begin_body_layer`). Ohne dieses programm bleibt das raster aus."""
+        self._body_layer_program = self._compile_shader_program(
+            'body_layer.vert', 'body_layer.frag', 'body_layer')
+        self._body_layer_vao = None
+        if self._body_layer_program is None:
+            return
+        try:
+            self._body_layer_vao = self.ctx.vertex_array(
+                self._body_layer_program,
+                [(self._ensure_quad_vbo(), '2f', 'a_pos')])
+            self._body_layer_program['u_layer'].value = 0
+        except Exception as exc:
+            self.debug_info['shader_error'] = f"body_layer: {exc}"
+            print(f"Shader pipeline fallback (body_layer): {exc}")
+            try:
+                self._body_layer_program.release()
+            except Exception:
+                pass
+            self._body_layer_program = None
+            self._body_layer_vao = None
 
     def _init_body_icon_pipeline(self):
         """Programm der positions-marke.
