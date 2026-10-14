@@ -8,9 +8,11 @@ tests/prediction_detail_test.py.
 import math
 import time
 
+import moderngl
 import numpy as np
 
 from ship.maneuver.preview import state_on_curve
+from ui.theme import apsis_rgb
 
 from render.line_kernels import (
     _LINE_KERNELS_OK,
@@ -20,19 +22,10 @@ from render.line_kernels import (
     _rdp_keep_numba,
 )
 
-#: Ap/Pe der GEPLANTEN bahn (render/maneuver.py). Keine fuenfte farbe: die
-#: Ap/Pe-toene der vorhersagelinie, zur hausfarbe der geplanten bahn (gruen,
-#: `render/maneuver.py::_GREEN`) hin gemischt. So liest sich die raute als
-#: "Ap" bzw. "Pe" UND als teil des plans. Ausgewaehlt am abzug, siehe
-#: `.claude/rules/maneuver.md`.
 #: Der angeklickte bahnpunkt: '#17b2c4', die datenfarbe (ui/theme.py SCHEME[0]).
 _PIN_RGB = (0.090, 0.698, 0.769)
-_PREVIEW_MIX = 0.45
-_PREVIEW_GREEN = (0.282, 0.851, 0.486)
-_PREVIEW_AP_RGB = tuple(a + (g - a) * _PREVIEW_MIX
-                        for a, g in zip((0.45, 0.75, 1.0), _PREVIEW_GREEN))
-_PREVIEW_PE_RGB = tuple(a + (g - a) * _PREVIEW_MIX
-                        for a, g in zip((1.0, 0.62, 0.25), _PREVIEW_GREEN))
+#: Grund der Ap/Pe-plakette: die panelfarbe des HUD (ui/theme.py, `panel`).
+_APSIS_PLATE_RGB = (0.031, 0.059, 0.094)
 
 
 class PredictionDrawMixin:
@@ -864,6 +857,94 @@ class PredictionDrawMixin:
              (sx - r, sy), (sx - r - t, sy), (sx + r, sy), (sx + r + t, sy)),
             color=col, width=2.0)
 
+    def _apsis_glyph_metrics(self):
+        """(halbe kante, rahmenstaerke, fase) der Ap/Pe-plakette in GANZEN px.
+
+        `apsis_marker_radius_px` ist eine DESIGN-groesse (5), skaliert wie
+        jede andere UI-groesse. Ganze pixel, weil die plakette auf das
+        pixelraster faellt: kanten auf ganzzahligen koordinaten werden ohne
+        halbdeckende saeume gerastert.
+        """
+        half = max(4, int(round(self.ui_px(self.apsis_marker_radius_px))))
+        stroke = max(1, int(round(half * 0.22)))
+        chamfer = max(2, int(round(half * 0.45)))
+        return half, stroke, chamfer
+
+    def _draw_apsis_glyph(self, sx, sy, apoapsis, rgb, alpha):
+        """Die Ap/Pe-marke: gefaste plakette mit pixel-winkel.
+
+        Die form kommt aus dem HUD (`ui/theme.py`, fase statt rundung): ein
+        achsparalleles quadrat mit 45-grad-fasen. Ap und Pe unterscheiden
+        sich dreifach, damit es auch ohne farbsehen auf einen blick geht:
+        farbe (cyan / amber, `ui.theme.apsis_rgb`), richtung des winkels
+        (nach oben = hoechster punkt, nach unten = tiefster) und FUELLUNG --
+        Ap ist eine dunkle plakette (grund wie ein panel, deckt gitter und
+        bahnlinie ab) mit farbigem rahmen und winkel, Pe eine volle
+        farbplakette mit dunklem winkel. Alles auf ganzen pixeln, zwei
+        draws je marke.
+        """
+        half, stroke, chamfer = self._apsis_glyph_metrics()
+        cx = float(int(round(sx)))
+        cy = float(int(round(sy)))
+        oy = self._ortho_y
+
+        def octagon(h, c):
+            return ((cx - h + c, cy - h), (cx + h - c, cy - h),
+                    (cx + h, cy - h + c), (cx + h, cy + h - c),
+                    (cx + h - c, cy + h), (cx - h + c, cy + h),
+                    (cx - h, cy + h - c), (cx - h, cy - h + c))
+
+        def fan(poly):
+            out = []
+            for i in range(8):
+                a = poly[i]
+                b = poly[(i + 1) % 8]
+                out.extend(((cx, oy(cy)), (a[0], oy(a[1])), (b[0], oy(b[1]))))
+            return out
+
+        # Die geraden kanten liegen auf ganzen koordinaten, die 45-grad-
+        # kanten um +0.5 daneben: eine diagonale mit ganzzahligem
+        # achsenabschnitt laeuft genau durch pixelmitten, und die
+        # gleichstands-regel des rasterers faellt dann links anders aus als
+        # rechts (gemessen: eine fase eine stufe, die gegenueber zwei).
+        inner_h = half - stroke
+        inner_c = max(1, int(round(chamfer - 0.414 * stroke)))
+        outer = octagon(float(half), float(chamfer) + 0.5)
+        inner = octagon(float(inner_h), float(inner_c) + 0.5)
+
+        # Der winkel: 45-grad-flanken, spitze eine halbe zeile ueber der
+        # ersten -- dieselbe regel; die treppe wird 2, 4, 6 ... px breit und
+        # liegt symmetrisch um cx (eine pixelgrenze).
+        k = max(2, inner_h - 1)
+        top = cy - float(k // 2)
+        bottom = top + float(k)
+        w = float(k) + 0.5
+        if apoapsis:
+            tri = ((cx, top - 0.5), (cx + w, bottom), (cx - w, bottom))
+        else:
+            tri = ((cx - w, top), (cx + w, top), (cx, bottom + 0.5))
+        tri = [(x, oy(y)) for x, y in tri]
+
+        ink_rgba = (rgb[0], rgb[1], rgb[2], 0.95 * alpha)
+        plate_rgba = (_APSIS_PLATE_RGB[0], _APSIS_PLATE_RGB[1],
+                      _APSIS_PLATE_RGB[2], 0.88 * alpha)
+        if apoapsis:
+            ring = []
+            for i in range(8):
+                o0, o1 = outer[i], outer[(i + 1) % 8]
+                i0, i1 = inner[i], inner[(i + 1) % 8]
+                ring.extend(((o0[0], oy(o0[1])), (o1[0], oy(o1[1])),
+                             (i1[0], oy(i1[1])), (o0[0], oy(o0[1])),
+                             (i1[0], oy(i1[1])), (i0[0], oy(i0[1]))))
+            self._draw_ortho_shape(fan(inner), plate_rgba, moderngl.TRIANGLES)
+            self._draw_ortho_shape(ring + tri, ink_rgba, moderngl.TRIANGLES)
+        else:
+            self._draw_ortho_shape(fan(outer), ink_rgba, moderngl.TRIANGLES)
+            self._draw_ortho_shape(
+                tri, (_APSIS_PLATE_RGB[0], _APSIS_PLATE_RGB[1],
+                      _APSIS_PLATE_RGB[2], 0.95 * alpha), moderngl.TRIANGLES)
+        return float(half)
+
     def _draw_apsis_marker_rows(self, markers, count, camera, camera_frame_xy,
                                 hits, style='main'):
         """Raute + abstands-fahne je zeile `(x, y, t_abs, kind, r[, v])`.
@@ -873,7 +954,9 @@ class PredictionDrawMixin:
         schirmgroesse, gleiche transformation zur markerzeit, gleiche
         trefferliste -- nur farbe und kennung unterscheiden sich.
         """
-        r_px = float(self.apsis_marker_radius_px)
+        # Halbe kante der plakette: treffer und zettel (ui/hud/apsis_tooltip.py)
+        # rechnen mit derselben groesse, die gezeichnet wird.
+        r_px = float(self._apsis_glyph_metrics()[0])
         preview = style == 'preview'
 
         # AUSBLENDEN NACH SCHIRMGROESSE DER BAHN, NICHT NACH ZOOM-SCHWELLE.
@@ -889,6 +972,17 @@ class PredictionDrawMixin:
         fade_min = float(self.apsis_marker_fade_min_px)
         fade_full = float(self.apsis_marker_fade_full_px)
         capture_scale = max(1e-9, float(getattr(self, 'capture_scale', 1.0)))
+        # Gezeichnet wird NACH der schleife, in UMGEKEHRTER reihenfolge: die
+        # plakette ist deckend, und eine bahn, die mehrmals in den horizont
+        # passt, legt die apsiden aller umlaeufe fast uebereinander (gemessen
+        # 8 je apsis, 0.3 px versatz je umlauf). Zuletzt gemalt = oben, und
+        # oben soll die NAECHSTE apsis liegen. Eine marke, die weniger als
+        # eine halbe kante neben einer FRUEHEREN derselben art laege, wird
+        # gar nicht gezeichnet -- sonst ragen die raender der verdeckten
+        # unter der obersten hervor. Die trefferliste behaelt alle marken
+        # in zeitlicher reihenfolge.
+        pending = []
+        merge2 = (0.5 * r_px) ** 2
 
         for i in range(count):
             try:
@@ -935,33 +1029,27 @@ class PredictionDrawMixin:
             if not getattr(self, 'draw_apsis_markers', True):
                 continue
 
-            label = "Ap" if is_apo else "Pe"
-            if preview:
-                base = _PREVIEW_AP_RGB if is_apo else _PREVIEW_PE_RGB
-                label_rgb = base
-            else:
-                base = (0.45, 0.75, 1.0) if is_apo else (1.0, 0.62, 0.25)
-                label_rgb = (1.0, 1.0, 1.0)
-            col = (base[0], base[1], base[2], 0.95 * alpha_mult)
+            if any(k == is_apo and (sx - px) ** 2 + (sy - py) ** 2 < merge2
+                   for px, py, k, _d, _a in pending):
+                continue
+            pending.append((sx, sy, is_apo, dist, alpha_mult))
 
-            # Nord -> Ost -> Sued -> West -> Nord, als vier strecken.
-            north = (sx, sy - r_px)
-            east = (sx + r_px, sy)
-            south = (sx, sy + r_px)
-            west = (sx - r_px, sy)
-            self._draw_line_segments(
-                (north, east, east, south, south, west, west, north),
-                color=col, width=2.0)
+        for sx, sy, is_apo, dist, alpha_mult in reversed(pending):
+            label = "Ap" if is_apo else "Pe"
+            base = apsis_rgb(is_apo, preview)
+            label_rgb = base if preview else (1.0, 1.0, 1.0)
+            self._draw_apsis_glyph(sx, sy, is_apo, base, alpha_mult)
 
             text = f"{label} {self._format_apsis_distance(dist)}"
             try:
-                # Diamant + linie laufen über den line-shader (top-down, sy
-                # wächst nach unten), text über die ortho-konvention
-                # (y nach oben). _blit_text_topdown rechnet das um.
+                # sy ist top-down (wie die plakette vor _ortho_y), text
+                # laeuft ueber die ortho-konvention -- _blit_text_topdown
+                # rechnet das um.
                 entry = self._get_label_texture(text, self.font_small)
                 tw = float(entry[1]) if entry else 0.0
                 label_x = sx - tw / 2.0
-                self._blit_text_topdown(text, label_x, sy + r_px + 4.0,
+                self._blit_text_topdown(text, label_x,
+                                        sy + r_px + self.ui_px(4.0),
                                         self.font_small,
                                         color=(label_rgb[0], label_rgb[1],
                                                label_rgb[2], alpha_mult))

@@ -78,7 +78,10 @@ xvfb-run -a -s "-screen 0 2560x1440x24" \
   `../screenshots for debugging/`, outside the repo.
 - `--node PRO,NRM` places a maneuver node (m/s) at `--node-at` (0..1 along the
   horizon, default 0.25). `--zoom SCALE` sets px/m (`1e-9` shows the inner
-  solar system). When a task needs a state the script cannot reach (selected
+  solar system). `--dv PRO` kicks the ship prograde before the first frame
+  (700 gives an eccentric orbit, Ap 30.66 / Pe 16.37 Mm); `--horizon METRES`
+  sets the drawn line length (`1.1e9` = one revolution of that orbit, so
+  the apsides do not stack). When a task needs a state the script cannot reach (selected
   body, warp step, pinned tooltip, pause), add a generic flag to the script.
 - Check the user's resolution **2560×1440** and the tight **1280×800**.
 - View the PNG with the Read tool. For detail, crop and upscale:
@@ -553,7 +556,7 @@ re-read at draw time. Tests: no new failure (`render_budget_test` §1 known).
 
 ---
 
-## Task 5: Apsis marker redesign `[ ]`
+## Task 5: Apsis marker redesign `[x]`
 
 The marker is a rotated square from four line segments
 (`render/prediction.py::_draw_apsis_markers`; colours duplicated in
@@ -567,7 +570,20 @@ sync.
 **Verify:** crops at 2560×1440 and 1280×800, on empty ground and over grid
 and orbit lines.
 
-**Result:** _open_
+**Result:** the diamond is now a chamfered plaque on whole pixels
+(`_draw_apsis_glyph`, filled triangles, 2 draws): Ap = dark plate, cyan frame,
+▲; Pe = solid amber plate, dark ▼; plan markers the same shapes tinted 45 %
+toward green. Size `ui_px(5)` → 10×10 px at 1280×800, 14×14 at 2560×1440;
+the half edge is the published hit radius. One colour source,
+`ui.theme.apsis_rgb`, read by renderer and tooltip (copies removed). The 45°
+edges sit half a pixel off whole coordinates (else the rasterizer cut the
+two chamfers differently). Opaque plaques forced two draw-side rules: rows
+drawn in reverse time order (next apsis on top), and a marker within half an
+edge of an earlier same-kind one is skipped (8 revolutions stacked 0.3 px
+apart); hits unchanged. Checked by crops with `game_shot.py --dv 700
+--horizon 1.1e9` (new flags), with and without `--node 600,0`, on grid, on
+the line and on the plan/line crossing. Tests: no new failure. Not done: the
+labels of stacked revolutions still overprint each other (as before).
 
 ---
 

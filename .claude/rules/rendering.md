@@ -276,21 +276,37 @@ higher resolution is for.
 >    **A font rebuild must drop the pool** — those textures carry the old
 >    size and none of them fits any more.
 >
-> The Ap/Pe diamonds are four unconnected strokes drawn through
-> `_draw_line_segments` (`GL_LINES`). They used to be batched one draw per
-> colour, but **each marker now carries its own alpha** (`_draw_apsis_markers`
-> fades it by the orbit's on-screen size — `dist·camera.scale`, the apsis radius
-> in pixels — between `apsis_marker_fade_min_px` and `_full_px`, so Pe/Ap don't
-> stack onto the ship/Erde markers when the conic is small on screen). That is
-> one draw per marker again. The label fades with it via
-> `_blit_text_topdown(..., color=)` → `texquad.frag`'s `u_color` alpha.
+> **The Ap/Pe marker is a chamfered plaque on the pixel grid**
+> (`_draw_apsis_glyph`, 2026-10-14; it was a four-stroke diamond). An
+> axis-aligned square with 45° chamfers, half edge
+> `ui_px(apsis_marker_radius_px)` rounded to whole px (5 → 10×10 px at
+> 1280×800, 14×14 at 2560×1440), filled triangles through
+> `_draw_ortho_shape`, no `GL_LINES`. Ap and Pe differ three ways so it
+> reads without colour vision: colour (`ui.theme.apsis_rgb`, cyan / amber,
+> the plan's tinted toward green), chevron direction (▲ highest, ▼ lowest)
+> and fill (Ap a dark panel-ground plate with a coloured frame, Pe a solid
+> plate with a dark chevron). Two draws per marker plus the label.
+> **Straight edges sit on whole coordinates, 45° edges half a pixel off
+> them**: a diagonal with an integer intercept runs through pixel centres
+> and the rasterizer's tie rule then cut one chamfer a step shorter than
+> its mirror (measured on the first version). The half edge is also the
+> published hit radius, so tooltip and hover use what is drawn.
+>
+> **Each marker carries its own alpha** — `_draw_apsis_marker_rows` fades it
+> by the orbit's on-screen size (`dist·camera.scale`, the apsis radius in
+> pixels) between `apsis_marker_fade_min_px` and `_full_px`, so Pe/Ap don't
+> stack onto the ship/Erde markers when the conic is small on screen. The
+> label fades with it via `_blit_text_topdown(..., color=)`.
 >
 > **It is not 1 Pe + 1 Ap.** The default parking orbit fits ~8 revolutions
-> into the horizon: measured **16 markers per frame**, i.e. 16 line draws and
-> 16 label draws, ~0.8 ms median. They stay separate on purpose: diamond,
-> label, diamond, label is the paint order, and merging the diamonds into one
-> draw would put marker *k+1* under label *k* wherever they overlap — stacked
-> revolutions are exactly where they do.
+> into the horizon (16 markers per frame). The plaque is opaque, so the rows
+> are drawn in **reverse** time order (the next apsis lands on top, label
+> after its own plaque), and a marker within half an edge of an earlier one
+> of the same kind is not drawn at all: on a 700 m/s eccentric orbit the 8
+> revolutions of each apsis lie 0.3 px apart and the hidden frames stuck out
+> around the top one. Hits are still published for every marker, in time
+> order. For a screenshot of the plain glyph, `tools/game_shot.py --horizon
+> 1.1e9 --dv 700` draws exactly one revolution.
 
 ## `render/gl/`
 

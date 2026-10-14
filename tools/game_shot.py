@@ -5,7 +5,8 @@ den framebuffer VOR present(), also genau das, was im fenster stuende.
 
     python tools/game_shot.py [breite hoehe] [-o datei.png] [--frames N]
                               [--node PRO,NRM] [--zoom SCALE]
-                              [--hide all|KEY,KEY,...]
+                              [--hide all|KEY,KEY,...] [--dv PRO]
+                              [--horizon METRES]
 """
 import argparse
 import json
@@ -34,6 +35,14 @@ parser.add_argument('--hide', default=None,
                     help='nicht zeichnen (dev-UI "HUD visibility"): "all" '
                          'oder schluessel aus ui/hud/visibility.py, z. B. '
                          '"navball,apsis_block"')
+parser.add_argument('--dv', type=float, default=None,
+                    help='schiff vor dem ersten frame um PRO m/s prograde '
+                         '(relativ zum bezugskoerper) anstossen -- fuer eine '
+                         'exzentrische bahn mit einem Ap und einem Pe')
+parser.add_argument('--horizon', type=float, default=None,
+                    help='gezeichnete laenge der vorhersagelinie in metern '
+                         '(predictor.set_display_length) -- z. B. genau ein '
+                         'umlauf, damit sich die apsiden nicht stapeln')
 args = parser.parse_args()
 
 W, H = args.width, args.height
@@ -69,6 +78,23 @@ if args.hide:
     else:
         for key in args.hide.split(','):
             vis.set(key.strip(), False)
+
+if args.dv and app.ship is not None:
+    import math
+    ref = app.ui_state.reference_body
+    rvx = rvy = 0.0
+    if ref is not None and hasattr(ref, 'position_at_time'):
+        t = app.world.time
+        a, b = ref.position_at_time(t - 1.0), ref.position_at_time(t + 1.0)
+        rvx, rvy = (b.x - a.x) * 0.5, (b.y - a.y) * 0.5
+    vx = app.ship.velocity.x - rvx
+    vy = app.ship.velocity.y - rvy
+    n = math.hypot(vx, vy) or 1.0
+    app.ship.velocity.x += vx / n * args.dv
+    app.ship.velocity.y += vy / n * args.dv
+
+if args.horizon:
+    app.predictor.set_display_length(float(args.horizon))
 
 if args.zoom is not None:
     app.camera.scale = float(args.zoom)

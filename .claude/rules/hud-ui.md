@@ -508,7 +508,7 @@ HUD elements and the renderer's world overlays for clean figures.
 `hud/apsis_tooltip.py`, `hud/system_map.py` and `ManeuverGizmo` are the only
 widgets that take their geometry from outside `ui/`, and each for one reason:
 
-- **The apsis tooltip** hangs on the Ap/Pe diamond, whose screen position only
+- **The apsis tooltip** hangs on the Ap/Pe plaque, whose screen position only
   `Renderer._draw_apsis_marker_rows` knows — it applies the *time-dependent*
   frame transform that keeps the marker on the drawn line. The renderer
   therefore publishes `renderer.apsis_marker_hits` (`sx, sy, radius_px,
@@ -520,6 +520,9 @@ widgets that take their geometry from outside `ui/`, and each for one reason:
   WARP TO button of a pinned tooltip**. Speed: `Telemetry.speed_at_radius()`
   (vis-viva on the osculating conic AP/PE come from) for the line, the
   preview's own `v_rel` for planned markers.
+  Its colour comes from `ui.theme.apsis_rgb(apoapsis, preview)`, the same
+  function the renderer draws the marker with; the copies that used to sit
+  in both files are gone.
 
   **Pinning goes through the world click, not through the widget.**
   `InputRouter.handle_world_click` tries `apsis_tooltip.pin_at` first, then
