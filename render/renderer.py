@@ -20,6 +20,7 @@ from render.draw import DrawMixin
 from render.text import TextMixin
 from render.background_draw import BackgroundDrawMixin
 from render.bodies import BodyDrawMixin
+from render.body_pixel import BodyPixelMixin
 from render.ship import ShipDrawMixin
 from render.orbits import OrbitDrawMixin
 from render.prediction import PredictionDrawMixin
@@ -33,6 +34,7 @@ class Renderer(
     TextMixin,
     BackgroundDrawMixin,
     BodyDrawMixin,
+    BodyPixelMixin,
     ShipDrawMixin,
     OrbitDrawMixin,
     PredictionDrawMixin,
@@ -104,19 +106,26 @@ class Renderer(
         # je koerper und nichts, was pro frame belegt wuerde.
         self._body_icon_program = None
         self._body_icon_vao = None
-        # Koerper-raster: die koerper zeichnen in eine ebene mit 1/k der
-        # aufloesung und werden NACH dem FXAA-resolve ohne filter hochgezogen
-        # (`_begin_body_layer`). Die marken warten so lange in
-        # `_deferred_icons`, weil sie ueber den koerpern liegen muessen.
+        # Pixel-stil der koerper (`render/body_pixel.py`): zellpuffer je
+        # koerper, ebene in fenstergroesse, nach dem FXAA-resolve
+        # hochgezogen. Die marken warten in `_deferred_icons`, weil sie
+        # ueber den koerpern liegen muessen.
         self._body_layer_program = None
         self._body_layer_vao = None
+        self._body_pixel_program = None
+        self._body_pixel_vao = None
+        self._body_cell_disc_program = None
+        self._body_cell_disc_vao = None
+        self._body_cell_fill_program = None
         self._body_layer_fbo = None
         self._body_layer_tex = None
-        self._body_layer_cells = None
-        self._body_layer_cell = 0
-        self._body_layer_viewport = None
-        self._body_layer_used = False
+        self._body_layer_size = None
+        self._body_layer_dirty = None
         self._body_layer_rect = None
+        self._body_layer_active = False
+        self._body_cell_fbo = None
+        self._body_cell_textures = ()
+        self._body_cell_cap = (0, 0)
         self._deferred_icons = []
         self._body_icon_cache = {}
         self._icon_viewport = None
@@ -535,15 +544,18 @@ class Renderer(
         # Grundglimmen jedes koerpers in seiner eigenen farbe. Sterne bekommen
         # ueber `light_intensity` zusaetzlich einen groesseren halo.
         self.body_glow_alpha = 0.16
-        # Pixel-optik der koerper, passend zum HUD: kantenlaenge einer
-        # koerper-zelle in DESIGN-einheiten (ganze pixel nach ui_px; unter 2
-        # aus). Dazu die handgesetzten zuege: zellstreuung, lichtstufen mit
-        # bayer-dither, lichtkante und geditherter nachtschatten.
-        self.body_pixel_size = 2.0
-        self.body_pixel_jitter = 0.07
-        self.body_pixel_levels = 5.0
-        self.body_pixel_rim = 0.55
-        self.body_pixel_shade = 0.45
+        # Pixel-stil der koerper (`render/body_pixel.py`). Zellkanten in
+        # DESIGN-einheiten, gerundet auf ganze pixel; die grosse zelle ist das
+        # doppelte der kleinen, die kleine die teilung des hintergrund-
+        # rasters (`background.pixel_size`). 0 = glatter alter zeichenweg.
+        self.body_pixel_size = 6.0
+        self.body_pixel_size_small = 3.0
+        # Unter so vielen GROSSEN zellen radius nimmt ein koerper die kleine.
+        self.body_pixel_small_cells = 16.0
+        # Facettenziel der detailleiter in zellen, statt body_vector_facet_px.
+        self.body_pixel_facet_cells = 4.0
+        # Dichte des punktmatrix-halos an der kante (faellt nach aussen ab).
+        self.body_pixel_halo_density = 0.55
 
         # Bildschirm-bounding-box kleiner als dieser wert (px) => referenz-spur
         # wird nicht gezeichnet (sub-pixel, ohnehin unsichtbar).

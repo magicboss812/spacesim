@@ -323,7 +323,10 @@ gerundet" ist. Nebeneinander las sich das als zwei verschiedene Produkte.
 
 - **Virtuelles Pixelraster.** Der ganze Fragment-Pass rechnet auf
   `(floor(frag/px) + 0.5) * px` mit `px = ui_px(pixel_size)` — also in
-  Design-Einheiten, wie jede andere UI-Größe. Alle Kanten sind `step`, nicht
+  Design-Einheiten, wie jede andere UI-Größe. `pixel_size` steht auf **3.0**: genau
+  die kleine Körperzelle (`renderer.body_pixel_size_small`) und die Hälfte
+  der großen. Zwei unverwandte Raster nebeneinander lesen sich als Versehen
+  (`.claude/rules/body-art.md`, "Pixel bodies"). Alle Kanten sind `step`, nicht
   `smoothstep`: hier wäre die weiche Kante der Fremdkörper, nicht der
   Treppeneffekt. Auch die Sterne rasten Position und Größe darauf ein.
 - **Fase statt Rundung** (`ui/theme.py`). Die Knoten sind darum

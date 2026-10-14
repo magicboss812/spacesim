@@ -412,12 +412,12 @@ irgendetwas geprueft wird. Das ist kein befund ueber den code, den sie
 pruefen sollten — wer sie braucht, muss zuerst die pfade nachziehen.
 
 `body_style_test.py` §8 "und kosten entsprechend wenig" (budget 4 ms) gives
-3.2–4.8 ms here since the body pixel raster (2026-10-14), against 1.0–1.1 ms
-before. It times `render()` on the CPU without `finish()`. In llvmpipe,
-sampling the body layer that was just rendered makes the CPU wait for the
-rasterizer. With `gl.finish()` both trees cost the same (6.47 against 6.53 ms,
-`.claude/rules/body-art.md`). Setting `renderer.body_pixel_size = 0` brings
-back the old number.
+~5.5 ms here with the pixel bodies on (2026-10-14), against 1.0–1.1 ms
+before. It times `render()` on the CPU, and in llvmpipe that includes the
+per-pixel compose of `body_pixel.frag`. Measured with `gl.finish()`, the
+pixel path adds 1.7 ms for one 200-px body. `renderer.body_pixel_size = 0`
+brings back the old number. The rest of the file still passes, because §5
+and §7 do not go through `render()`'s pixel path.
 
 `body_icon_test.py` §5 misst hier **±2.24 % gegen eine grenze von 2 %**,
 reproduzierbar ueber mehrere laeufe (die notiz oben nennt ±0.10 %). Der test
