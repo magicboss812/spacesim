@@ -35,6 +35,8 @@
 [39] Zeit seit der Periapsis auf Ellipsenbahnen (Keplergleichung) https://orbital-mechanics.space/time-since-periapsis-and-keplers-equation/elliptical-orbits.html, zuletzt 12.10.2026
 
 ---
+[44] Principia (Modifikation für Kerbal Space Program), Quellcode und Dokumentation https://github.com/mockingbirdnest/Principia, zuletzt 14.10.2026
+
 ## Literatur / Papers
 [2] [[Obsidian Vault/Evaluation/_Arbeit/Quellen/Literatur/nasa apollo 11 flight report.pdf]] Apollo 11 Mission Report, Houston 1969, verfügbar über "https://ntrs.nasa.gov/citations/19700008096" 
 [Curtis] [[orbital-mechanics-for-engineering-students-fourth-edition-9780081021330-008102133x_compress.pdf]] "Orbital Mechanics for engineering students, 4th edition" von Howard D. Curtis
@@ -43,6 +45,12 @@
 [30] Park, R. S.; Folkner, W. M.; Williams, J. G.; Boggs, D. H.: "The JPL Planetary and Lunar Ephemerides DE440 and DE441", The Astronomical Journal 161 (2021), 105, verfügbar über https://ssd.jpl.nasa.gov/doc/Park.2021.AJ.DE440.pdf, zuletzt 29.09.2026
 
 ---
+[40] Hairer, E.; Lubich, C.; Wanner, G.: "Geometric numerical integration illustrated by the Störmer–Verlet method", Acta Numerica 12 (2003), 399–450, verfügbar über https://www.unige.ch/~hairer/preprints/gniverlet.html, zuletzt 14.10.2026
+[41] Dormand, J. R.; El-Mikkawy, M. E. A.; Prince, P. J.: "Families of Runge-Kutta-Nyström formulae", IMA Journal of Numerical Analysis 7 (1987), 235–250, doi:10.1093/imanum/7.2.235
+[42] Dormand, J. R.; Prince, P. J.: "A family of embedded Runge-Kutta formulae", Journal of Computational and Applied Mathematics 6 (1980), 19–26
+[43] Hairer, E.; Nørsett, S. P.; Wanner, G.: Solving Ordinary Differential Equations I. Nonstiff Problems, 2. Aufl., Springer, Berlin 1993
+[45] Yoshida, H.: "Construction of higher order symplectic integrators", Physics Letters A 150 (1990), 262–268
+
 ## Bildquellen
 Abb. 1 Waagerechter Abschuss nach Newtons Gedankenexperiment: KI-erstellt (Claude), siehe KI-Nutzung
 Abb. 2 Geometrie einer Ellipsenbahn: aus [10], Bryan Weber, Orbital Mechanics & Astrodynamics, Lizenz CC BY-SA 4.0
@@ -57,3 +65,4 @@ Abb. 8 (Kap. 3.1, neue Zählung) Hohmann-Transfer zwischen zwei Kreisbahnen: KI-
 Abb. 9 (Kap. 3.1, neue Zählung) Phasenwinkel beim Start: KI-erstellt (Claude), Inhalt nach [35], gezeichnet für $r_2 = 1{,}8\,r_1$
 Abb. 9 (Kap. 3.2) Abflug- und Ankunftshyperbel mit Zusammensetzung der Geschwindigkeiten: KI-erstellt (Claude), Inhalt nach [33] und [37], Hyperbelform aus dem Rechenbeispiel
 Abb. 10 (Kap. 3.3) Hohmann-Transfer und schnellerer Transfer mit Zerlegung der Geschwindigkeiten am Schnittpunkt: KI-erstellt (Claude), Inhalt nach [11] und [38], Bahnen und Vektoren maßstäblich aus dem Rechenbeispiel
+Abb. 11 (Kap. 3.4) Ankunft am Mars bei Hohmann-Transfer und zwei schnelleren Transfers: eigener Screenshot aus der Simulation, Flüge und Aufnahme per Skript KI-erstellt (Claude)
