@@ -65,7 +65,7 @@ anchoring, `points[0]` is the ship's position at `world.time`.**
   `_find_apsis_markers_numba` scans the prediction line for local min/max
   distance to the reference body; `Predictor.get_apsis_markers()` returns
   them lazily (cached per points-array identity),
-  `Renderer._draw_apsis_markers` draws Pe/Ap diamonds + distance labels.
+  `Renderer._draw_apsis_marker_rows` draws the Pe/Ap plaques + distance labels (`rendering.md`).
   Toggles: `predictor.apsis_markers_enabled`, `renderer.show_apsis_markers`.
   **`_refine_apsis_numba` places the marker on the CUBIC, not on its chord**
   (2026-08-31). The parabola fit on `d²` gives the vertex's *parameter*; the

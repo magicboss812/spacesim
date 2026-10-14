@@ -505,8 +505,8 @@ gleiche Transformation zur Markerzeit. Treffer in
 Linie: `(..., alpha, True, v_rel)`.
 
 **Farbe am Abzug entschieden, keine fünfte:** die Ap/Pe-Töne der Linie,
-45 % zum Grün der Planlinie gemischt (`_PREVIEW_AP_RGB` / `_PE_RGB`, im
-Zettel wortgleich), Beschriftung im selben Ton statt weiß. Rein grün verlöre
+45 % zum Grün der Planlinie gemischt (`ui.theme.apsis_rgb(..., preview=True)`,
+dieselbe Quelle für Marke und Zettel), Beschriftung im selben Ton statt weiß. Rein grün verlöre
 die Unterscheidung Ap/Pe; die Linienfarben unverändert wären von den Markern
 der Vorhersage nicht zu trennen.
 

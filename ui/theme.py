@@ -140,6 +140,25 @@ ROLE_INDEX = {
 }
 
 
+#: Ap/Pe-marker der linie und des plans (render/prediction.py) und ihr
+#: zettel (ui/hud/apsis_tooltip.py) lesen ihre farbe HIER -- eine quelle,
+#: damit zettel und marke nicht auseinanderlaufen. Ap = cyan (bahn-daten),
+#: Pe = amber (achtung: der tiefste punkt). Der plan mischt beide um
+#: APSIS_PREVIEW_MIX zur farbe der geplanten bahn ('node_path', gruen):
+#: keine fuenfte farbe, und doch als teil des plans lesbar.
+APSIS_PREVIEW_MIX = 0.45
+
+
+def apsis_rgb(apoapsis, preview=False):
+    """(r, g, b) der Ap- bzw. Pe-marke, auf der linie oder im plan."""
+    role = 'orbit' if apoapsis else 'altitude'
+    base = rgba(SCHEME[ROLE_INDEX[role]])[:3]
+    if not preview:
+        return base
+    green = rgba(SCHEME[ROLE_INDEX['node_path']])[:3]
+    return tuple(a + (g - a) * APSIS_PREVIEW_MIX for a, g in zip(base, green))
+
+
 class Palette:
     """Die vier bedeutungsfarben plus die feste, dunkle grundierung.
 

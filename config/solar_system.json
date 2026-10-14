@@ -9,6 +9,7 @@
       "velocity": [0, 0],
       "fixed": true,
       "color": "#ffff00",
+      "is_star": true,
       "light_intensity": 1.0,
       "has_atmosphere": true,
       "atmos_density": 50
@@ -99,6 +100,7 @@
       "theta0": 2.5,
       "is_moon_of": "Sonne",
       "color": "#d8ba8a",
+      "is_gas": true,
       "has_atmosphere": true,
       "atmos_density": 40.0,
       "atmosphere_color": "#e8c39e"
@@ -167,6 +169,7 @@
       "theta0": 4.1,
       "is_moon_of": "Sonne",
       "color": "#e3d19c",
+      "is_gas": true,
       "has_atmosphere": true,
       "atmos_density": 35.0,
       "atmosphere_color": "#f0e2b6"
@@ -251,6 +254,7 @@
       "theta0": 5.2,
       "is_moon_of": "Sonne",
       "color": "#a7d8de",
+      "is_gas": true,
       "has_atmosphere": true,
       "atmos_density": 25.0,
       "atmosphere_color": "#c8ecef"
@@ -332,6 +336,7 @@
       "theta0": 6.0,
       "is_moon_of": "Sonne",
       "color": "#4f6fd6",
+      "is_gas": true,
       "has_atmosphere": true,
       "atmos_density": 25.0,
       "atmosphere_color": "#6f8fe8"

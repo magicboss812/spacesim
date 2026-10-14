@@ -36,9 +36,18 @@ import numpy as np
 
 from bodies.style import _Rng, _imul, _MASK32, seed_from_name  # noqa: F401
 
-#: Die beiden gewaehlten entwuerfe.
+#: Die beiden gewaehlten entwuerfe (fuer feste koerper, im dev-UI waehlbar).
 VARIANTS = ('rosette', 'signature')
 DEFAULT_VARIANT = 'rosette'
+#: Die marken nach ART des koerpers (bodies/style.py, KINDS): stern und
+#: gasriese tragen eine eigene, damit die marke dieselbe aussage macht wie
+#: die grosse zeichnung. Nicht waehlbar -- sie haengen am koerper.
+KIND_VARIANTS = {'star': 'star', 'gas': 'bands'}
+
+
+def variant_for_kind(kind, default=DEFAULT_VARIANT):
+    """Die marke fuer eine zeichnungs-art; 'planet' -> die eingestellte."""
+    return KIND_VARIANTS.get(str(kind), default)
 
 #: Kantenlaenge des zellgitters -- die EINZIGE stellschraube fuer den
 #: detailgrad. Sie haengt bewusst NICHT an der bildschirmgroesse: eine groessere
@@ -185,7 +194,103 @@ def _signature(rng, grid):
     return cells
 
 
-_BUILDERS = {'rosette': _rosette, 'signature': _signature}
+def _star(rng, grid):
+    """Der stern: voller heller kern, ein ring und ein STRAHLENKRANZ.
+
+    Vier oder acht strahlen (gewuerfelt) bis an den rand, jede zweite
+    zelle darauf heller -- das kreuz liest sich auch bei 8 px noch als
+    "leuchtet", wo eine runde scheibe nur ein planet waere. Punktsymmetrisch
+    wie die anderen entwuerfe (der schwerpunkt bleibt in der mitte).
+    """
+    radius = (grid - 1) // 2
+    core = max(1.0, radius * 0.42)
+    halo = core + 1.0
+    cells = {}
+    for i in range(-radius, radius + 1):
+        for j in range(-radius, radius + 1):
+            d = math.hypot(i, j)
+            if d <= core:
+                cells[(i, j)] = TIER_BRIGHT
+            elif d <= halo:
+                cells[(i, j)] = TIER_BASE
+    diagonal = rng() < 0.5
+    eight = rng() < 0.5
+    dirs = [(1, 0), (0, 1), (-1, 0), (0, -1)]
+    diag = [(1, 1), (-1, 1), (-1, -1), (1, -1)]
+    if eight:
+        dirs = dirs + diag
+    elif diagonal:
+        dirs = diag
+    for di, dj in dirs:
+        step = 1
+        while True:
+            i, j = di * step, dj * step
+            if max(abs(i), abs(j)) > radius or math.hypot(i, j) > radius + 0.35:
+                break
+            if (i, j) not in cells:
+                cells[(i, j)] = TIER_BASE if step % 2 == 0 else TIER_DIM
+            step += 1
+    return [(i, j, t) for (i, j), t in cells.items()]
+
+
+def _bands(rng, grid):
+    """Der gasriese: die scheibe in waagerechten BAENDERN.
+
+    Die stufe haengt an der zeile (|j|, also spiegelsymmetrisch zum aequator
+    und damit punktsymmetrisch), gewuerfelt ohne zwei gleiche nachbarn. An
+    den bandgrenzen kippt je zelle mit kleiner wahrscheinlichkeit in die
+    nachbarstufe -- dieselbe "turbulenz nur an den kanten" wie in der
+    grossen zeichnung. Am rand fransen wenige zellen aus, wie bei der
+    rosette.
+    """
+    radius = (grid - 1) // 2
+    reach = radius + 0.35
+    # Hell und dunkel im WECHSEL, in laeufen von ein oder zwei zeilen: drei
+    # aehnliche stufen nebeneinander gingen unter der helligkeits-streuung
+    # der zellen (`body_icon_shade_jitter`) unter -- gemessen las sich die
+    # marke dann wie die rosette. Die mittlere stufe kommt nur als
+    # gelegentlicher dritter ton vor.
+    row_tier = {}
+    bright = rng() < 0.5
+    row = 0
+    while row <= radius:
+        run = 1 + int(rng() * 2.0)
+        if bright:
+            t = TIER_BRIGHT
+        else:
+            t = TIER_BASE if rng() < 0.25 else TIER_DIM
+        for _ in range(run):
+            if row > radius:
+                break
+            row_tier[row] = t
+            row += 1
+        bright = not bright
+    decided = {}
+    cells = []
+    for i in range(-radius, radius + 1):
+        for j in range(-radius, radius + 1):
+            d = math.hypot(i, j)
+            if d > reach:
+                continue
+            key = _sym(i, j)
+            if key not in decided:
+                tier = row_tier[abs(j)]
+                r = rng()
+                # Kante zum nachbarband (nach aussen): dort, und nur dort,
+                # wird verwirbelt.
+                nxt = row_tier.get(abs(j) + 1)
+                if nxt is not None and nxt != tier and r < 0.12:
+                    tier = nxt
+                if d / reach > 0.82 and rng() < 0.30:
+                    tier = TIER_EMPTY
+                decided[key] = tier
+            if decided[key] != TIER_EMPTY:
+                cells.append((i, j, decided[key]))
+    return cells
+
+
+_BUILDERS = {'rosette': _rosette, 'signature': _signature,
+             'star': _star, 'bands': _bands}
 
 
 # --------------------------------------------------------------------------

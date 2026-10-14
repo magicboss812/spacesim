@@ -75,7 +75,8 @@ class body:
                  semi_major_axis=None, eccentricity=None, period=None, theta0=0.0, 
                  is_moon_of=None, color=(255, 255, 255),
                  has_atmosphere=False,atmosphere_color=(255, 255, 255), atmos_density=0.0, light_intensity=0.0, is_ship=False,
-                 style_seed=None, style_mode=None, style_shape=None):
+                 style_seed=None, style_mode=None, style_shape=None,
+                 is_star=False, is_gas=False):
         self.name = name
         self.mass = float(mass)
         self.radius = float(radius)
@@ -114,6 +115,11 @@ class body:
         self.style_seed = None if style_seed is None else (int(style_seed) & 0xFFFFFFFF)
         self.style_mode = style_mode
         self.style_shape = style_shape
+        # Welche ART zeichnung (bodies/style.py, `kind`): ein stern ist eine
+        # selbstleuchtende scheibe, ein gasriese traegt breitenbaender statt
+        # gelaendestufen. Beide False = fester planet/mond.
+        self.is_star = bool(is_star)
+        self.is_gas = bool(is_gas)
     def position_at_time(self, t):
         """Return this body's Kepler position at simulation time t without modifying state.
 

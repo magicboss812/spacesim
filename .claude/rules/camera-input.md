@@ -130,7 +130,7 @@ alone.
   freezing the line for each batch/scalar render pair) — its `draw_runs` now
   takes `refresh=False` for the second render of a pair instead.
 - **Left-click selects a body; a second click on it flies there.** Before
-  the bodies an Ap/Pe diamond is tried (pins its tooltip), after them the
+  the bodies an Ap/Pe marker is tried (pins its tooltip), after them the
   prediction line (pins the point tooltip); see `.claude/rules/hud-ui.md`. `Home`
   returns to the ship, a click on empty space deselects. The ship is in the
   pick list like any other object.

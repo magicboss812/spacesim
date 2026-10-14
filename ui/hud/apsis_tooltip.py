@@ -38,7 +38,7 @@ der oskulierenden bahn von jetzt.
 import math
 
 from ..core import Widget, ease
-from ..theme import ink_on, with_alpha
+from ..theme import apsis_rgb, ink_on, with_alpha
 from .. import units
 
 # Entwurfseinheiten, wie ueberall im HUD.
@@ -59,21 +59,6 @@ _BUTTON_GAP = 6.0
 #: schliesst -- ein einzelner frame ohne marker (neue linie, kurz ausserhalb
 #: des bildes) ist noch kein verschwinden.
 _MISSING_GRACE_S = 0.5
-
-#: Die farben der beiden rauten, WORTGLEICH zu Renderer._draw_apsis_marker_rows.
-#: Zettel und raute muessen dieselbe farbe tragen, sonst ist nicht zu sehen,
-#: zu welchem der beiden marker er gehoert.
-_APOAPSIS_COLOR = (0.45, 0.75, 1.0, 1.0)
-_PERIAPSIS_COLOR = (1.0, 0.62, 0.25, 1.0)
-#: ... und die der GEPLANTEN bahn, wortgleich zu render/prediction.py
-#: (_PREVIEW_AP_RGB / _PREVIEW_PE_RGB: 45 % zum gruen der planlinie).
-_PREVIEW_MIX = 0.45
-_PREVIEW_GREEN = (0.282, 0.851, 0.486)
-_PREVIEW_AP_COLOR = tuple(a + (g - a) * _PREVIEW_MIX for a, g in
-                          zip((0.45, 0.75, 1.0), _PREVIEW_GREEN)) + (1.0,)
-_PREVIEW_PE_COLOR = tuple(a + (g - a) * _PREVIEW_MIX for a, g in
-                          zip((1.0, 0.62, 0.25), _PREVIEW_GREEN)) + (1.0,)
-
 
 def _hit_dict(hit):
     """Eine trefferzeile des renderers als woerterbuch, oder None.
@@ -314,10 +299,11 @@ class ApsisTooltip(Widget):
         )
 
     def _color(self, ctx):
+        # Dieselbe quelle wie die marke (render/prediction.py): zettel und
+        # marke muessen dieselbe farbe tragen, sonst ist nicht zu sehen, zu
+        # welchem marker er gehoert.
         marker = self._marker
-        if marker.get('preview'):
-            return _PREVIEW_AP_COLOR if marker['apoapsis'] else _PREVIEW_PE_COLOR
-        return _APOAPSIS_COLOR if marker['apoapsis'] else _PERIAPSIS_COLOR
+        return apsis_rgb(marker['apoapsis'], bool(marker.get('preview'))) + (1.0,)
 
     # -------------------------------------------------------------- ablauf
 
