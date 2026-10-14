@@ -85,5 +85,8 @@ Three optional appearance keys, all defaulted so no entry needs them:
 `style_seed` (else derived from the **name**, so every body already has its own
 stable pattern), `style_mode` (default `bands`) and `style_shape` (default
 `nested`). That pairing is the intended house look; the keys exist so one body
-can deliberately differ. Within a body a seeded ~14 % of the figures switch to
+can deliberately differ. `is_star` / `is_gas` (both `false` when missing)
+switch a body to the star or gas-giant drawing and marker
+(`.claude/rules/body-art.md`); Sonne carries `is_star`, the four giants
+`is_gas`. Within a body a seeded ~14 % of the figures switch to
 an accent shape, which is what stops a planet reading as one repeated stamp.

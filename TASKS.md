@@ -81,7 +81,9 @@ xvfb-run -a -s "-screen 0 2560x1440x24" \
   solar system). `--dv PRO` kicks the ship prograde before the first frame
   (700 gives an eccentric orbit, Ap 30.66 / Pe 16.37 Mm); `--horizon METRES`
   sets the drawn line length (`1.1e9` = one revolution of that orbit, so
-  the apsides do not stack). When a task needs a state the script cannot reach (selected
+  the apsides do not stack). `--focus NAME` puts the camera on a body
+  (Sonne close up at `--zoom 3.5e-7`, Jupiter `3.5e-6`; as icons with the
+  moons apart: Jupiter `8e-8`, Sonne `4e-9`). When a task needs a state the script cannot reach (selected
   body, warp step, pinned tooltip, pause), add a generic flag to the script.
 - Check the user's resolution **2560×1440** and the tight **1280×800**.
 - View the PNG with the Read tool. For detail, crop and upscale:
@@ -587,7 +589,7 @@ labels of stacked revolutions still overprint each other (as before).
 
 ---
 
-## Task 6: Star and gas-giant body styles `[ ]`
+## Task 6: Star and gas-giant body styles `[x]`
 
 **Read first:** `.claude/rules/body-art.md`, `config-loader.md`.
 
@@ -603,7 +605,19 @@ labels of stacked revolutions still overprint each other (as before).
 
 **Verify:** Sonne, Jupiter and Saturn close up and at icon size.
 
-**Result:** _open_
+**Result:** `is_star` / `is_gas` on `body` (loader, JSON: Sonne; Jupiter,
+Saturn, Uranus, Neptun). `build_planet_style(kind=)`: star = near-opaque
+facets with per-corner limb darkening (U 0.62) and ±7 % granulation, always
+emissive, disc under it not darkened (it showed as a dark rim ring); gas =
+latitude bands, fbm shifts facets across band edges only, axis near the
+screen plane, contours, no figures/rings. Icons: `star` (core + 4/8 rays),
+`bands` (alternating bright/dim rows, half shade jitter, else it read as
+the rosette). Checked by `game_shot.py --focus` (new flag) at 1280×800:
+Sonne at 3.5e-7 / 2.4e-8 / 4e-9 (icon), Jupiter and Saturn at
+3.5e-6 / 4.2e-6 and as icons at 8e-8 / 1e-7, Uranus/Neptun icons. Tests:
+no new failure (`body_icon_test` §5 ±2.22 % is the known one). Not done:
+Sonne's glow (pre-existing) still washes most of a close-up screen yellow;
+Saturn has no ring system.
 
 ---
 

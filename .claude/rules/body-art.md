@@ -99,6 +99,47 @@ paths:
 > **incircle** now (`2·A / perimeter`), and §2 checks the whole drawing
 > against the unit circle.
 
+## Three kinds: planet, star, gas giant (2026-10-14)
+
+`build_planet_style(..., kind=)` — `'planet'` is the path above, unchanged;
+`'star'` and `'gas'` are their own builders (`_build_star`, `_build_gas`) on
+the same icosphere, same seed rules, same output tables. The renderer picks
+the kind from `body.is_star` / `body.is_gas` (`config/solar_system.json`,
+both `false` when missing; Sonne / Jupiter, Saturn, Uranus, Neptun set) in
+`_body_style_kind`, and the kind is part of the cache key.
+
+- **Star:** no tiers, figures or rings — those were what made Sonne read as
+  a yellow planet. Nearly opaque fills (0.97) with **per-corner** limb
+  darkening, `I = 1 − 0.62·(1 − μ)`, `μ` the vertex normal's z, so the colour
+  is interpolated across each facet: pale centre, deeper and redder limb.
+  Granulation is restrained: ±7 % light per facet plus hairline facet edges
+  fading toward the limb. A star is always emissive (`_body_light_dir`), and
+  its disc underneath is **not** darkened (`surface_mix = 0`): the facets end
+  just inside the rim, and the darkened disc showed there as a dark ring
+  between disc and corona. The corona is the existing glow of that disc.
+- **Gas giant:** the spin axis lies near the screen plane (tilt ≤ 24°, tip
+  ≤ 22°), otherwise one looks onto a pole and the bands become rings. Band =
+  `floor(latitude·density + phase + fbm·swirl)`: the noise only shifts a facet
+  along latitude, so it shows exactly where it pushes a facet across a band
+  edge, and the bands are quiet between. Three tiers, never two equal
+  neighbours; contours on the band edges, faint grid under, no figures, no
+  great-circle rings.
+
+Both stay inside the unit circle (`§2` style check: max extent 1.0 at
+`fine`) and cost what the planet build costs (2 / 4–5 / 15 ms coarse /
+medium / fine on the worker).
+
+**The marker follows the kind** (`bodies/icon.py::variant_for_kind`): a star
+gets `star` (bright core, ring, 4 or 8 rays to the rim), a gas giant
+`bands` (bright and dim rows alternating in runs of one or two, mirrored
+about the equator, a few cells flipped at band edges). For `bands` the
+renderer halves `body_icon_shade_jitter`: at the full 0.49 three similar
+tiers dissolved into the rosette's speckle. `VARIANTS` (the dev-UI choice
+for solid bodies) is unchanged. Checking an icon needs a zoom where the
+moons are apart: at 1.2e-9 px/m Jupiter's four moons sit on Jupiter and the
+stack looks like noise; at 8e-8 the planet is still an icon and the moons
+are 30+ px away.
+
 - `render/gl/body_surface.{vert,frag}`, `render/gl/body_line.{vert,frag}` — the
   two programs that draw `body_style`'s output. Same uniforms, same lighting
   law; the line pair additionally expands the quad and carries a 0.5 px seam

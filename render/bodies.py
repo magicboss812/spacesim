@@ -102,12 +102,17 @@ class BodyDrawMixin:
         """
         seed = body_icon.seed_for(body, self.body_icon_seed_offset)
         color = tuple(int(c) for c in tuple(getattr(body, 'color', (255, 255, 255)))[:3])
-        key = (seed, str(self.body_icon_variant), int(self.body_icon_grid), color)
+        # Stern und gasriese tragen ihre EIGENE marke (strahlenkranz /
+        # baender), passend zur grossen zeichnung; alle anderen die
+        # eingestellte variante.
+        variant = body_icon.variant_for_kind(
+            self._body_style_kind(body), self.body_icon_variant)
+        key = (seed, str(variant), int(self.body_icon_grid), color)
         entry = self._body_icon_cache.get(key)
         if entry is None:
             try:
                 cells = body_icon.build_icon(
-                    seed, self.body_icon_variant, self.body_icon_grid)
+                    seed, variant, self.body_icon_grid)
                 entry = (cells, body_icon.icon_palette(color))
             except Exception as exc:
                 # Wie bei body_style: einmal scheitern heisst nie wieder
@@ -184,8 +189,12 @@ class BodyDrawMixin:
         self._write_uniform(prog, 'u_tier_bright', palette[2])
         self._write_uniform(prog, 'u_fade', float(fade))
         self._write_uniform(prog, 'u_seed', int(cells.seed) & 0xFFFFFFFF)
-        self._set_uniform(prog, 'u_shade', '_icon_shade',
-                          float(self.body_icon_shade_jitter))
+        # Die baender eines gasriesen sind ZEILEN; volle streuung je zelle
+        # loeste sie wieder in flecken auf. Halbe streuung haelt die textur.
+        shade = float(self.body_icon_shade_jitter)
+        if cells.variant == 'bands':
+            shade *= 0.5
+        self._set_uniform(prog, 'u_shade', '_icon_shade', shade)
 
         self._body_icon_vao.render(moderngl.TRIANGLE_STRIP)
 
@@ -272,6 +281,15 @@ class BodyDrawMixin:
     # Prozedurale vektor-optik der koerper (D2)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _body_style_kind(body):
+        """'star' | 'gas' | 'planet' -- aus `body.is_star` / `body.is_gas`."""
+        if getattr(body, 'is_star', False):
+            return 'star'
+        if getattr(body, 'is_gas', False):
+            return 'gas'
+        return 'planet'
+
     def _body_style_key(self, body, detail):
         """Cache-schluessel: alles, was die zeichnung bestimmt.
 
@@ -285,7 +303,8 @@ class BodyDrawMixin:
         shape = getattr(body, 'style_shape', None) or body_style.DEFAULT_SHAPE
         color = tuple(int(c) for c in tuple(getattr(body, 'color', (255, 255, 255)))[:3])
         return (int(seed) & 0xFFFFFFFF, str(mode), str(shape), color,
-                str(detail), float(self.body_vector_shape_density))
+                str(detail), float(self.body_vector_shape_density),
+                self._body_style_kind(body))
 
     def _body_detail_levels(self, radius_px):
         """[(stufe, gewicht), ...] fuer diesen bildschirmradius.
@@ -356,7 +375,7 @@ class BodyDrawMixin:
         args = (key[0],)
         kwargs = dict(color=key[3], mode=key[1], shape=key[2],
                       coverage=float(self.body_vector_coverage),
-                      detail=key[4], shape_density=key[5])
+                      detail=key[4], shape_density=key[5], kind=key[6])
         if executor is None:
             # Ohne threads lieber einen ruckler als gar keine zeichnung.
             return self._finish_body_style(
@@ -433,8 +452,10 @@ class BodyDrawMixin:
         von oben auf das system gesehen die richtige phase.
         """
         source = self._light_screen_xy
+        # Ein stern leuchtet selbst, auch wenn er nicht DIE lichtquelle ist.
         if (not self.body_light_enabled or source is None
-                or body is self._light_source_body):
+                or body is self._light_source_body
+                or getattr(body, 'is_star', False)):
             return (0.0, 0.0, 1.0), 1.0
         dx = float(source[0]) - float(x)
         dy = float(source[1]) - float(y)
@@ -613,7 +634,10 @@ class BodyDrawMixin:
             light_intensity,
             light=light,
             emissive=emissive,
-            surface_mix=fade,
+            # Ein stern wird unter seiner zeichnung NICHT abgedunkelt: deren
+            # facetten enden knapp vor dem rand, und dort schiene sonst ein
+            # dunkler ring zwischen scheibe und korona durch.
+            surface_mix=0.0 if getattr(body, 'is_star', False) else fade,
             glow=float(self.body_glow_alpha) * fade,
         )
 

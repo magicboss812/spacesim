@@ -45,6 +45,13 @@ SHAPES = ('nested', 'inset', 'medial', 'dot', 'diamond')
 DEFAULT_MODE = 'bands'
 DEFAULT_SHAPE = 'nested'
 
+#: Art der zeichnung. 'planet' = gelaendestufen + figuren (der mockup-look),
+#: 'star' = selbstleuchtende scheibe mit randverdunklung und granulation,
+#: 'gas' = breitenbaender mit verwirbelten raendern. Gewaehlt ueber
+#: `body.is_star` / `body.is_gas` (render/bodies.py::_body_style_kind).
+KINDS = ('planet', 'star', 'gas')
+DEFAULT_KIND = 'planet'
+
 #: Unterteilungsstufe der icosphere je detailstufe -> 80 / 320 / 1280 facetten.
 _SUBDIV = {'coarse': 1, 'medium': 2, 'fine': 3}
 
@@ -324,14 +331,22 @@ def seed_from_name(name):
 
 def build_planet_style(seed, color=(255, 255, 255), mode=None, shape=None,
                        accent_shape=None, coverage=0.5, detail='medium',
-                       accent_fraction=0.14, shape_density=None):
+                       accent_fraction=0.14, shape_density=None, kind=None):
     """Baut die vektor-zeichnung eines koerpers.
 
     `mode` / `shape` / `accent_shape` = None heisst "aus dem seed waehlen".
     Der aufrufer setzt sie auf 'bands' / 'nested', was der gewuenschte
     standard ist; die zufallszahlen werden trotzdem gezogen, damit alle
     uebrigen parameter unabhaengig von dieser wahl gleich bleiben.
+
+    `kind` ('planet' | 'star' | 'gas', siehe KINDS) waehlt die art der
+    zeichnung; 'planet' (vorgabe) ist der bisherige weg, unveraendert.
     """
+    kind = str(kind or DEFAULT_KIND)
+    if kind == 'star':
+        return _build_star(seed, color, detail)
+    if kind == 'gas':
+        return _build_gas(seed, color, detail)
     seed = int(seed) & _MASK32
     rnd = _Rng((seed * 2654435761 + 12345) & _MASK32)
     subdiv = _SUBDIV.get(str(detail), 2)
@@ -540,6 +555,195 @@ def build_planet_style(seed, color=(255, 255, 255), mode=None, shape=None,
            if seg_rows else np.zeros((0, SEG_COLUMNS), dtype=np.float32))
     return PlanetStyle(tri, seg, under_segments, seed, mode, shape,
                        accent_shape, tiers, subdiv)
+
+
+def _visible_sphere(seed, detail, rot):
+    """Icosphere der stufe, gedreht, nur die vorderseite: (verts, faces,
+    centers, edge_map) -- dasselbe gerippe wie im planeten-weg."""
+    verts, faces = icosphere(_SUBDIV.get(str(detail), 2))
+    centers = verts[faces].mean(axis=1)
+    centers /= np.linalg.norm(centers, axis=1, keepdims=True)
+    edge_map = {}
+    for fi, (a, b, c) in enumerate(faces):
+        for u, v in ((a, b), (b, c), (c, a)):
+            key = (u, v) if u < v else (v, u)
+            edge_map.setdefault(key, []).append(fi)
+    return verts, faces, centers, edge_map
+
+
+def _pack(tri_rows, seg_rows, under, seed, kind, detail, tiers):
+    tri = (np.asarray(tri_rows, dtype=np.float32)
+           if tri_rows else np.zeros((0, TRI_COLUMNS), dtype=np.float32))
+    seg = (np.asarray(seg_rows, dtype=np.float32)
+           if seg_rows else np.zeros((0, SEG_COLUMNS), dtype=np.float32))
+    return PlanetStyle(tri, seg, under, seed, kind, kind, kind, tiers,
+                       _SUBDIV.get(str(detail), 2))
+
+
+def _build_star(seed, color, detail):
+    """Der stern: eine leuchtende scheibe, keine oberflaeche.
+
+    * **Randverdunklung je ECKE**, nicht je facette: `mu` ist die z-komponente
+      der eckpunkt-normale (blickrichtung), die helligkeit folgt dem linearen
+      gesetz `I = 1 - U(1 - mu)` mit U = 0.62 (sonne im sichtbaren ~0.6).
+      Die farbe wird ueber das dreieck interpoliert -- ein weicher verlauf
+      von fast weiss in der mitte zu einem tieferen, roeteren rand, trotz
+      flacher facetten.
+    * **Granulation zurueckhaltend**: jede facette ist eine zelle, ihr licht
+      wird um hoechstens +-7 % gewuerfelt (seed), dazu die facettenkanten als
+      haarfeine helle linien. Keine stufen, keine figuren, keine ringe --
+      genau das liess die sonne bisher wie einen gelben planeten aussehen.
+    * Fast deckend (alpha 0.97): die scheibe darunter (body.frag) wird damit
+      nicht mehr gebraucht, und die korona bleibt der glow derselben scheibe.
+      Gezeichnet wird ein stern IMMER emissiv (`_body_light_dir`).
+    """
+    seed = int(seed) & _MASK32
+    rnd = _Rng((seed * 2654435761 + 54321) & _MASK32)
+    s = seed & 0xffff
+    rot = _euler_matrix(rnd() * TAU, math.acos(2.0 * rnd() - 1.0), rnd() * TAU)
+    verts, faces, centers, edge_map = _visible_sphere(seed, detail, rot)
+    verts = verts @ rot.T
+    centers = centers @ rot.T
+    hue, sat_factor = _color_basis(color)
+
+    limb_u = 0.62
+    grain = 0.07
+    jitter = (_hash3(faces[:, 0], faces[:, 1], faces[:, 2], s + 3301) - 0.5) * 2.0
+    vlist = verts.tolist()
+    clist = centers.tolist()
+    flist = faces.tolist()
+    jlist = jitter.tolist()
+
+    def star_color(mu, j):
+        intensity = (1.0 - limb_u * (1.0 - max(0.0, mu))) * (1.0 + grain * j)
+        intensity = max(0.0, min(1.08, intensity))
+        # Mitte: zum weiss hin (hoch, wenig saettigung), rand: tiefer und
+        # roeter -- der farbverlauf, den die randverdunklung real hat.
+        return _hsl(hue, 1.0, -22.0 * (1.0 - intensity), 100.0 - 25.0 * intensity,
+                    34.0 + 52.0 * intensity)
+
+    tri_rows = []
+    for f in np.nonzero(centers[:, 2] > 0.0)[0].tolist():
+        nx, ny, nz = clist[f]
+        for idx in flist[f]:
+            p = vlist[idx]
+            col = star_color(p[2], jlist[f])
+            tri_rows.append((p[0], p[1], nx, ny, nz,
+                             col[0], col[1], col[2], 0.97, 1.0))
+
+    seg_rows = []
+    col_line = _hsl(hue, 1.0, 0.0, 100.0, 92.0)
+    for (ia, ib), adj in edge_map.items():
+        va, vb = vlist[ia], vlist[ib]
+        depth = (va[2] + vb[2]) * 0.5
+        if depth <= 0.05:
+            continue
+        nx, ny, nz = _midpoint_normal(va, vb)
+        # Zum rand hin ausblenden: dort draengen sich die verkuerzten kanten.
+        seg_rows.append((va[0], va[1], vb[0], vb[1], nx, ny, nz,
+                         col_line[0], col_line[1], col_line[2],
+                         0.16 * depth, 1.0, 0.6))
+    return _pack(tri_rows, seg_rows, 0, seed, 'star', detail, 1)
+
+
+def _build_gas(seed, color, detail):
+    """Der gasriese: breitenbaender, verwirbelt nur an ihren raendern.
+
+    * Die drehachse liegt NAHE der bildebene (gewuerfelte neigung bis 24
+      grad, leicht zum betrachter gekippt) -- sonst saehe man von oben auf
+      einen pol und die baender waeren konzentrische ringe. Breite =
+      asin(n . achse) je facette.
+    * Band = `floor(breite * dichte + phase + wirbel)`, `wirbel` ein fbm-
+      feld. Das rauschen versetzt jede facette nur ein stueck entlang der
+      breite; sichtbar wird es daher ausschliesslich dort, wo es eine
+      facette ueber eine bandgrenze schiebt -- turbulenz an den kanten,
+      ruhige baender dazwischen.
+    * Jedem band wird eine von drei stufen zugewuerfelt (zone hell, guertel
+      mittel / dunkel), nie zweimal dieselbe nebeneinander. Konturen an den
+      bandgrenzen (wie die stufen-konturen der planeten), feines gitternetz
+      darunter, keine figuren und keine grosskreis-ringe.
+    """
+    seed = int(seed) & _MASK32
+    rnd = _Rng((seed * 2654435761 + 98765) & _MASK32)
+    s = seed & 0xffff
+    tilt = (rnd() - 0.5) * 2.0 * math.radians(24.0)
+    tip = (rnd() - 0.5) * 2.0 * math.radians(22.0)
+    axis = np.asarray([-math.sin(tilt) * math.cos(tip),
+                       math.cos(tilt) * math.cos(tip),
+                       math.sin(tip)], dtype=np.float64)
+    density = 3.4 + rnd() * 2.2          # baender je halbkugel
+    phase = rnd()
+    swirl = 0.55 + rnd() * 0.35
+    freq = 2.2 + rnd() * 1.2
+    rot = _euler_matrix(rnd() * TAU, math.acos(2.0 * rnd() - 1.0), rnd() * TAU)
+
+    verts, faces, centers, edge_map = _visible_sphere(seed, detail, rot)
+    # Das rauschen im ungedrehten raum, die geometrie dann gedreht -- wie
+    # beim planeten: das muster haengt am seed, nicht an der lage.
+    cx, cy, cz = centers[:, 0], centers[:, 1], centers[:, 2]
+    turb = _fbm(cx * freq + 3.0, cy * freq * 2.6, cz * freq + 7.0, s, 3) - 0.5
+    verts = verts @ rot.T
+    centers = centers @ rot.T
+    lat = np.arcsin(np.clip(centers @ axis, -1.0, 1.0)) / (0.5 * math.pi)
+    band = np.floor(lat * density + phase + turb * swirl).astype(np.int64)
+
+    # Stufe je band: gewuerfelt, ohne zwei gleiche nachbarn.
+    lo, hi = int(band.min()), int(band.max())
+    tier_of = {}
+    prev = -1
+    for b in range(lo, hi + 1):
+        t = int(_hash3(b + 40, 7, 3, s + 1213) * 3.0) % 3
+        if t == prev:
+            t = (t + 1) % 3
+        tier_of[b] = t
+        prev = t
+    tiers = np.asarray([tier_of[int(b)] for b in band.tolist()], dtype=np.int64)
+
+    hue, sat_factor = _color_basis(color)
+    #: (hue-versatz, saettigung %, helligkeit %, alpha) je stufe.
+    looks = ((-4.0, 34.0, 74.0, 0.62),    # zone: hell, blass
+             (6.0, 52.0, 52.0, 0.56),     # guertel
+             (12.0, 58.0, 36.0, 0.52))    # dunkler guertel
+    vlist = verts.tolist()
+    clist = centers.tolist()
+    flist = faces.tolist()
+    tlist = tiers.tolist()
+    blist = band.tolist()
+
+    seg_rows = []
+    col_far = _hsl(hue, sat_factor, 0.0, 40.0, 70.0)
+    for (ia, ib), adj in edge_map.items():
+        depth = max(clist[f][2] for f in adj)
+        if depth <= 0.02:
+            continue
+        va, vb = vlist[ia], vlist[ib]
+        nx, ny, nz = _midpoint_normal(va, vb)
+        seg_rows.append((va[0], va[1], vb[0], vb[1], nx, ny, nz,
+                         col_far[0], col_far[1], col_far[2], 0.10, 1.0, 0.6))
+    under = len(seg_rows)
+
+    tri_rows = []
+    for f in np.nonzero(centers[:, 2] > 0.02)[0].tolist():
+        dh, sat, light, alpha = looks[tlist[f]]
+        col = _hsl(hue, sat_factor, dh, sat, light)
+        nx, ny, nz = clist[f]
+        for idx in flist[f]:
+            p = vlist[idx]
+            tri_rows.append((p[0], p[1], nx, ny, nz,
+                             col[0], col[1], col[2], alpha * 1.31, 0.06 / 1.31))
+
+    col_contour = _hsl(hue, sat_factor, 4.0, 70.0, 82.0)
+    for (ia, ib), adj in edge_map.items():
+        if len(adj) != 2 or blist[adj[0]] == blist[adj[1]]:
+            continue
+        va, vb = vlist[ia], vlist[ib]
+        if (va[2] + vb[2]) * 0.5 <= 0.03:
+            continue
+        nx, ny, nz = _midpoint_normal(va, vb)
+        seg_rows.append((va[0], va[1], vb[0], vb[1], nx, ny, nz,
+                         col_contour[0], col_contour[1], col_contour[2],
+                         0.55, 0.14 / 1.19, 1.6))
+    return _pack(tri_rows, seg_rows, under, seed, 'gas', detail, 3)
 
 
 def _emit_shape(shape, pa, pb, pc, n, fill, fill_alpha, stroke, line_alpha,

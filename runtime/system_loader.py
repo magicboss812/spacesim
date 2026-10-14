@@ -98,5 +98,7 @@ class SystemLoader:
             light_intensity=entry.get("light_intensity", 0.0),
             style_seed=entry.get("style_seed"),
             style_mode=entry.get("style_mode"),
-            style_shape=entry.get("style_shape")
+            style_shape=entry.get("style_shape"),
+            is_star=bool(entry.get("is_star", False)),
+            is_gas=bool(entry.get("is_gas", False))
         )

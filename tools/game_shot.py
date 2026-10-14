@@ -6,7 +6,7 @@ den framebuffer VOR present(), also genau das, was im fenster stuende.
     python tools/game_shot.py [breite hoehe] [-o datei.png] [--frames N]
                               [--node PRO,NRM] [--zoom SCALE]
                               [--hide all|KEY,KEY,...] [--dv PRO]
-                              [--horizon METRES]
+                              [--horizon METRES] [--focus NAME]
 """
 import argparse
 import json
@@ -43,6 +43,9 @@ parser.add_argument('--horizon', type=float, default=None,
                     help='gezeichnete laenge der vorhersagelinie in metern '
                          '(predictor.set_display_length) -- z. B. genau ein '
                          'umlauf, damit sich die apsiden nicht stapeln')
+parser.add_argument('--focus', default=None,
+                    help='kamera auf diesen koerper (name aus '
+                         'solar_system.json), z. B. "Jupiter"')
 args = parser.parse_args()
 
 W, H = args.width, args.height
@@ -95,6 +98,15 @@ if args.dv and app.ship is not None:
 
 if args.horizon:
     app.predictor.set_display_length(float(args.horizon))
+
+if args.focus:
+    _target = next((b for b in app.world.body
+                    if getattr(b, 'name', '') == args.focus), None)
+    if _target is None:
+        raise SystemExit(f'--focus: kein koerper {args.focus!r}')
+    app.camera.follow(_target)
+    app.camera.position = _target.position.copy()
+    app.camera.target_position = _target.position.copy()
 
 if args.zoom is not None:
     app.camera.scale = float(args.zoom)
