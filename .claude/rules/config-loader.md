@@ -33,7 +33,8 @@ passed through `predictor_kwargs()`, not re-assigned afterwards.
 
 One per line, strict JSON with no comments. Sections: `window`, `simulation`,
 `physics`, `camera`, `ship`, `predictor`, `renderer`, `background`,
-`screenshot` (`directory`, read by `ConfigLoader.screenshot_dir()`; relative
+`warp_to` (`apsis_margin_s`, `point_margin_s`, `lead_real_seconds`, via
+`warp_to_kwargs()`), `screenshot` (`directory`, read by `ConfigLoader.screenshot_dir()`; relative
 paths resolve from the repo root, since `SPACESIM_CONFIG` may point into a
 temp folder), `debug`.
 

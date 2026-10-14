@@ -37,10 +37,28 @@ class InputRouter:
     # -- maus ---------------------------------------------------------------
 
     def handle_world_click(self, screen_pos):
-        """Auswahl / anflug. Aendert WEDER bezugskoerper NOCH bezugsrahmen."""
+        """Auswahl / anflug. Aendert WEDER bezugskoerper NOCH bezugsrahmen.
+
+        Reihenfolge der treffer: eine Ap/Pe-raute (heftet ihren zettel an),
+        ein koerper (auswahl / anflug), die vorhersagelinie (heftet den
+        punkt-zettel an), sonst nichts -- dann faellt die auswahl. Die
+        rauten zuerst, weil sie klein sind und auf der linie sitzen; die
+        linie zuletzt, weil sie durch das schiff selbst laeuft.
+
+        Der vorige zettel ist hier schon zu: UIRoot ruft beim druecken
+        `dismiss()` an jedem widget.
+        """
         app = self.app
+        hud = getattr(app, 'hud', None)
+        if hud is not None and hud.apsis_tooltip.pin_at(*screen_pos):
+            return
         index = app.renderer.pick_body(screen_pos, app.world.body, app.camera)
         if index is None:
+            if hud is not None:
+                t_abs = app.renderer.pick_prediction_time(
+                    screen_pos, app.camera, app.predictor)
+                if t_abs is not None and hud.point_tooltip.pin(t_abs):
+                    return
             app.ui_state.clear_selection()
             return
         if index == app.ui_state.selected_index:

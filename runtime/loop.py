@@ -122,6 +122,14 @@ def run(app):
             # ereignis, bekommen weder ImGui noch die welt es zu sehen.
             consumed_by_hud = app.ui_root.handle_event(event)
 
+            # JEDER NEUE KLICK bricht ein laufendes "WARP TO" ab
+            # (runtime/warp_to.py, regel 3). NACH dem HUD: der knopf am
+            # zettel merkt sich in on_mouse_down, ob er gerade ein laufendes
+            # ziel stoppt. Rad-"knoepfe" 4/5 sind kein klick.
+            if (event.type == pygame.MOUSEBUTTONDOWN
+                    and getattr(event, 'button', 1) in (1, 2, 3)):
+                app.warp_to.cancel('klick')
+
             # ImGui sieht die uebrigen ereignisse, damit es seinen eigenen
             # eingabezustand fuehren kann. Ob es die eingabe auch VERBRAUCHT,
             # entscheiden ui_wants_mouse / ui_wants_keyboard.
@@ -193,14 +201,21 @@ def run(app):
                              or keys[pygame.K_LEFT] or keys[pygame.K_RIGHT])):
                     app.maneuver_executor.notify_manual_input()
                     print("MANEUVER: abgebrochen (handeingabe)")
+                if keys[pygame.K_UP] or keys[pygame.K_DOWN]:
+                    app.warp_to.cancel('schub')
                 if app.thrust_allowed():
                     app.ship_control.apply_thrust(keys, frame_dt)
 
         # Raffung auf die bahn-zeitskala begrenzen. Das HUD blendet gesperrte
         # stufen bereits ab; das hier ist der riegel fuer PageUp/PageDown und
         # die dev-oberflaeche, die daran vorbeigehen.
+        # "WARP TO" waehlt seine stufe VOR dem riegel: _clamp_warp und der
+        # ausfuehrer duerfen sie danach noch senken, und note_applied merkt
+        # sich, was am ende stehen blieb.
+        app.warp_to.update(app.world, app.ship)
         _clamp_warp(app)
         _apply_maneuver(app)
+        app.warp_to.note_applied()
         # Horizont an die raffung anpassen (no-op, solange die stufe steht).
         _apply_horizon(app)
 
@@ -233,11 +248,16 @@ def run(app):
                if app.maneuver_executor is not None else None)
         if cap is not None:
             sim_step = min(sim_step, max(1e-9, cap))
+        # "WARP TO" deckelt genauso: nie ueber das ziel hinaus.
+        warp_cap = app.warp_to.max_sim_seconds(app.world)
+        if warp_cap is not None and not paused:
+            sim_step = min(sim_step, warp_cap)
         # Das delta-v des SCHRITTES anlegen, BEVOR er gegangen wird -- so
         # traegt die positionsintegration dieses schrittes es bereits.
         if app.maneuver_executor is not None and not paused:
             app.maneuver_executor.update(app.world, sim_step)
         app.world.step(sim_step, app.max_substep)
+        app.warp_to.after_step(app.world)
 
         # kamera mit echtem frame-delta fuer interaktives panning aktualisieren
         # (zoom/schwenk laufen ihren zielen geglaettet nach)

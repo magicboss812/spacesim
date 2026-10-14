@@ -26,6 +26,7 @@ HUD_ELEMENTS = (
     ('snaps', 'snap rosette', ('snaps', 'snaps_compact')),
     ('left_stack', 'frame / zoom / predict', ('left_stack',)),
     ('apsis_tooltip', 'apsis tooltip', ('apsis_tooltip',)),
+    ('point_tooltip', 'orbit-point tooltip', ('point_tooltip',)),
 )
 
 #: (schluessel, beschriftung, attribut am renderer). Der renderer liest die
@@ -91,6 +92,12 @@ class HudVisibility:
                 # sichtbar im leeren.
                 tooltip.drawn = (self.is_shown('apsis_tooltip')
                                  and self.is_shown('apsis_markers'))
+            point = getattr(hud, 'point_tooltip', None)
+            if point is not None:
+                # Die marke des punktes zeichnet der renderer unter demselben
+                # schalter wie die rauten (`draw_apsis_markers`).
+                point.drawn = (self.is_shown('point_tooltip')
+                               and self.is_shown('apsis_markers'))
             gizmo = getattr(hud, 'gizmo', None)
             if gizmo is not None:
                 # Der ziehgriff zeichnet nichts selbst, er IST die eingabe zu

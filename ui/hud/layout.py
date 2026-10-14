@@ -31,6 +31,7 @@ from ..core import (
 from ..widgets import Stack
 from ..widgets.rate_slider import HorizonSlider
 from .apsis_tooltip import ApsisTooltip
+from .point_tooltip import PointTooltip
 from .body_browser import BodyBrowser
 from .maneuver import (ManeuverAxesBlock, ManeuverBurnBlock, ManeuverGizmo,
                        ManeuverNodesBar, ManeuverPlanBlock)
@@ -163,6 +164,8 @@ class Hud:
         # und steht deshalb ausserhalb jeder gruppe -- sein platz kommt aus
         # der weltposition des markers, nicht aus der verankerung.
         self.apsis_tooltip = root.add(ApsisTooltip(telemetry))
+        # Sein bruder am ANGEKLICKTEN bahnpunkt (ui/hud/point_tooltip.py).
+        self.point_tooltip = root.add(PointTooltip(telemetry))
         self.target_rail = root.add(IconRail(
             [{'key': 'TG'}, {'key': 'D'}, {'key': 'V'}],
             color_role='target', anchor=CENTER_LEFT, offset=(MARGIN, 0),

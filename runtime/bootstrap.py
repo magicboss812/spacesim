@@ -32,6 +32,8 @@ from ui import UIContext, UIRoot, UIState
 from ui.devui import DevContext, ImguiLayer
 from ui.hud import Hud, HudVisibility
 from runtime.screenshot import ScreenshotWriter
+from runtime.warp_to import WarpTo
+from ui.hud.layout import WARP_STEPS
 
 
 def load_config():
@@ -143,7 +145,7 @@ class App:
         'predictor_toggle_points', 'predictor_min_precision', 'precision_step',
         'maneuver_plan', 'maneuver_preview', 'maneuver_executor',
         'maneuver_config', 'selected_node_index', 'maneuver_router_ref',
-        'screenshot', 'hud_visibility',
+        'screenshot', 'hud_visibility', 'warp_to',
     )
 
     def warp_rate(self):
@@ -271,6 +273,8 @@ def build_app(config):
         length_mult_min=mc['preview_length_mult_min'],
         length_mult_max=mc['preview_length_mult_max'],
         async_compute=mc['preview_async'],
+        # Dieselbe obergrenze wie die vorhersagelinie (predictor.apsis_max_markers).
+        apsis_max_markers=int(getattr(predictor, 'apsis_max_markers', 16)),
     )
     app.maneuver_executor = ManeuverExecutor(
         app.maneuver_plan, app.ship, app.ship_control, camera=app.camera,
@@ -426,6 +430,14 @@ def build_app(config):
     # Echtzeit muss bei JEDER bildrate erreichbar sein -- sonst bleibt der
     # schub dauerhaft gesperrt. Begruendung steht bei Camera.allow_warp_rate.
     app.camera.allow_warp_rate(app.realtime_warp_max, app.tick_rate)
+
+    # "WARP TO" am angehefteten schwebezettel (runtime/warp_to.py). Die
+    # zettel erreichen es ueber die telemetrie, wie der ausfuehrer.
+    app.warp_to = WarpTo(
+        app.camera, app.tick_rate, WARP_STEPS, app.realtime_warp_max,
+        app.warp_timescale_divisor, **config.warp_to_kwargs())
+    if app.hud is not None:
+        app.hud.telemetry.warp_to = app.warp_to
 
     # F12 / dev-knopf. Gezogen wird in runtime/loop.py zwischen HUD und
     # dev-oberflaeche.

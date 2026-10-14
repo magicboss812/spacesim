@@ -274,6 +274,19 @@ class Renderer(
         self.apsis_tooltip_hover_px = 14.0
         #: (sx, sy, radius_px, is_apoapsis, distance_m, t_abs, alpha)
         self.apsis_marker_hits = []
+        #: Dieselben treffer fuer die Ap/Pe der GEPLANTEN bahn
+        #: (render/maneuver.py), mit zwei feldern mehr:
+        #: `(..., alpha, True, v_rel)` -- kennung und tempo am marker.
+        self.preview_apsis_marker_hits = []
+        #: Der angeklickte punkt der vorhersagelinie (ui/hud/point_tooltip.py):
+        #: seine ZEIT, gesetzt vom zettel; der renderer wertet sie jedes bild
+        #: auf der linie aus und meldet `(sx, sy, x, y, vx, vy, t)` zurueck.
+        self.trajectory_pin_t = None
+        self.trajectory_pin_hit = None
+        #: Klick-reichweite auf die linie (px) und wie viele punkte dafuer
+        #: projiziert werden -- einmal je klick, nie je frame.
+        self.trajectory_pick_max_px = 10.0
+        self.trajectory_pick_points = 4000
 
         # -- manoeverknoten (render/maneuver.py) ---------------------------
         #: Vom bootstrap gesetzt; der renderer besitzt sie nicht.
@@ -966,6 +979,8 @@ class Renderer(
         # duenne linien und kleine pfeilspitzen, und ein kantenfilter
         # verschmiert genau die.
         self.draw_maneuver(camera, bodies)
+        # Der angeklickte bahnpunkt, aus demselben grund nach dem resolve.
+        self._draw_trajectory_pin(predictor, camera)
 
         # Auswahl-markierung ebenfalls nach dem FXAA-resolve, aus demselben
         # grund wie die beschriftungen -- und vor ihnen, damit ein label nicht

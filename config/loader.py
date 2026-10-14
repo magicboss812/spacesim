@@ -373,6 +373,21 @@ class ConfigLoader:
             'dv_step_coarse': float(self.get('maneuver.dv_step_coarse', 10.0)),
         }
 
+    def warp_to_kwargs(self) -> dict:
+        """warp_to-abschnitt -> runtime/warp_to.py::WarpTo.
+
+        `apsis_margin_s`: so viel VOR einer apsis haelt "WARP TO" an (zeit
+        zum ausrichten und brennen). `point_margin_s`: dasselbe vor einem
+        angeklickten bahnpunkt, vorgabe 0 -- dort will man ankommen.
+        `lead_real_seconds`: mindestens so viel echtzeit muss die restzeit
+        auf einer stufe noch dauern, sonst geht es eine stufe tiefer.
+        """
+        return {
+            'apsis_margin_s': self.get_float('warp_to.apsis_margin_s', 1800.0),
+            'point_margin_s': self.get_float('warp_to.point_margin_s', 0.0),
+            'lead_real_seconds': self.get_float('warp_to.lead_real_seconds', 1.5),
+        }
+
     def screenshot_dir(self) -> str:
         """Zielordner der F12-fotos (`screenshot.directory`).
 

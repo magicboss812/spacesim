@@ -203,6 +203,7 @@ class ManeuverDrawMixin:
         """
         self.maneuver_node_hits = []
         self.maneuver_curve_screen = _EMPTY_SCREEN
+        self.preview_apsis_marker_hits = []
         if not getattr(self, 'maneuver_enabled', True):
             return
         preview = getattr(self, 'maneuver_preview', None)
@@ -226,6 +227,16 @@ class ManeuverDrawMixin:
                 )
                 self._draw_maneuver_end_caps(
                     bodies, camera, camera_frame_xy, points, run)
+
+        # -- Ap/Pe der geplanten bahn, mit der routine der vorhersagelinie.
+        #    VOR den knotenmarkern, damit ein griff nie unter einer raute
+        #    verschwindet.
+        apsides = getattr(preview, 'apsis_markers', None)
+        if (apsides is not None and len(apsides)
+                and getattr(self, 'show_apsis_markers', True)):
+            self._draw_apsis_marker_rows(
+                apsides, len(apsides), camera, camera_frame_xy,
+                self.preview_apsis_marker_hits, style='preview')
 
         # -- waehrend eines MARKER-zugs: die BASISlinie in schirmkoordinaten,
         #    damit der marker an ihr entlang geschoben werden kann.

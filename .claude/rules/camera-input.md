@@ -129,7 +129,9 @@ alone.
   `tests/prediction_projection_test.py` silently relied on (a sync rebuild
   freezing the line for each batch/scalar render pair) — its `draw_runs` now
   takes `refresh=False` for the second render of a pair instead.
-- **Left-click selects a body; a second click on it flies there.** `Home`
+- **Left-click selects a body; a second click on it flies there.** Before
+  the bodies an Ap/Pe diamond is tried (pins its tooltip), after them the
+  prediction line (pins the point tooltip); see `.claude/rules/hud-ui.md`. `Home`
   returns to the ship, a click on empty space deselects. The ship is in the
   pick list like any other object.
 
@@ -339,6 +341,21 @@ alone.
 > longest main-thread gap **6–11 ms** (idle 0.8 ms).
 > Folder `screenshot.directory` (relative = repo root, git-ignored), name
 > `spacesim_YYYY-MM-DD_HHMMSS.png`, `_2`… within the same second.
+- **WARP TO** (`runtime/warp_to.py`, from a pinned tooltip). Per frame,
+  before `_clamp_warp`, the highest step that the orbit allows (same cap as
+  `clamp_warp_to_timescale`) and on which the remaining time still takes
+  `warp_to.lead_real_seconds` (1.5) of real time; the sim step is capped at
+  the remaining time like `maneuver_executor.max_sim_seconds`, so it cannot
+  overshoot. Arrival drops to the lowest step (1m/s), **not** pause: one
+  usually warps to an apsis to burn there, and thrust is real-time only.
+  Cancelled by a manual warp change (detected as `sim_dt` differing at frame
+  start from what `note_applied` saw after `_apply_maneuver`), pause, thrust
+  keys and any mouse press (buttons 1–3; wheel 4/5 is not a click).
+  Measured through `runtime.loop.run` with posted clicks: an Ap 171 043 s
+  ahead → steps 1d/s, 1h/s, 10m/s, 1m/s, stop at target − 1800 s with
+  **0.000e+00 s** difference; a Pe 1185 s ahead offers a greyed button and
+  the click starts nothing; a line point 5370 s ahead → 0 s difference, ship
+  11.9 m from the point drawn at pin time.
 - **Warp steps are `1m/s, 10m/s, 1h/s, 1d/s, 7d/s, 30d/s, 100d/s, 1y/s`**
   (`ui/hud/layout.py::WARP_STEPS`, sim-seconds per real second). The top
   three were added 2026-08-18; steps that the current orbit cannot resolve
