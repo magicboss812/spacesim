@@ -117,6 +117,10 @@ class Renderer(
         self._body_cell_disc_program = None
         self._body_cell_disc_vao = None
         self._body_cell_fill_program = None
+        self._body_cell_clean_program = None
+        self._body_cell_clean_vao = None
+        self._body_clean_fbo = None
+        self._body_clean_textures = ()
         self._body_layer_fbo = None
         self._body_layer_tex = None
         self._body_layer_size = None
@@ -126,6 +130,7 @@ class Renderer(
         self._body_cell_fbo = None
         self._body_cell_textures = ()
         self._body_cell_cap = (0, 0)
+        self._body_gas_params = {}
         self._deferred_icons = []
         self._body_icon_cache = {}
         self._icon_viewport = None
@@ -552,6 +557,13 @@ class Renderer(
         self.body_pixel_size_small = 3.0
         # Unter so vielen GROSSEN zellen radius nimmt ein koerper die kleine.
         self.body_pixel_small_cells = 16.0
+        # Breite des wechselbands klein <-> gross als faktor auf den radius
+        # (je seite); darin werden beide fassungen per dissolve aufgeteilt.
+        self.body_pixel_cell_blend = 1.25
+        # Detail-ueberblendung im pixel-stil (statt body_vector_detail_blend):
+        # dort ist sie ein dissolve aus einzelnen zellen, und ein breites
+        # band liess einen RUHENDEN koerper oft gesprenkelt stehen.
+        self.body_pixel_detail_blend = 0.2
         # Facettenziel der detailleiter in zellen, statt body_vector_facet_px.
         self.body_pixel_facet_cells = 4.0
         # Dichte des punktmatrix-halos an der kante (faellt nach aussen ab).

@@ -196,6 +196,8 @@
     "body_pixel_size": 6.0,
     "body_pixel_size_small": 3.0,
     "body_pixel_small_cells": 16.0,
+    "body_pixel_cell_blend": 1.25,
+    "body_pixel_detail_blend": 0.2,
     "body_pixel_facet_cells": 4.0,
     "body_pixel_halo_density": 0.55,
     "orbit_lines_enabled": true,

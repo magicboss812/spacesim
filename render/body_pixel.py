@@ -19,6 +19,7 @@ import zlib
 
 import moderngl
 
+from bodies import style as body_style
 from ui import theme as ui_theme
 
 
@@ -35,6 +36,14 @@ def _mix(a, b, t):
     return tuple(float(x) + (float(y) - float(x)) * t for x, y in zip(a, b))
 
 
+def _put(prog, name, value):
+    """Uniform schreiben; eines, das der compiler wegoptimiert hat (je
+    art der scheibe wird nicht jedes gebraucht), ist kein fehler."""
+    member = prog.get(name, None)
+    if member is not None:
+        member.value = value
+
+
 class BodyPixelMixin:
     """Zellpass, zusammenbau und ebene der pixel-koerper."""
 
@@ -45,31 +54,45 @@ class BodyPixelMixin:
                 and self._body_cell_disc_program is not None
                 and self._body_cell_disc_vao is not None
                 and self._body_cell_fill_program is not None
+                and self._body_cell_clean_vao is not None
                 and self._body_pixel_program is not None
                 and self._body_pixel_vao is not None
                 and self._body_layer_program is not None
                 and self._body_layer_vao is not None)
 
-    def _body_pixel_cell_px(self, radius_px):
-        """Zellkante k in ganzen pixeln fuer einen koerper dieses radius.
-
-        Zwei stufen auf EINEM raster: die grosse zelle ist das doppelte der
-        kleinen, und die kleine ist die teilung des hintergrund-rasters.
-        Ein kleiner koerper bekommt die kleine zelle, sonst bliebe von ihm
-        ein klecks aus vier zellen."""
-        big = max(2, int(round(self.ui_px(float(self.body_pixel_size)))))
+    def _body_pixel_cells(self):
+        """(k_klein, k_gross) in ganzen pixeln, k_gross IMMER ein ganzes
+        vielfaches von k_klein -- sonst deckt eine grosse zelle keine 2 x 2
+        kleinen, und der dissolve beim wechsel liefe quer durch zellen."""
         small = max(2, int(round(self.ui_px(float(self.body_pixel_size_small)))))
-        if float(radius_px) < float(self.body_pixel_small_cells) * big:
-            return min(small, big)
-        return big
+        ratio = max(1, int(round(float(self.body_pixel_size)
+                                 / max(1e-6, float(self.body_pixel_size_small)))))
+        return small, small * ratio
+
+    def _body_pixel_cell_mix(self, radius_px):
+        """Anteil der grossen zelle, 0..1. Um `body_pixel_small_cells`
+        grosse zellen radius herum ein band in log(radius) -- dort werden
+        beide fassungen gezeichnet und per dissolve aufgeteilt."""
+        small, big = self._body_pixel_cells()
+        if big == small:
+            return 1.0
+        switch = float(self.body_pixel_small_cells) * big
+        band = max(1.01, float(self.body_pixel_cell_blend))
+        t = (math.log(max(float(radius_px), 1e-3)) - math.log(switch / band)) / (
+            2.0 * math.log(band))
+        t = max(0.0, min(1.0, t))
+        return t * t * (3.0 - 2.0 * t)
 
     def _body_facet_target_px(self, radius_px):
-        """Facettenziel der detailleiter: im pixel-stil in ZELLEN, damit eine
-        region immer viele zellen gross ist und nie zu brei zerfaellt."""
+        """Facettenziel der detailleiter, im pixel-stil in GROSSEN zellen.
+
+        Fest an k_gross, nicht an der gerade benutzten zelle: haengt das ziel
+        an der aktuellen zellgroesse, springt es beim zellwechsel mit, und
+        die leiter geht beim heranzoomen eine stufe ZURUECK."""
         target = max(1.0, float(self.body_vector_facet_px))
         if self._body_layer_active:
-            cells = float(self.body_pixel_facet_cells)
-            target = max(target, cells * self._body_pixel_cell_px(radius_px))
+            target = max(target, float(self.body_pixel_facet_cells)
+                         * self._body_pixel_cells()[1])
         return target
 
     @staticmethod
@@ -97,11 +120,17 @@ class BodyPixelMixin:
                 t.filter = (moderngl.NEAREST, moderngl.NEAREST)
             self._body_cell_textures = (cells, ids)
             self._body_cell_fbo = self.ctx.framebuffer(color_attachments=[cells, ids])
+            clean = (self.ctx.texture(cap, 4), self.ctx.texture(cap, 4))
+            for t in clean:
+                t.filter = (moderngl.NEAREST, moderngl.NEAREST)
+            self._body_clean_textures = clean
+            self._body_clean_fbo = self.ctx.framebuffer(color_attachments=list(clean))
             self._body_cell_cap = cap
 
     def _release_body_pixel_targets(self):
         for obj in [self._body_layer_fbo, self._body_layer_tex,
-                    self._body_cell_fbo, *self._body_cell_textures]:
+                    self._body_cell_fbo, *self._body_cell_textures,
+                    self._body_clean_fbo, *self._body_clean_textures]:
             if obj is not None:
                 try:
                     obj.release()
@@ -111,6 +140,8 @@ class BodyPixelMixin:
         self._body_layer_tex = None
         self._body_cell_fbo = None
         self._body_cell_textures = ()
+        self._body_clean_fbo = None
+        self._body_clean_textures = ()
         self._body_cell_cap = (0, 0)
         self._body_layer_size = None
 
@@ -176,14 +207,57 @@ class BodyPixelMixin:
     def _draw_body_pixel(self, body, x, y, radius_px, style_layers, fade,
                          light, emissive, rgb, atmos_rgb, has_atmos,
                          light_intensity):
-        """Zellpass + zusammenbau eines koerpers. True, wenn gezeichnet."""
-        k = self._body_pixel_cell_px(radius_px)
+        """Ein koerper im pixel-stil. True, wenn gezeichnet.
+
+        Im uebergang zwischen kleiner und grosser zelle wird er zweimal
+        gezeichnet und radial aufgeteilt: innen die grosse zelle, aussen die
+        kleine, die grenze waechst mit dem zoom nach aussen -- statt dass die
+        zelle in einem frame umspringt."""
+        small, big = self._body_pixel_cells()
+        t = self._body_pixel_cell_mix(radius_px)
+        if t <= 0.0:
+            return self._draw_body_pixel_at(small, None, body, x, y, radius_px,
+                                            style_layers, fade, light, emissive,
+                                            rgb, atmos_rgb, has_atmos, light_intensity)
+        if t >= 1.0:
+            return self._draw_body_pixel_at(big, None, body, x, y, radius_px,
+                                            style_layers, fade, light, emissive,
+                                            rgb, atmos_rgb, has_atmos, light_intensity)
+        a = self._draw_body_pixel_at(big, (0.0, t, big), body, x, y, radius_px,
+                                     style_layers, fade, light, emissive,
+                                     rgb, atmos_rgb, has_atmos, light_intensity)
+        b = self._draw_body_pixel_at(small, (t, 1.0, big), body, x, y, radius_px,
+                                     style_layers, fade, light, emissive,
+                                     rgb, atmos_rgb, has_atmos, light_intensity)
+        return a or b
+
+    def _gas_uniforms(self, body):
+        key = self._body_style_key(body, 'gas')
+        cached = self._body_gas_params.get(key)
+        if cached is None:
+            gp = body_style.gas_params(key[0], key[3])
+            rot = gp['rot']
+            cached = {
+                'rot': tuple(float(v) for v in rot.T.flatten()),   # spaltenweise
+                'axis': tuple(float(v) for v in gp['axis']),
+                'gas': (float(gp['density']), float(gp['phase']),
+                        float(gp['swirl']), float(gp['freq'])),
+                'tiers': [int(v) for v in gp['tiers']],
+                'cols': [tuple(float(c) for c in col) for col in gp['colors']],
+            }
+            self._body_gas_params[key] = cached
+        return cached
+
+    def _draw_body_pixel_at(self, k, dissolve, body, x, y, radius_px,
+                            style_layers, fade, light, emissive, rgb,
+                            atmos_rgb, has_atmos, light_intensity):
         w, h = int(self.width), int(self.height)
         # Die mitte auf ganze pixel: der koerper bewegt sich in 1-px-schritten
         # mit seiner bahnlinie, und das zellraster haengt an IHM.
         ox, oy = int(round(x)), int(round(y))
         is_star = bool(getattr(body, 'is_star', False))
-        kind = 1 if is_star else (2 if getattr(body, 'is_gas', False) else 0)
+        is_gas = bool(getattr(body, 'is_gas', False))
+        kind = 1 if is_star else (2 if is_gas else 0)
 
         reach = float(radius_px) + 2.0 * k
         i0 = math.floor((max(0.0, ox - reach) - ox) / k)
@@ -200,6 +274,7 @@ class BodyPixelMixin:
         center_rel = (float(ox - origin[0]), float(oy - origin[1]))
         viewport = (float(gw * k), float(gh * k))
         seed = float(self._body_pixel_seed(body))
+        light3 = tuple(float(c) for c in light)
 
         ctx = self.ctx
         try:
@@ -210,45 +285,80 @@ class BodyPixelMixin:
             fbo.clear(0.0, 0.0, 0.0, 0.0, viewport=(0, 0, gw, gh))
             ctx.disable(moderngl.BLEND)
 
+            art = (kind == 0 and bool(style_layers) and fade > 0.0)
             prog = self._body_cell_disc_program
-            prog['u_center_px'].value = center_rel
-            prog['u_outer_radius_px'].value = float(radius_px)
-            prog['u_viewport'].value = viewport
-            prog['u_base_color'].value = tuple(float(c) for c in rgb)
-            prog['u_light'].value = tuple(float(c) for c in light)
-            prog['u_light_exp'].value = float(self.body_light_exponent)
-            prog['u_emissive'].value = float(emissive)
-            prog['u_ground'].value = 0.0 if is_star else (1.0 if style_layers and fade >= 0.5 else 0.0)
-            prog['u_cell'].value = float(k)
-            prog['u_seed'].value = seed
-            prog['u_dither_range'].value = (0.0, 1.0)
+            _put(prog, 'u_center_px', center_rel)
+            _put(prog, 'u_outer_radius_px', float(radius_px))
+            _put(prog, 'u_body_radius', float(radius_px))
+            _put(prog, 'u_viewport', viewport)
+            _put(prog, 'u_base_color', tuple(float(c) for c in rgb))
+            _put(prog, 'u_light', light3)
+            _put(prog, 'u_light_exp', float(self.body_light_exponent))
+            _put(prog, 'u_emissive', float(emissive))
+            _put(prog, 'u_ground', 1.0 if art else 0.0)
+            _put(prog, 'u_cell', float(k))
+            _put(prog, 'u_seed', seed)
+            _put(prog, 'u_dither_range', (0.0, 1.0))
+            _put(prog, 'u_tag', 0.4)
+            _put(prog, 'u_kind', int(kind))
+            if kind == 2:
+                gas = self._gas_uniforms(body)
+                _put(prog, 'u_gas_rot', gas['rot'])
+                _put(prog, 'u_gas_axis', gas['axis'])
+                _put(prog, 'u_gas', gas['gas'])
+                _put(prog, 'u_gas_tiers', gas['tiers'])
+                _put(prog, 'u_gas_band_min', int(body_style.GAS_BAND_MIN))
+                _put(prog, 'u_gas_col', gas['cols'])
             self._body_cell_disc_vao.render(moderngl.TRIANGLE_STRIP)
 
-            # KEINE ueberblendung im pixel-stil: zwei detailstufen (oder
-            # zeichnung und grund) im bayer-wechsel ergaben je zelle eine
-            # andere region, und jede zelle bekam ihren eigenen grenzstrich.
-            # Die staerkere stufe gewinnt, die zeichnung kommt ab halber
-            # einblendung ganz.
-            prog = self._body_cell_fill_program
-            prog['u_center_px'].value = center_rel
-            prog['u_radius_px'].value = float(radius_px)
-            prog['u_viewport'].value = viewport
-            prog['u_light'].value = tuple(float(c) for c in light)
-            prog['u_light_exp'].value = float(self.body_light_exponent)
-            prog['u_emissive'].value = float(emissive)
-            # Ein-/ausblenden geht ueber den dither-bereich, nicht ueber alpha.
-            prog['u_fade'].value = 1.0
-            prog['u_cell'].value = float(k)
-            prog['u_seed'].value = seed
-            prog['u_dither_range'].value = (0.0, 1.0)
-            if style_layers and fade >= 0.5:
-                entry = max(style_layers, key=lambda item: item[1])[0]
-                vao = self._body_cell_vao(entry)
-                if vao is not None:
+            if art:
+                # Ueberblendungen als geordneter dissolve JE ZELLE: die
+                # zeichnung belegt den bayer-bereich [0, fade), darin jede
+                # detailstufe ihren anteil. Jede stufe traegt ihr eigenes
+                # kennzeichen, und der zusammenbau zieht keine striche
+                # zwischen verschiedenen -- sonst bekaeme jede gewechselte
+                # zelle einen rahmen.
+                prog = self._body_cell_fill_program
+                _put(prog, 'u_center_px', center_rel)
+                _put(prog, 'u_radius_px', float(radius_px))
+                _put(prog, 'u_body_radius', float(radius_px))
+                _put(prog, 'u_viewport', viewport)
+                _put(prog, 'u_light', light3)
+                _put(prog, 'u_light_exp', float(self.body_light_exponent))
+                _put(prog, 'u_emissive', float(emissive))
+                _put(prog, 'u_fade', 1.0)
+                _put(prog, 'u_cell', float(k))
+                _put(prog, 'u_seed', seed)
+                # Innen die HOEHERE stufe (sie kommt beim heranzoomen dazu),
+                # aussen die niedrigere, dahinter der grund.
+                acc = 0.0
+                for entry, weight in reversed(style_layers):
+                    lo = acc * fade
+                    acc += weight
+                    hi = acc * fade
+                    if hi - lo < 1e-4:
+                        continue
+                    vao = self._body_cell_vao(entry)
+                    if vao is None:
+                        continue
+                    level = entry['style'].subdiv if entry.get('style') is not None else 0
+                    # Volle einblendung deckt auch den groessten bayer-wert (15.5/16).
+                    _put(prog, 'u_dither_range', (lo, 1.01 if (acc >= 0.9999 and fade >= 0.9999) else hi))
+                    _put(prog, 'u_tag', 0.8 if int(level) % 2 else 1.0)
                     vao.render(moderngl.TRIANGLES)
+            # Putz-pass: waisen weg, im zellraster statt je bildschirmpixel.
+            clean = self._body_clean_fbo
+            clean.use()
+            clean.viewport = (0, 0, gw, gh)
+            prog = self._body_cell_clean_program
+            prog['u_rect'].value = (-1.0, -1.0, 1.0, 1.0)
+            prog['u_grid'].value = (int(gw), int(gh))
+            cells_tex, ids_tex = self._body_cell_textures
+            cells_tex.use(location=0)
+            ids_tex.use(location=1)
+            self._body_cell_clean_vao.render(moderngl.TRIANGLE_STRIP)
         except Exception as exc:
             self.debug_info['body_pixel_error'] = f"cells: {type(exc).__name__}: {exc}"
-            ctx.enable(moderngl.BLEND)
             return False
         finally:
             ctx.enable(moderngl.BLEND)
@@ -257,11 +367,11 @@ class BodyPixelMixin:
         if is_star and float(light_intensity) > 0.0:
             halo_r, halo_a, halo_d = 3.0, 0.85, float(self.body_pixel_halo_density) * 1.4
         else:
-            glow = float(self.body_glow_alpha) * fade
+            glow = float(self.body_glow_alpha) * max(fade, 0.5)
             halo_r = 1.45 if glow > 0.0 else 0.0
             halo_a = min(1.0, glow * 4.5)
             halo_d = float(self.body_pixel_halo_density)
-        outer = float(radius_px) * max(1.0, halo_r) + 2.0 * k
+        outer = float(radius_px) * max(1.0, halo_r) + 4.0 * k
         x0 = max(0, int(math.floor(ox - outer)))
         y0 = max(0, int(math.floor(oy - outer)))
         x1 = min(w, int(math.ceil(ox + outer)))
@@ -290,12 +400,18 @@ class BodyPixelMixin:
             prog['u_origin'].value = (float(origin[0]), float(origin[1]))
             prog['u_grid'].value = (int(gw), int(gh))
             prog['u_k'].value = int(k)
+            if dissolve is None:
+                prog['u_dissolve'].value = (0.0, 1.0, 0.0)
+                prog['u_k_big'].value = int(k)
+            else:
+                prog['u_dissolve'].value = (float(dissolve[0]), float(dissolve[1]), 1.0)
+                prog['u_k_big'].value = int(dissolve[2])
             prog['u_center'].value = (float(ox), float(oy))
             prog['u_radius'].value = float(radius_px)
-            prog['u_light'].value = tuple(float(c) for c in light)
+            prog['u_light'].value = light3
+            prog['u_light_exp'].value = float(self.body_light_exponent)
             prog['u_emissive'].value = float(emissive)
             prog['u_kind'].value = int(kind)
-            prog['u_seed'].value = seed
             prog['u_grout'].value = grout
             prog['u_rim'].value = rim
             prog['u_atmos'].value = (float(atmos_rgb[0]), float(atmos_rgb[1]),
@@ -303,7 +419,7 @@ class BodyPixelMixin:
             prog['u_halo'].value = (halo_rgb[0], halo_rgb[1], halo_rgb[2], float(halo_a))
             prog['u_halo_radius'].value = float(halo_r)
             prog['u_halo_density'].value = float(halo_d)
-            cells, ids = self._body_cell_textures
+            cells, ids = self._body_clean_textures
             cells.use(location=0)
             ids.use(location=1)
             self._body_pixel_vao.render(moderngl.TRIANGLE_STRIP)

@@ -590,6 +590,8 @@ class ConfigLoader:
             ('body_pixel_size', 'body_pixel_size', float),
             ('body_pixel_size_small', 'body_pixel_size_small', float),
             ('body_pixel_small_cells', 'body_pixel_small_cells', float),
+            ('body_pixel_cell_blend', 'body_pixel_cell_blend', float),
+            ('body_pixel_detail_blend', 'body_pixel_detail_blend', float),
             ('body_pixel_facet_cells', 'body_pixel_facet_cells', float),
             ('body_pixel_halo_density', 'body_pixel_halo_density', float),
             # Bahnlinien der koerper (orbit_lines.py)

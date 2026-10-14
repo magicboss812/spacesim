@@ -1,33 +1,39 @@
 #version 330
 
 // Zusammenbau eines koerpers aus seinem zellraster, in VOLLER aufloesung.
-// Hier entsteht, was ein hochgezogenes bild nie haben kann:
-//  - jede zelle ist eine LED: gefastes quadrat mit 1-px-spalt (fuge in der
-//    dunkelsten farbe des koerpers), und ihre groesse ist der halbton;
-//  - 1-px-striche in voller aufloesung: zwischen regionen ungleicher
-//    grundfarbe (in der fuge) und am beleuchteten rand;
-//  - ausserhalb: eine punktreihe atmosphaere und der halo als punktmatrix.
+//  - jede zelle ist eine LED: gefastes quadrat; die 1-px-fuge zeigt sich nur
+//    auf der lichtseite und am rand -- innen liest der koerper als flaeche;
+//  - der halbton ist die zellgroesse;
+//  - 1-px-striche zwischen regionen, die sich in der HELLIGKEIT klar
+//    unterscheiden, und am beleuchteten rand;
+//  - ausserhalb: atmosphaere als punktreihe, halo als punktmatrix, beim
+//    stern davor zwei gestufte glutringe.
+//  - u_dissolve: beim wechsel der zellgroesse werden zwei fassungen gezeichnet
+//    und je GROSSER zelle (bayer) aufgeteilt -- ein pixel-dissolve statt
+//    eines sprungs.
 //
 // Koordinaten: top-down-pixel; u_origin ist die linke obere ecke der zelle
 // (0, 0) des zellpuffers, eine GANZE pixelposition.
 
 uniform sampler2D u_cells;     // einheit 0: farbe + halbton
-uniform sampler2D u_ids;       // einheit 1: regions-kennung + belegt
-uniform vec2 u_target;         // groesse des ziels in pixeln
+uniform sampler2D u_ids;       // einheit 1: regions-kennung + kennzeichen
+uniform vec2 u_target;
 uniform vec2 u_origin;
-uniform ivec2 u_grid;          // belegte zellen im puffer
-uniform int u_k;               // zellkante in pixeln
-uniform vec2 u_center;         // koerpermitte, top-down, ganze pixel
-uniform float u_radius;        // kernradius in pixeln
-uniform vec3 u_light;          // zur lichtquelle, scheiben-raum (y nach oben)
+uniform ivec2 u_grid;
+uniform int u_k;
+uniform int u_k_big;           // zelle, nach der der dissolve aufteilt
+uniform vec3 u_dissolve;       // lo, hi, an (> 0.5): pixel nur, wenn lo <= bayer < hi
+uniform vec2 u_center;
+uniform float u_radius;
+uniform vec3 u_light;
+uniform float u_light_exp;
 uniform float u_emissive;
 uniform int u_kind;            // 0 planet, 1 stern, 2 gasriese
-uniform float u_seed;
-uniform vec3 u_grout;          // fugenfarbe
-uniform vec3 u_rim;            // strich am beleuchteten rand
-uniform vec4 u_atmos;          // farbe, a > 0.5 = hat atmosphaere
-uniform vec4 u_halo;           // farbe, deckkraft
-uniform float u_halo_radius;   // in kernradien; <= 1 = kein halo
+uniform vec3 u_grout;
+uniform vec3 u_rim;
+uniform vec4 u_atmos;
+uniform vec4 u_halo;
+uniform float u_halo_radius;
 uniform float u_halo_density;
 
 out vec4 fragColor;
@@ -38,14 +44,11 @@ float bayer4(ivec2 p) {
     return (float(m[i]) + 0.5) / 16.0;
 }
 
-float row_hash(int row, float seed) {
-    uint h = uint(row) * 668265263u + uint(seed) * 2246822519u + 97u;
-    h = (h ^ (h >> 13u)) * 1274126177u;
-    h ^= h >> 16u;
-    return float(h & 0xFFFFu) / 65535.0;
+float luma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
 }
 
-bool fetch_raw(ivec2 c, out vec4 cell, out vec4 id) {
+bool fetch(ivec2 c, out vec4 cell, out vec4 id) {
     if (c.x < 0 || c.y < 0 || c.x >= u_grid.x || c.y >= u_grid.y) {
         cell = vec4(0.0);
         id = vec4(0.0);
@@ -54,46 +57,79 @@ bool fetch_raw(ivec2 c, out vec4 cell, out vec4 id) {
     ivec2 t = ivec2(c.x, u_grid.y - 1 - c.y);   // textur zaehlt von unten
     cell = texelFetch(u_cells, t, 0);
     id = texelFetch(u_ids, t, 0);
-    return id.a > 0.5;
+    return id.a > 0.1;
 }
 
-// Gasriese: ganze zeilen ruecken um eine zelle zur seite, wie eine
-// verschobene bildzeile. Nur im inneren -- die silhouette bleibt rund.
-bool fetch(ivec2 c, out vec4 cell, out vec4 id) {
-    bool on = fetch_raw(c, cell, id);
-    if (!on || u_kind != 2) {
-        return on;
-    }
-    float h = row_hash(c.y - u_grid.y / 2, u_seed);
-    int s = h < 0.16 ? -1 : (h > 0.84 ? 1 : 0);
-    if (s != 0) {
-        vec4 c2, i2;
-        if (fetch_raw(c - ivec2(s, 0), c2, i2)) {
-            cell = c2;
-            id = i2;
-        }
-    }
-    return true;
-}
-
-// Ein punkt der groesse n in der mitte der zelle (ink-feld 0..s-1).
 bool dot_at(ivec2 sub, int s, int n) {
     int off = (s - n) / 2;
     ivec2 q = sub - ivec2(off);
     return q.x >= 0 && q.y >= 0 && q.x < n && q.y < n;
 }
 
+// Strich an einer kante der zelle c in richtung d. `owner`: nur die rechte
+// und untere kante tragen regionsgrenzen, damit jede genau einmal gezogen
+// wird (in der fuge, ohne luecke).
+vec3 edge_stroke(ivec2 c, ivec2 d, bool owner, vec4 cell, vec4 id, vec3 grout, vec3 col) {
+    vec4 nc, ni;
+    if (!fetch(c + d, nc, ni)) {
+        // Silhouette: auf der lichtseite ein heller strich entlang der
+        // zelltreppe; auf der nachtseite bleibt die fuge.
+        vec2 lxy = length(u_light.xy) > 0.05 ? normalize(u_light.xy) : vec2(0.0);
+        if (u_emissive < 0.5 && dot(vec2(float(d.x), -float(d.y)), lxy) > 0.15) {
+            return u_rim;
+        }
+        return col;
+    }
+    if (owner && id.a > 0.7 && abs(id.a - ni.a) < 0.05
+            && abs(luma(id.rgb) - luma(ni.rgb)) > 0.045) {
+        // Nur zwischen gleichen kennzeichen (kein strich entlang eines
+        // uebergangs) und nur bei klarem HELLIGKEITS-unterschied.
+        vec3 hi = max(cell.rgb, nc.rgb);
+        float day = clamp(min(cell.a, nc.a) * 4.0 - 3.0, 0.0, 1.0);
+        return mix(mix(grout, hi, 0.75), min(hi * 1.35 + 0.025, vec3(1.0)), day);
+    }
+    return col;
+}
+
 void main() {
     vec2 ptd = vec2(gl_FragCoord.x, u_target.y - gl_FragCoord.y);
     ivec2 rel = ivec2(floor(ptd - u_origin));
     int k = u_k;
+
+    if (u_dissolve.z > 0.5) {
+        // Radialer wisch nach der GROSSEN zelle relativ zur koerpermitte:
+        // beide fassungen haengen an derselben mitte, und die grosse zelle
+        // ist genau 2 x 2 kleine -- die grenze laeuft also auf beiden rastern
+        // sauber. Innen die neuere fassung (die grosse beim heranzoomen).
+        vec2 bigc = (floor((ptd - u_center) / float(u_k_big)) + 0.5) * float(u_k_big);
+        float key = min(length(bigc) / max(u_radius, 1.0), 0.9999);
+        if (key < u_dissolve.x || key >= u_dissolve.y) {
+            discard;
+        }
+    }
+
     ivec2 c = ivec2(floor(vec2(rel) / float(k)));
     ivec2 sub = rel - c * k;
-    int s = k - 1;                         // ink-feld, die letzte zeile/spalte ist die fuge
+    int s = k - 1;                         // ink-feld, letzte zeile/spalte = fuge
+
+    // Kugelpunkt unter der zellmitte: licht und randnaehe fuer fuge/strich.
+    vec2 cc = (vec2(c) + 0.5) * float(k) + u_origin;
+    vec2 dv = cc - u_center;
+    float dist = length(dv) / max(u_radius, 1.0);
+    vec2 pu = vec2(dv.x, -dv.y) / max(u_radius, 1.0);
+    vec3 nrm3 = vec3(pu, sqrt(max(0.0, 1.0 - dot(pu, pu))));
+    float lit = mix(pow(max(dot(nrm3, u_light), 0.0), u_light_exp), 1.0, u_emissive);
+
+    float cellr = float(k) / max(u_radius, 1.0);
+    float reach = max(u_halo_radius, 1.0 + 3.5 * cellr);
+    if (dist > reach) {
+        discard;                            // schnell raus: weder koerper noch halo
+    }
 
     vec4 cell, id;
     if (fetch(c, cell, id)) {
-        // --- 1. die zelle: gefastes quadrat, halbton = groesse ----------
+        // (Waisen sind schon im zellraster weggeputzt: body_cell_clean.frag.)
+        // --- 1. die zelle -------------------------------------------------
         int lvl = int(cell.a * 4.0 + 0.5);
         int n = s;
         if (u_kind != 1) {
@@ -103,64 +139,62 @@ void main() {
         }
         int off = (s - n) / 2;
         ivec2 q = sub - ivec2(off);
+        bool in_field = sub.x < s && sub.y < s;
         bool ink = q.x >= 0 && q.y >= 0 && q.x < n && q.y < n;
-        if (ink && n >= 3) {
+        // Die fuge zeigt sich nur auf der lichtseite und zum rand hin; im
+        // inneren verschwindet sie in der zellfarbe -- dort liest der koerper
+        // als FLAECHE, und das raster wird nicht zur textur ueber allem.
+        float gap = max(smoothstep(0.55, 0.85, lit), smoothstep(0.80, 0.97, dist));
+        if (u_kind == 1) gap = 0.35 * smoothstep(0.70, 0.98, dist);
+        if (ink && n >= 3 && gap > 0.25) {
             int m = n - 1;
-            int cut = n >= 7 ? 2 : 1;
-            if (q.x + q.y < cut || (m - q.x) + q.y < cut
-                    || q.x + (m - q.y) < cut || (m - q.x) + (m - q.y) < cut) {
+            if (q.x + q.y < 1 || (m - q.x) + q.y < 1
+                    || q.x + (m - q.y) < 1 || (m - q.x) + (m - q.y) < 1) {
                 ink = false;
             }
         }
-        vec3 col = ink ? cell.rgb : mix(u_grout, cell.rgb, 0.55);
-
-        // --- 2. striche in voller aufloesung ---------------------------
-        vec2 lxy = length(u_light.xy) > 0.05 ? normalize(u_light.xy) : vec2(0.0);
-        ivec2 dirs[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
-        bool edge[4] = bool[4](sub.x == 0, sub.x == k - 1, sub.y == 0, sub.y == k - 1);
-        for (int i = 0; i < 4; ++i) {
-            if (!edge[i]) {
-                continue;
-            }
-            vec4 nc, ni;
-            bool non = fetch(c + dirs[i], nc, ni);
-            if (!non) {
-                // Silhouette: auf der lichtseite ein heller strich, der den
-                // zelltreppen folgt; auf der nachtseite bleibt die fuge.
-                vec2 nrm = vec2(float(dirs[i].x), -float(dirs[i].y));
-                if (u_emissive < 0.5 && dot(nrm, lxy) > 0.15) {
-                    col = u_rim;
-                }
-            } else if (u_kind != 1 && i % 2 == 1
-                       && distance(id.rgb, ni.rgb) > 0.008) {
-                // Regionsgrenze: rechts/unten, also IN der fuge -- jede
-                // gemeinsame kante genau einmal und ohne luecke.
-                // Auf der nachtseite (halbton) traegt der strich nur die
-                // hellere farbe, keinen glanz -- sonst laege dort ein netz.
-                vec3 hi = max(cell.rgb, nc.rgb);
-                float day = clamp(min(cell.a, nc.a) * 4.0 - 3.0, 0.0, 1.0);
-                col = mix(mix(u_grout, hi, 0.75), min(hi * 1.35 + 0.025, vec3(1.0)), day);
-            }
+        vec3 grout = mix(u_grout, cell.rgb, 0.45);
+        vec3 col;
+        if (ink) {
+            col = cell.rgb;
+        } else if (in_field) {
+            col = grout;                    // halbton: um den punkt die fuge
+        } else {
+            col = mix(cell.rgb, grout, gap);
         }
+
+        // --- 2. striche ---------------------------------------------------
+        // Nur randpixel einer zelle fragen ihren nachbarn; ein pixel liegt an
+        // hoechstens zwei kanten. (Ohne lokale arrays und schleife: im
+        // software-GL kosteten die den groessten teil des passes.)
+        if (sub.x == 0) col = edge_stroke(c, ivec2(-1, 0), false, cell, id, grout, col);
+        else if (sub.x == k - 1) col = edge_stroke(c, ivec2(1, 0), true, cell, id, grout, col);
+        if (sub.y == 0) col = edge_stroke(c, ivec2(0, -1), false, cell, id, grout, col);
+        else if (sub.y == k - 1) col = edge_stroke(c, ivec2(0, 1), true, cell, id, grout, col);
         fragColor = vec4(col, 1.0);
         return;
     }
 
     // --- 3. ausserhalb des koerpers ---------------------------------------
-    vec2 cc = (vec2(c) + 0.5) * float(k) + u_origin;
-    vec2 dv = cc - u_center;
-    float dist = length(dv) / max(u_radius, 1.0);
-    vec2 dir_up = normalize(vec2(dv.x, -dv.y) + 1e-6);
+    vec2 dir_up = normalize(pu + 1e-6);
 
-    if (u_atmos.a > 0.5 && dist < 1.0 + 2.5 * float(k) / max(u_radius, 1.0)) {
-        // Eine reihe halber punkte direkt am rand, auf der lichtseite.
-        vec4 nc, ni;
-        bool touch = false;
-        for (int i = 0; i < 4; ++i) {
-            ivec2 d = i == 0 ? ivec2(-1, 0) : (i == 1 ? ivec2(1, 0)
-                      : (i == 2 ? ivec2(0, -1) : ivec2(0, 1)));
-            touch = touch || fetch_raw(c + d, nc, ni);
+    if (u_kind == 1 && dist > 1.0) {
+        // Gestufte glut direkt am sternenrand: zwei ringe aus ganzen zellen,
+        // erst gross und hell, dann kleiner -- danach die punktmatrix.
+        if (dist < 1.0 + 1.6 * cellr && dot_at(sub, s, max(s - 1, 1))) {
+            fragColor = vec4(mix(u_halo.rgb, vec3(1.0), 0.25), 0.92);
+            return;
         }
+        if (dist < 1.0 + 3.2 * cellr && dot_at(sub, s, max(s - 3, 1))) {
+            fragColor = vec4(u_halo.rgb, 0.80);
+            return;
+        }
+    }
+
+    if (u_atmos.a > 0.5 && dist < 1.0 + 1.6 * cellr) {
+        vec4 nc, ni;
+        bool touch = fetch(c + ivec2(-1, 0), nc, ni) || fetch(c + ivec2(1, 0), nc, ni)
+                  || fetch(c + ivec2(0, -1), nc, ni) || fetch(c + ivec2(0, 1), nc, ni);
         float side = u_emissive >= 0.5 ? 1.0 : dot(dir_up, u_light.xy);
         if (touch && side > -0.15 && dot_at(sub, s, max(s / 2, 1))) {
             fragColor = vec4(u_atmos.rgb, 0.85);
@@ -169,8 +203,6 @@ void main() {
     }
 
     if (u_halo_radius > 1.0 && dist > 1.0 && dist < u_halo_radius) {
-        // Halo als punktmatrix: geordnet ausgeduennt (bayer), zur lichtseite
-        // dichter. Ein punkt je zelle, mitte der zelle.
         float t = (dist - 1.0) / (u_halo_radius - 1.0);
         float bias = u_emissive >= 0.5 ? 1.0
                      : clamp(0.55 + 0.45 * dot(dir_up, u_light.xy), 0.0, 1.0);
