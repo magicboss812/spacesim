@@ -5,6 +5,10 @@ paths:
   - "ship/art.py"
   - "render/bodies.py"
   - "render/ship.py"
+  - "render/ship_pixel.py"
+  - "render/gl/ship_cell.vert"
+  - "render/gl/ship_cell.frag"
+  - "render/gl/ship_pixel.frag"
   - "render/gl/body_icon.vert"
   - "render/gl/body_icon.frag"
   - "render/gl/body_surface.vert"
@@ -274,6 +278,56 @@ Other load-bearing details:
 
 Cost (900×700, Erde at 200 px, llvmpipe, `gl.finish()`): about 3.0–3.5 ms
 off, 5.6–7.3 ms on; this machine's noise is ±2 ms between runs.
+
+## Pixel ship: the same cell grid, rotated content (2026-10-15)
+
+`render/ship_pixel.py` (`ShipPixelMixin`) draws the ship in the body idiom;
+`renderer.ship_pixel_style` picks one of five looks, 0 is the vector path
+below. Same two passes as the bodies, minus the window layer (the ship is
+drawn after the FXAA resolve anyway, straight into `_frame_output_fbo`):
+
+1. **Cell pass** (`ship_cell.{vert,frag}`): the fills of
+   `ship/art.py::build_cells` rotated and scaled into a cell buffer, one
+   fragment per cell, blending off, paint order of the mockup. `o_cell.a`
+   carries the **light** (not a halftone level), so every style derives its
+   own fill from it. Then the bodies' clean pass, unchanged.
+2. **Compose** (`ship_pixel.frag` on `body_pixel.vert`), `u_style`:
+   `1 led` (body treatment: ramp, 1-px region strokes, bright lit rim; LED
+   gaps only from 4-px cells), `2 halbton` (light → coverage: shrinking
+   square from 4-px cells, ordered dither inside the cell below), `3
+   blaupause` (dark panels, every region boundary a HUD-ink stroke), `4
+   sprite` (dithered ramp over all four steps, selout, 1-px outline one step
+   above the ground), `5 signal` (monochrome HUD ink, every cell an LED).
+   The plume is a dot matrix outside the cells, `s = −(X²+Y²)/(2X)` being the
+   closed form of the mockup's nested ellipses shrunk toward the nozzle.
+
+Rules, each from a seen failure:
+- **The ship needs about 36 cells along its length**
+  (`ship_pixel_min_cells`). At the bodies' small cell (3 px, 26 cells) every
+  rotation off the axes turned the silhouette into a blob; at 2 px (39 cells)
+  it holds at every angle. `_ship_cell_size` = min(small body cell,
+  length / min_cells), so 2 px at 1280×800, 3 px at 2560×1440, down to 1 px
+  under the zoom shrink.
+- **The grid is screen-aligned and hangs on the rounded ship centre**, like
+  the bodies; rotation re-rasterises the silhouette, translation moves it in
+  1-px steps.
+- **Only fills and two kinds of strokes become cells.** Accent strokes
+  (nozzle lip, instruments) become single emissive cells, the radiator rails
+  (`#7d8496`) one cell row. Struts every 8 units and bulkheads every 10 land
+  on almost every cell and turned radiator and hull into noise.
+- **Tags: 1.0 hull, 0.7 rail, 0.85 accent, tested as a band.** A plain
+  `tag > 0.8` matched the hull, which then drew as flat accent colour with no
+  outline.
+- **The light is steeper than for the bodies** (`z ≥ 0.75`) **plus a 0.40
+  ambient**: from above a flat ship is lit grazing most of the time, and the
+  hull sat entirely in the shadow step. The mockup's panel colours are all
+  dark navy (#1c2135 to #454d70), so they are lifted ×1.55 before the ramp,
+  and the boundaries carry the drawing, as the light outlines do in the mockup.
+- **Line width in the cell pass is 1 cell**, divided by `capture_scale`,
+  because `_set_line_width` multiplies by it.
+
+Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms, pixel 0.54–0.66 ms
+per frame.
 
 ## Die Marke — `bodies/icon.py`
 

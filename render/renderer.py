@@ -21,6 +21,7 @@ from render.text import TextMixin
 from render.background_draw import BackgroundDrawMixin
 from render.bodies import BodyDrawMixin
 from render.body_pixel import BodyPixelMixin
+from render.ship_pixel import ShipPixelMixin
 from render.ship import ShipDrawMixin
 from render.orbits import OrbitDrawMixin
 from render.prediction import PredictionDrawMixin
@@ -36,6 +37,7 @@ class Renderer(
     BodyDrawMixin,
     BodyPixelMixin,
     ShipDrawMixin,
+    ShipPixelMixin,
     OrbitDrawMixin,
     PredictionDrawMixin,
     ManeuverDrawMixin,
@@ -458,6 +460,22 @@ class Renderer(
         self.ship_plume_idle = 0.22
         self._ship_geometry_cache = None
         self._ship_plume_level = 0.0
+        # Pixel-stil des schiffs (`render/ship_pixel.py`): 0 = vektor-
+        # zeichnung, 1..5 die auspraegungen (led, halbton, blaupause, sprite,
+        # signal). Das schiff bleibt mindestens so viele zellen lang, sonst
+        # werden die zellen kleiner.
+        self.ship_pixel_style = 1
+        self.ship_pixel_min_cells = 36.0
+        self._ship_cell_program = None
+        self._ship_pixel_program = None
+        self._ship_pixel_vao = None
+        self._ship_cell_vaos = []
+        self._ship_cells_cache = None
+        self._ship_cell_fbo = None
+        self._ship_cell_textures = ()
+        self._ship_clean_fbo = None
+        self._ship_clean_textures = ()
+        self._frame_output_fbo = None
         # --- zoom-abhaengige verkleinerung des schiffs -------------------
         # Das schiff bleibt in bildschirm-pixeln gezeichnet (siehe oben),
         # aber NICHT ueber jede zoomstufe gleich gross: weit herausgezoomt --
@@ -963,6 +981,7 @@ class Renderer(
         # Das endziel: das fenster, beim hochaufgeloesten foto dessen
         # offscreen-framebuffer.
         output_fbo = self.output_framebuffer or self.ctx.screen
+        self._frame_output_fbo = output_fbo
         if self.enable_fxaa and self.fbo:
             target_fbo = self.fbo
         else:

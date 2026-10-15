@@ -136,8 +136,17 @@ class ShaderPipelineMixin:
             'body_surface.vert', 'body_cell_fill.frag', 'body_cell_fill')
         self._body_cell_clean_program = self._compile_shader_program(
             'body_pixel.vert', 'body_cell_clean.frag', 'body_cell_clean')
+        self._ship_cell_program = self._compile_shader_program(
+            'ship_cell.vert', 'ship_cell.frag', 'ship_cell')
+        self._ship_pixel_program = self._compile_shader_program(
+            'body_pixel.vert', 'ship_pixel.frag', 'ship_pixel')
         quad = self._ensure_quad_vbo()
         try:
+            if self._ship_pixel_program is not None:
+                self._ship_pixel_vao = self.ctx.vertex_array(
+                    self._ship_pixel_program, [(quad, '2f', 'a_pos')])
+                self._ship_pixel_program['u_cells'].value = 0
+                self._ship_pixel_program['u_ids'].value = 1
             if self._body_layer_program is not None:
                 self._body_layer_vao = self.ctx.vertex_array(
                     self._body_layer_program, [(quad, '2f', 'a_pos')])
@@ -162,6 +171,7 @@ class ShaderPipelineMixin:
             self._body_pixel_vao = None
             self._body_cell_disc_vao = None
             self._body_cell_clean_vao = None
+            self._ship_pixel_vao = None
 
     def _init_body_icon_pipeline(self):
         """Programm der positions-marke.

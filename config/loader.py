@@ -557,6 +557,8 @@ class ConfigLoader:
             ('ship_render_scale', 'ship_render_scale', float),
             ('ship_accent_color', 'ship_accent_color', str),
             ('ship_plume_idle', 'ship_plume_idle', float),
+            ('ship_pixel_style', 'ship_pixel_style', int),
+            ('ship_pixel_min_cells', 'ship_pixel_min_cells', float),
             # Zoom-abhaengige verkleinerung des schiffs (px je meter)
             ('ship_zoom_shrink_enabled', 'ship_zoom_shrink_enabled', bool),
             ('ship_zoom_shrink_start_scale', 'ship_zoom_shrink_start_scale', float),

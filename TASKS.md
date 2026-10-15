@@ -621,7 +621,7 @@ Saturn has no ring system.
 
 ---
 
-## Task 7: Ship art to match the HUD `[ ]`
+## Task 7: Ship art to match the HUD `[x]`
 
 **Read first:** `.claude/rules/body-art.md` (ship), `rendering.md` → "The
 ship is drawn in SCREEN pixels".
@@ -633,7 +633,17 @@ silhouette and size, no heavy restyle.
 
 **Verify:** before/after crops at two zoom levels.
 
-**Result:** _open_
+**Result:** The ship is drawn on the bodies' cell grid (`render/ship_pixel.py`,
+`ship_cell.{vert,frag}`, `ship_pixel.frag`), same silhouette and size, in
+five selectable looks (`renderer.ship_pixel_style` 1–5, dev UI "pixel-stil";
+0 = old vector). Default 1 (LED, the body treatment). Cells are 2 px at
+1280×800 and 3 px at 2560×1440: the ship needs ~36 cells along its length or
+rotated silhouettes collapse (26 cells at 3 px failed). Verified on contact
+sheets of 4 angles × 6 styles at both resolutions, idle and under thrust, and
+in game shots; `ship_scale_test`, `render_budget_test`,
+`selection_camera_test` pass. Pixel path 0.54–0.66 ms vs vector 0.81 ms.
+Open: the cell size steps (2 → 1 px) under the zoom shrink without a
+crossfade; the style choice is the user's.
 
 ---
 

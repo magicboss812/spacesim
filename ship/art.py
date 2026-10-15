@@ -407,3 +407,75 @@ def build(accent=DEFAULT_ACCENT):
     arr = np.ascontiguousarray(
         np.asarray(verts, dtype=np.float64).reshape((-1, 2)))
     return ShipGeometry(arr, tuple(hull_ops), tuple(plume_ops), accent)
+
+
+# --- pixel-stil: dieselben formen als zellen --------------------------------
+#
+# Fuer den zellpass (`render/ship_pixel.py`) zaehlen nur FLAECHEN: jede
+# fuellung wird eine region, und die grenzen zwischen regionen zieht der
+# zusammenbau als 1-px-striche. Die feinen konturen des mockups fallen weg,
+# bis auf die holme der radiatoren (zwei je paneel), die als ganze zellreihe
+# noch lesbar sind. Die streben alle 8 einheiten und die schotten im
+# 10-einheiten-abstand laegen bei ~40 zellen fast auf jeder zelle und
+# machten radiator und rumpf zu rauschen.
+# Akzent-konturen (duesenlippe, instrumente) bleiben: sie werden einzelne
+# leuchtende zellen.
+CELL_LINE_COLORS = ("#7d8496",)
+
+# Kennzeichen im zellpuffer (wie `body_cell_*.frag`): 1.0 rumpf-flaeche,
+# 0.7 konturzelle, 0.85 akzent (leuchtet selbst, nie gestrichen).
+CELL_TAG_HULL = 1.0
+CELL_TAG_LINE = 0.7
+CELL_TAG_ACCENT = 0.85
+
+
+class ShipCells:
+    """Die grafik fuer den zellpass: zwei float32-tabellen (x, y, r, g, b,
+    kennzeichen) im lokalen schiffsraum, dreiecke und linien, in der
+    zeichenreihenfolge des mockups."""
+
+    __slots__ = ("tris", "lines", "accent", "length", "height")
+
+    def __init__(self, tris, lines, accent):
+        self.tris = tris
+        self.lines = lines
+        self.accent = accent
+        self.length = SHIP_LENGTH
+        self.height = SHIP_HEIGHT
+
+
+def build_cells(accent=DEFAULT_ACCENT):
+    accent_rgb = _hex_rgb(accent)
+    keep = {_hex_rgb(c) for c in CELL_LINE_COLORS}
+    tris, lines = [], []
+
+    def resolve(color):
+        return accent_rgb if color == ACCENT else _hex_rgb(color)
+
+    for points, closed, fill, stroke, width, alpha in _shapes():
+        local = _to_local(points)
+        if fill is not None:
+            rgb = resolve(fill)
+            tag = CELL_TAG_ACCENT if fill == ACCENT else CELL_TAG_HULL
+            for tri in _triangulate(local):
+                for x, y in tri:
+                    tris.append((x, y) + rgb + (tag,))
+        if stroke is None or fill is not None:
+            continue
+        if stroke == ACCENT:
+            rgb, tag = accent_rgb, CELL_TAG_ACCENT
+        elif _hex_rgb(stroke) in keep:
+            rgb, tag = _hex_rgb(stroke), CELL_TAG_LINE
+        else:
+            continue
+        ring = local + local[:1] if closed else local
+        for a, b in zip(ring, ring[1:]):
+            lines.append(a + rgb + (tag,))
+            lines.append(b + rgb + (tag,))
+
+    def table(rows):
+        if not rows:
+            return np.zeros((0, 6), dtype=np.float32)
+        return np.ascontiguousarray(np.asarray(rows, dtype=np.float32))
+
+    return ShipCells(table(tris), table(lines), accent)

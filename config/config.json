@@ -170,6 +170,8 @@
     "ship_zoom_shrink_min": 0.10,
     "ship_accent_color": "#E71D36",
     "ship_plume_idle": 0.22,
+    "ship_pixel_style": 1,
+    "ship_pixel_min_cells": 36.0,
     "selection_marker_enabled": true,
     "selection_arrow_length_px": 13.0,
     "selection_arrow_width_px": 11.0,

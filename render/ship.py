@@ -274,6 +274,12 @@ class ShipDrawMixin:
 
         theta = float(theta_override) if theta_override is not None else float(getattr(body, 'theta', 0.0))
 
+        # Pixel-stil (`render/ship_pixel.py`); faellt bei einem fehler auf
+        # die vektor-zeichnung unten zurueck.
+        dest = getattr(self, '_frame_output_fbo', None) or self.ctx.screen
+        if self._draw_ship_pixel(body, x, y, theta, (r, g, b), dest):
+            return
+
         # Die grafik laeuft ueber die ORTHO-pipeline (y nach oben), die
         # uebergebene position kommt aber aus _world_to_screen_xy (top-down).
         y = self._ortho_y(y)
