@@ -333,12 +333,24 @@ class PredictionPixelMixin:
             py = np.concatenate((py, marks_gl[:, 1]))
         W, H = int(self.width), int(self.height)
         nx, ny = (W + _TILE - 1) // _TILE, (H + _TILE - 1) // _TILE
+        # Je punkt ALLE kacheln seines quadrats +-pad, als bereich
+        # [tx0, tx1] x [ty0, ty1]. Nur die vier ecken (+-pad) zu nehmen
+        # uebersprang ab pad > _TILE / 2 die kachel des punkts selbst
+        # (x - 12 und x + 12 liegen in den nachbarkacheln): im 4K-foto
+        # (k = 2.7, pad 12 px) fehlten so ganze strecken der linie. Die
+        # stuetzpunkte liegen bis _TILE / 2 auseinander, ein pixel dazwischen
+        # bis _TILE / 4 vom naechsten -- um so viel ist das quadrat groesser.
+        pad = float(pad) + 0.25 * _TILE + 0.5
+        tx0 = np.floor((px - pad) / _TILE).astype(np.int64)
+        tx1 = np.floor((px + pad) / _TILE).astype(np.int64)
+        ty0 = np.floor((py - pad) / _TILE).astype(np.int64)
+        ty1 = np.floor((py + pad) / _TILE).astype(np.int64)
         keys = []
-        for ox in (-pad, pad):
-            for oy in (-pad, pad):
-                tx = np.floor((px + ox) / _TILE).astype(np.int64)
-                ty = np.floor((py + oy) / _TILE).astype(np.int64)
-                ok = (tx >= 0) & (tx < nx) & (ty >= 0) & (ty < ny)
+        for i in range(int((tx1 - tx0).max()) + 1):
+            for j in range(int((ty1 - ty0).max()) + 1):
+                tx, ty = tx0 + i, ty0 + j
+                ok = ((tx <= tx1) & (ty <= ty1) & (tx >= 0) & (tx < nx)
+                      & (ty >= 0) & (ty < ny))
                 keys.append(ty[ok] * nx + tx[ok])
         keys = np.unique(np.concatenate(keys))
         return np.ascontiguousarray(np.column_stack(

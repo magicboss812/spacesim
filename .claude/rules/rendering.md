@@ -376,7 +376,11 @@ loop, so `prediction_projection_test` still pins the runs at 0 px.
   shaded ~10×. 3643 → 710 segments, pass 4.9 → 2.8 ms (llvmpipe). Chord error
   at 100 px curvature radius 0.011 px. Marks use the full run.
 - **Compose and clear run over 16-px tiles** the line touches, not its
-  bounding box (nearly the screen when zoomed in).
+  bounding box (nearly the screen when zoomed in). `_pred_tiles` takes every
+  tile of the square ±pad around each support point; the first version took
+  only its four corners, which skips the point's own tile once pad > 8 px.
+  At window size pad is 4–6 px, so it only showed in F12 captures (k = 2.7,
+  pad 12 px): whole stretches of the line missing, 58 of 610 segments.
 - Cost of `draw_prediction` (1280×800, llvmpipe, `gl.finish()`): klassisch
   1.7–2.1 ms, styles 2.9–4.5 ms; about 1 ms of the difference is Python + GL
   calls, the rest software rasterisation.
