@@ -93,7 +93,7 @@ class ShipPixelMixin:
 
         self._ship_cell_textures, self._ship_cell_fbo = pair()
         self._ship_clean_textures, self._ship_clean_fbo = pair()
-        heat = self.ctx.texture(cap, 2, dtype='f2')
+        heat = self.ctx.texture(cap, 4, dtype='f2')
         # LINEAR fuer den weichzeichner (zwei texel je abgriff); der
         # zusammenbau liest die hitze mit texelFetch, ungefiltert.
         heat.filter = (moderngl.LINEAR, moderngl.LINEAR)
@@ -164,10 +164,10 @@ class ShipPixelMixin:
             for obj in (self._ship_plume_vao, self._ship_plume_vbo):
                 if obj is not None:
                     obj.release()
-            self._ship_plume_vbo = ctx.buffer(reserve=max(need, (ship_plume.MAX_PARTICLES + 64) * 20))
+            self._ship_plume_vbo = ctx.buffer(reserve=max(need, (ship_plume.MAX_PARTICLES + 64) * 24))
             self._ship_plume_vao = ctx.vertex_array(
                 self._ship_plume_program,
-                [(self._ship_plume_vbo, '2f 3f', 'a_pos', 'a_attr')])
+                [(self._ship_plume_vbo, '2f 4f', 'a_pos', 'a_attr')])
         self._ship_plume_vbo.write(pts.tobytes())
         prog = self._ship_plume_program
         prog['u_scale'].value = float(scale)
@@ -248,7 +248,11 @@ class ShipPixelMixin:
             packed += [(0.0, 0.0, 0.0, 1.0)] * (8 - len(packed))
             prog['u_plights'].value = packed
             prog['u_plight_n'].value = len(lights)
-            prog['u_glow'].value = tuple(float(c) for c in _mix(accent, (1.0, 0.86, 0.45), 0.5))
+            # Farbe des scheins auf dem rumpf: folgt der triebwerkstemperatur
+            # -- wenig schub rot, voller schub warmweiss bis leicht blau.
+            sp = sim.spool if sim is not None else 0.0
+            warm = _mix(accent, (1.0, 0.86, 0.45), 0.25 + 0.45 * sp)
+            prog['u_glow'].value = tuple(float(c) for c in _mix(warm, (0.86, 0.92, 1.0), 0.30 * sp * sp))
             # Eine zelle breit, auch im hochaufgeloesten foto (dort sind die
             # ZELLEN k-fach, nicht die linie im zellraster).
             self._set_line_width(1.0 / float(getattr(self, 'capture_scale', 1.0) or 1.0))
@@ -318,6 +322,7 @@ class ShipPixelMixin:
             self._ship_heat_tex.use(location=2)
             self._ship_glow_tex[1].use(location=3)
             prog['u_glow_gain'].value = glow_gain
+            prog['u_glow_temp'].value = float(sim.spool) if sim is not None else 0.0
             self._ship_pixel_vao.render(moderngl.TRIANGLE_STRIP)
         except Exception as exc:
             self.debug_info['ship_pixel_error'] = f"compose: {type(exc).__name__}: {exc}"

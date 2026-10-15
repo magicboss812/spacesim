@@ -314,14 +314,30 @@ styles only; the vector path keeps its nested-ellipse plume.
   heading, so a turning ship bends its plume; the ship's own motion carries
   the whole plume.
 - **Heat, not sprites.** Each frame the particles go as points, additively,
-  into a float16 heat buffer on the ship's cell grid (rg = heat, smoke). The
-  compose maps heat through a Bayer-dithered ramp built from the build's
-  accent: white-hot > 1.70, yellow > 1.05, warm > 0.62, accent > 0.32,
-  ember > 0.14, then translucent smoke. The core comes from particle
-  density. Per-particle heat 0.20–0.34 (an earlier 0.9–1.3 turned the whole
-  plume into a white blob).
-- **Fixed light points on top of the simulation:** a glow at each nozzle,
-  and above 40 % thrust four shock diamonds on the axis behind it.
+  into an RGBA float16 heat buffer on the ship's cell grid (r = heat, g =
+  cold condensate, b = heat × temperature). The compose takes the
+  **heat-weighted temperature** of a cell as `b / r`: heat picks the step
+  (brightness, coverage), temperature the hue. Steps (Bayer-dithered):
+  > 1.95, > 1.15, > 0.62, > 0.30, > 0.13, plus a sparse last step > 0.05
+  for the thin outer gas; colours run from deep red (cool) through the
+  accent and orange to yellow with a white to blue-white core (hot). The
+  core comes from particle density. Per-particle heat 0.20–0.34 (an earlier
+  0.9–1.3 turned the whole plume into a white blob).
+- **It is a VACUUM plume.** No ambient pressure, so: **no shock diamonds**
+  (they form only where the jet meets an atmosphere; an earlier version had
+  them), **no drag** (particles fly straight and fade by expansion, heat
+  `(1 − t)^1.4`), and **no billowing smoke**, only thin cold condensate at
+  the end. The jet is under-expanded, so the cone gets WIDER with thrust
+  (`spread · (0.55 + 1.25 s)`), and particles swell more when hot. A hot
+  core of 7 points on the axis, length `r · (1.2 + 5·core)`, replaces the
+  diamonds and is uncovered by the flow front after ignition.
+- **Temperature per particle**: `(0.22 + 0.78 s) · U(0.85, 1.12)` at
+  emission, dropping 55 % over its life. The scatter is what makes the
+  colour live; low thrust also flickers harder (`±(0.10 + 0.22·(1 − s))`).
+  The hull light and the glow follow the spool too: red at low thrust, warm
+  white with a blue touch at full.
+- **Fixed light points on top of the simulation:** a glow at each nozzle
+  and the hot core behind it.
 - **Small nozzles are compensated** (`heat × min(3.2, 15 / r)`): with the
   same particle count their points covered one cell each, and the Ringschiff
   and Pfeil plumes stayed red.
@@ -335,14 +351,15 @@ styles only; the vector path keeps its nested-ellipse plume.
   - `spool` follows the throttle (up 0.22 s, down 0.12 s). The velocity
     change stays immediate (physics); only the flame needs time.
   - **Each particle keeps the state of its emission**: exhaust speed
-    `speed·(0.40 + 0.60 s)`, cone `spread·(1.8 − 0.8 s)`, size, heat and
-    lifetime all depend on the spool at that moment. A lever change
-    therefore travels down the plume with the flow (seen in the 100 → 30 %
-    strip: the hot section detaches and drifts out). Low thrust gives a
-    short, wide, red flame; full thrust a long, tight one with a white core.
-  - **Flow front**: after ignition it runs out at the exhaust speed; the
-    shock diamonds (2 + 3·core of them, spacing growing with the exhaust
-    speed) only light up once it has passed them.
+    `speed·(0.40 + 0.60 s)`, cone, size, heat, temperature and lifetime
+    all depend on the spool at that moment. A lever change therefore
+    travels down the plume with the flow (seen in the 100 → 30 % strip: the
+    hot section detaches and drifts out). Measured at 80 frames steady
+    (speed 300): farthest particle 82 → 209 units behind the nozzle,
+    widest 15 → 84 units off the axis, mean temperature 0.33 → 0.72 from
+    20 % to 100 %.
+  - **Flow front**: after ignition it runs out at the exhaust speed and
+    uncovers the hot core point by point.
   - **Ignition** is a small, slow puff (24 particles); the plume then grows
     outward with its particles. **Shutdown** only stops the supply: the rest
     drifts off and cools, and the nozzle glow cools over 0.8 s
@@ -365,8 +382,8 @@ styles only; the vector path keeps its nested-ellipse plume.
   capped at 1.3, adds `0.60 · glow` in a warm mix of the accent to the
   colour and lifts the light (so halbton coverage grows near the fire). It
   changes colour only, not the region id, so no seams appear. Bending the
-  plume moves the light with it. Smoke in the compose takes warm light from
-  the heat in its own cell.
+  plume moves the light with it. Condensate in the compose takes warm light
+  from the heat in its own cell.
 - **Glow per screen pixel.** `ship_glow.frag` blurs the heat buffer in two
   separable gaussian passes (σ = `ship_plume_glow_radius`, 22 units, in
   cells) into a LINEAR float texture. Each tap reads between two texels
@@ -375,16 +392,18 @@ styles only; the vector path keeps its nested-ellipse plume.
   compose samples the glow **bilinearly at every screen pixel** and
   quantises `0.8 · g` into 0.10 alpha steps with a 1-px Bayer dither (cap
   0.70): the falloff is smooth, and each pixel is still one of a few hard
-  levels. The colour runs from the accent to warm yellow as `g` rises.
-  Smoke lies over it. The glow runs only above 0.30 thrust (invisible at
-  idle, and it would cost two passes and a bigger grid), and the reach grows
+  levels. The colour runs from the accent outward to warm yellow inside and
+  shifts with the spool (dark red at low thrust, toward blue-white at
+  full). Condensate lies over it. The glow runs only once the spool passes
+  0.12 and fades in with `smoothstep(0.12, 0.55, spool)` (at idle it is
+  invisible and would cost two passes and a bigger grid); the reach grows
   by only 1.5 σ: beyond that it stays below the first step.
 - **Never write `smoothstep(hi, lo, x)`.** GLSL leaves edge0 ≥ edge1
   undefined; the first rear glow used it.
 - The grid reach follows the plume (`extent()`, capped at 320 units); a
   capture does not step the particles.
 - Tunables: `ship_plume_particles`, `ship_plume_rate` (900/s),
-  `ship_plume_speed` (340 units/s), `ship_plume_life_s` (0.55),
+  `ship_plume_speed` (300 units/s; without drag 340 doubled the length), `ship_plume_life_s` (0.55),
   `ship_plume_spread` (0.10 rad), `ship_plume_glow` (1.0, 0 = off),
   `ship_plume_glow_radius` (22 units), also in the dev UI.
 

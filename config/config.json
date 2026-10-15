@@ -243,7 +243,7 @@
     "ship_pixel_min_cells": 36.0,
     "ship_plume_particles": true,
     "ship_plume_rate": 900.0,
-    "ship_plume_speed": 340.0,
+    "ship_plume_speed": 300.0,
     "ship_plume_life_s": 0.55,
     "ship_plume_spread": 0.1,
     "ship_plume_glow": 1.0,
