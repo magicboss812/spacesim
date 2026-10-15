@@ -39,8 +39,14 @@ RESOLUTIONS = (
     ('window', None),
     ('2K', 1440),
     ('4K', 2160),
+    ('5K', 2700),
+    ('5.5K', 2970),
     ('6K', 3240),
     ('8K', 4320),
+    ('12K', 6480),
+    ('7K', 3780),
+    ('10K', 5400),
+    ('16K', 8640),
 )
 
 #: Schmalster zuschnitt, als anteil der fensterbreite.

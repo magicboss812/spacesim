@@ -1,0 +1,38 @@
+[
+ {
+  "out": "kontrolle_uebersicht.png",
+  "pinned": null
+ },
+ {
+  "out": "v1_sonne.png",
+  "pinned": null
+ },
+ {
+  "out": "v1_jupiter.png",
+  "pinned": {
+   "ok": "hover",
+   "distance": 1684869464.4151418,
+   "t_abs": 84887607.17880347,
+   "eta_s": 86674.58768822253,
+   "speed_tooltip": 13448.830213133053
+  }
+ },
+ {
+  "out": "v1_uebersicht.png",
+  "pinned": null
+ },
+ {
+  "out": "v2_sonne.png",
+  "pinned": null
+ },
+ {
+  "out": "v2_jupiter.png",
+  "pinned": {
+   "ok": "hover",
+   "distance": 357445201.9151548,
+   "t_abs": 84320425.39223742,
+   "eta_s": 86515.92652142048,
+   "speed_tooltip": 27193.323935140477
+  }
+ }
+]

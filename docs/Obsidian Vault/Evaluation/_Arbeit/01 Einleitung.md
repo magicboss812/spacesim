@@ -4,9 +4,9 @@
 Leer
 
 ___
-## 1. Einleitung:
+# 1. Einleitung
 
-### 1.1 Motivation
+## 1.1 Motivation
 
 Die Apollo-11-Mission im Juli 1969 markiert den Punkt, an dem erstmals Menschen einen anderen Himmelskörper betraten [2]. Auffällig am Flugprofil dieser und der vorangegangenen Missionen ist, dass die Raumfahrzeuge sich nicht auf direktem Weg zum Mond bewegten, sondern einer weit ausholenden Bahn folgten, die die Anziehung von Erde und Mond ausnutzte [2]. Diese Bahnform ging auf eine bewusste Entscheidung der Missionsplanung zurück.
 
