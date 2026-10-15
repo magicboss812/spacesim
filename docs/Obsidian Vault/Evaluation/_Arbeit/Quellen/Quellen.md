@@ -66,3 +66,5 @@ Abb. 9 (Kap. 3.1, neue Zählung) Phasenwinkel beim Start: KI-erstellt (Claude), 
 Abb. 9 (Kap. 3.2) Abflug- und Ankunftshyperbel mit Zusammensetzung der Geschwindigkeiten: KI-erstellt (Claude), Inhalt nach [33] und [37], Hyperbelform aus dem Rechenbeispiel
 Abb. 10 (Kap. 3.3) Hohmann-Transfer und schnellerer Transfer mit Zerlegung der Geschwindigkeiten am Schnittpunkt: KI-erstellt (Claude), Inhalt nach [11] und [38], Bahnen und Vektoren maßstäblich aus dem Rechenbeispiel
 Abb. 11 (Kap. 3.4) Ankunft am Mars bei Hohmann-Transfer und zwei schnelleren Transfers: eigener Screenshot aus der Simulation, Flüge und Aufnahme per Skript KI-erstellt (Claude)
+Abb. 12 (Kap. 4.1) Vorbeiflug im Bezugssystem des Planeten und der Sonne: KI-erstellt (Claude), Inhalt nach [21], [23] und [37], Längen und Winkel aus Variante 1 des Rechenbeispiels
+Abb. 13 (Kap. 4.2) Transfer Erde–Saturn direkt und über Jupiter: KI-erstellt (Claude), Bahnen maßstäblich aus dem Rechenbeispiel
