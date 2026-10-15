@@ -30,6 +30,16 @@ def _float_list(value):
     return rungs
 
 
+def _ship_colors(value):
+    """`renderer.ship_build_colors`: {bauform: {rolle: "#rrggbb"}}. Nur die
+    form wird hier geprueft; unbekannte rollen und kaputte hex-werte
+    verwirft `ship/builds.py::colors_for` beim zeichnen einzeln."""
+    if not isinstance(value, dict):
+        raise ValueError("erwartet {bauform: {rolle: hex}}")
+    return {str(build): {str(role): str(hexv) for role, hexv in roles.items()}
+            for build, roles in value.items() if isinstance(roles, dict)}
+
+
 def _strip_jsonc(text):
     """Entfernt kommentare und abschliessende kommata aus einem JSON-text.
 
@@ -555,8 +565,18 @@ class ConfigLoader:
             ('ship_sprite_enabled', 'ship_sprite_enabled', bool),
             ('ship_length_px', 'ship_length_px', float),
             ('ship_render_scale', 'ship_render_scale', float),
-            ('ship_accent_color', 'ship_accent_color', str),
             ('ship_plume_idle', 'ship_plume_idle', float),
+            ('ship_build', 'ship_build', str),
+            ('ship_pixel_style', 'ship_pixel_style', str),
+            ('ship_build_colors', 'ship_build_colors', _ship_colors),
+            ('ship_plume_particles', 'ship_plume_particles', bool),
+            ('ship_plume_rate', 'ship_plume_rate', float),
+            ('ship_plume_speed', 'ship_plume_speed', float),
+            ('ship_plume_life_s', 'ship_plume_life_s', float),
+            ('ship_plume_spread', 'ship_plume_spread', float),
+            ('ship_plume_glow', 'ship_plume_glow', float),
+            ('ship_plume_glow_radius', 'ship_plume_glow_radius', float),
+            ('ship_pixel_min_cells', 'ship_pixel_min_cells', float),
             # Zoom-abhaengige verkleinerung des schiffs (px je meter)
             ('ship_zoom_shrink_enabled', 'ship_zoom_shrink_enabled', bool),
             ('ship_zoom_shrink_start_scale', 'ship_zoom_shrink_start_scale', float),

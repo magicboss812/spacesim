@@ -14,6 +14,7 @@ import numpy as np
 from physics.reference_frames import apparent_orbital_directions
 from physics.vec import Vec2
 from ship import art as ship_art
+from ship import builds as ship_builds
 
 
 class ShipDrawMixin:
@@ -213,13 +214,42 @@ class ShipDrawMixin:
             return 7.0 * max(0.05, float(getattr(self, '_ship_zoom_factor', 1.0)))
         return self._ship_length_px() * 0.5 * geo.height / geo.length
 
+    def _ship_build_name(self):
+        name = str(getattr(self, 'ship_build', 'original'))
+        return name if name in ship_builds.BUILDS else 'original'
+
+    def _ship_colors(self):
+        """{rolle: hex} der aktuellen bauform: vorgaben + config/dev-UI."""
+        build = self._ship_build_name()
+        overrides = (getattr(self, 'ship_build_colors', None) or {}).get(build)
+        return ship_builds.colors_for(build, overrides)
+
+    def _ship_shapes(self):
+        """(schluessel, formliste) der aktuellen bauform mit ihren farben.
+        Der schluessel wechselt mit bauform ODER einer farbe; beide caches
+        (vektor und zellen) vergleichen ihn."""
+        build = self._ship_build_name()
+        colors = self._ship_colors()
+        key = (build, tuple(sorted(colors.items())))
+        cache = self._ship_shapes_cache
+        if cache is None or cache[0] != key:
+            cache = (key, ship_builds.resolve(build, colors), ship_art._hex_rgb(colors['accent']))
+            self._ship_shapes_cache = cache
+        return cache
+
     def _ship_geometry(self):
-        """Die gebaute schiffs-grafik, gecacht bis die akzentfarbe wechselt."""
+        """Die gebaute vektor-grafik, gecacht bis bauform oder farbe wechseln."""
+        try:
+            key, shapes, accent = self._ship_shapes()
+        except Exception as exc:
+            print(f"RENDERER WARNING: schiffs-bauform unbrauchbar ({exc})")
+            self.ship_sprite_enabled = False
+            return None
         cache = self._ship_geometry_cache
-        if cache is not None and cache.accent == self.ship_accent_color:
+        if cache is not None and cache.key == key:
             return cache
         try:
-            cache = ship_art.build(self.ship_accent_color)
+            cache = ship_art.build(shapes, accent, key)
         except Exception as exc:
             print(f"RENDERER WARNING: schiffs-grafik konnte nicht gebaut werden ({exc})")
             self.ship_sprite_enabled = False
@@ -227,30 +257,38 @@ class ShipDrawMixin:
         self._ship_geometry_cache = cache
         return cache
 
-    def _ship_plume_intensity(self, body, real_dt):
-        """Helligkeit der abgasfahne, weich zwischen leerlauf und schub.
+    def _ship_thrust_target(self, body):
+        """Hebelstellung, mit der die hauptduese GERADE brennt, 0..1.
 
-        `body.last_thrust_direction` wird je frame geleert und von
-        `schiffcontrol` gesetzt, sobald schub anliegt -- es ist also ein
-        echtes "brennt gerade"-signal. Nur schub NACH VORN zuendet die
-        hauptduese: beim rueckwaerts-schub (pfeil ab) sitzen die duesen an
-        der nase, hinten glimmt dann nur der leerlauf.
+        `body.last_thrust_direction` / `last_thrust_level` werden je frame
+        geleert und gesetzt, sobald schub anliegt -- von `schiffcontrol`
+        (pfeiltaste x HUD-hebel) und vom manoever-autopiloten (seine rampe).
+        Nur schub NACH VORN zuendet die hauptduese: beim rueckwaerts-schub
+        sitzen die duesen an der nase.
         """
-        idle = max(0.0, min(1.0, float(self.ship_plume_idle)))
-        target = idle
         thrust = getattr(body, 'last_thrust_direction', None)
-        if thrust is not None:
-            try:
-                # Der vergleich laeuft in WELTkoordinaten: theta und der
-                # schubvektor sind beide absolut, die frame-transformierte
-                # zeichenrichtung waere hier der falsche massstab.
-                theta_world = float(getattr(body, 'theta', 0.0))
-                dot = (float(thrust.x) * math.cos(theta_world)
-                       - float(thrust.y) * math.sin(theta_world))
-                if dot > 0.0:
-                    target = 1.0
-            except Exception:
-                target = 1.0
+        if thrust is None:
+            return 0.0
+        try:
+            # Der vergleich laeuft in WELTkoordinaten: theta und der
+            # schubvektor sind beide absolut, die frame-transformierte
+            # zeichenrichtung waere hier der falsche massstab.
+            theta_world = float(getattr(body, 'theta', 0.0))
+            dot = (float(thrust.x) * math.cos(theta_world)
+                   - float(thrust.y) * math.sin(theta_world))
+        except Exception:
+            dot = 1.0
+        if dot <= 0.0:
+            return 0.0
+        level = getattr(body, 'last_thrust_level', None)
+        return 1.0 if level is None else max(0.0, min(1.0, float(level)))
+
+    def _ship_plume_intensity(self, body, real_dt):
+        """Helligkeit der VEKTOR-fahne: weich zwischen leerlauf und der
+        hebelstellung. (Der pixel-stil hat sein eigenes triebwerksmodell,
+        `ship/plume.py`.)"""
+        idle = max(0.0, min(1.0, float(self.ship_plume_idle)))
+        target = max(idle, self._ship_thrust_target(body))
         # Zeitkonstante ~80 ms, mit dem ECHTEN frame-delta gerechnet, damit
         # das aufflammen bei 30 wie bei 240 fps gleich schnell ist.
         dt = max(0.0, float(real_dt))
@@ -273,6 +311,12 @@ class ShipDrawMixin:
             return
 
         theta = float(theta_override) if theta_override is not None else float(getattr(body, 'theta', 0.0))
+
+        # Pixel-stil (`render/ship_pixel.py`); faellt bei einem fehler auf
+        # die vektor-zeichnung unten zurueck.
+        dest = getattr(self, '_frame_output_fbo', None) or self.ctx.screen
+        if self._draw_ship_pixel(body, x, y, theta, (r, g, b), dest):
+            return
 
         # Die grafik laeuft ueber die ORTHO-pipeline (y nach oben), die
         # uebergebene position kommt aber aus _world_to_screen_xy (top-down).

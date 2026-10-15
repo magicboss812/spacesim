@@ -3,8 +3,17 @@ paths:
   - "bodies/style.py"
   - "bodies/icon.py"
   - "ship/art.py"
+  - "ship/builds.py"
   - "render/bodies.py"
   - "render/ship.py"
+  - "render/ship_pixel.py"
+  - "render/gl/ship_cell.vert"
+  - "render/gl/ship_cell.frag"
+  - "render/gl/ship_pixel.frag"
+  - "render/gl/ship_plume.vert"
+  - "render/gl/ship_plume.frag"
+  - "render/gl/ship_glow.frag"
+  - "ship/plume.py"
   - "render/gl/body_icon.vert"
   - "render/gl/body_icon.frag"
   - "render/gl/body_surface.vert"
@@ -275,6 +284,162 @@ Other load-bearing details:
 Cost (900×700, Erde at 200 px, llvmpipe, `gl.finish()`): about 3.0–3.5 ms
 off, 5.6–7.3 ms on; this machine's noise is ±2 ms between runs.
 
+## Pixel ship: the same cell grid, rotated content (2026-10-15)
+
+`render/ship_pixel.py` (`ShipPixelMixin`) draws the ship in the body idiom.
+`renderer.ship_pixel_style` is `"halbton"`, `"sprite"` or `"vector"` (the
+vector path below); `renderer.ship_build` picks one of five builds. Same two
+passes as the bodies, minus the window layer (the ship is drawn after the
+FXAA resolve anyway, straight into `_frame_output_fbo`):
+
+1. **Cell pass** (`ship_cell.{vert,frag}`): the fills of
+   `ship/art.py::build_cells` rotated and scaled into a cell buffer, one
+   fragment per cell, blending off, in paint order. `o_cell.a` carries the
+   **light** (not a halftone level), so each style derives its own fill from
+   it. Then the bodies' clean pass, unchanged.
+2. **Compose** (`ship_pixel.frag` on `body_pixel.vert`), `u_style`:
+   `2 halbton` (light → coverage: shrinking square from 4-px cells, ordered
+   dither inside the cell below; dark seams between regions, bright rim on
+   the lit side) and `4 sprite` (dithered ramp over all four steps, selout,
+   1-px outline one step above the ground). Outside the cells the compose
+   reads the **heat buffer** of the particle plume (below). LED, blueprint,
+   signal and three print-screen halftones were built and removed again on
+   request (commit history, 2026-10-15).
+
+**Exhaust particles** (`ship/plume.py`, `ship_plume.{vert,frag}`), pixel
+styles only; the vector path keeps its nested-ellipse plume.
+- **Relative, never in world coordinates.** Particles live in a frame
+  centred on the ship but NOT rotating with it (screen axes, build units).
+  They leave a nozzle (`builds.NOZZLES`, per build) along the current
+  heading, so a turning ship bends its plume; the ship's own motion carries
+  the whole plume.
+- **Heat, not sprites.** Each frame the particles go as points, additively,
+  into a float16 heat buffer on the ship's cell grid (rg = heat, smoke). The
+  compose maps heat through a Bayer-dithered ramp built from the build's
+  accent: white-hot > 1.70, yellow > 1.05, warm > 0.62, accent > 0.32,
+  ember > 0.14, then translucent smoke. The core comes from particle
+  density. Per-particle heat 0.20–0.34 (an earlier 0.9–1.3 turned the whole
+  plume into a white blob).
+- **Fixed light points on top of the simulation:** a glow at each nozzle,
+  and above 40 % thrust four shock diamonds on the axis behind it.
+- **Small nozzles are compensated** (`heat × min(3.2, 15 / r)`): with the
+  same particle count their points covered one cell each, and the Ringschiff
+  and Pfeil plumes stayed red.
+- **Driven by the throttle, through a small engine model** (`PlumeParticles.
+  step(dt, throttle, idle, …)`). The throttle comes from
+  `Renderer._ship_thrust_target(body)`: `body.last_thrust_level` (0..1) while
+  `body.last_thrust_direction` points along the nose. `schiffcontrol.
+  apply_thrust` sets it to key × `throttle` (the HUD lever, written by
+  `Telemetry.set_thrust_level`), the manoeuvre executor to its ramp
+  (`profile.throttle_at`); `runtime/loop.py` clears both every frame.
+  - `spool` follows the throttle (up 0.22 s, down 0.12 s). The velocity
+    change stays immediate (physics); only the flame needs time.
+  - **Each particle keeps the state of its emission**: exhaust speed
+    `speed·(0.40 + 0.60 s)`, cone `spread·(1.8 − 0.8 s)`, size, heat and
+    lifetime all depend on the spool at that moment. A lever change
+    therefore travels down the plume with the flow (seen in the 100 → 30 %
+    strip: the hot section detaches and drifts out). Low thrust gives a
+    short, wide, red flame; full thrust a long, tight one with a white core.
+  - **Flow front**: after ignition it runs out at the exhaust speed; the
+    shock diamonds (2 + 3·core of them, spacing growing with the exhaust
+    speed) only light up once it has passed them.
+  - **Ignition** is a small, slow puff (24 particles); the plume then grows
+    outward with its particles. **Shutdown** only stops the supply: the rest
+    drifts off and cools, and the nozzle glow cools over 0.8 s
+    (`nozzle_temp`). An earlier 70-particle burst at full heat made the
+    plume appear out of nowhere.
+  - Idle is a pilot flame: `rate · idle^2.5` extra particles and a faint
+    nozzle glow.
+  - The glow fades in with `smoothstep(0.12, 0.55, spool)` instead of a
+    switch.
+  - The real-loop check of an armed 300 m/s burn: 61 frames of thrust,
+    spool 0.03 → 0.98 over the burn, 0.41 → 0.03 after cut-off. At the
+    lowest warp (60 sim-s per real s) a 30 m/s burn lasts only ~0.06 s on
+    screen, so short burns show as a brief puff.
+- **The plume lights the hull per cell.** `PlumeParticles.light_sources()`
+  gives up to 8 point lights each frame: one glow per nozzle plus up to four
+  heat-weighted centroids of the particles, bucketed by age (age ≈ distance).
+  `ship_cell.frag` puts each cell centre into that frame and sums
+  `strength · (0.35 + 0.65·max(N·L, 0)) / (1 + d² / 4r²)`, with the lights
+  9 units above the plane so the top of the hull is reached too. The sum is
+  capped at 1.3, adds `0.60 · glow` in a warm mix of the accent to the
+  colour and lifts the light (so halbton coverage grows near the fire). It
+  changes colour only, not the region id, so no seams appear. Bending the
+  plume moves the light with it. Smoke in the compose takes warm light from
+  the heat in its own cell.
+- **Glow per screen pixel.** `ship_glow.frag` blurs the heat buffer in two
+  separable gaussian passes (σ = `ship_plume_glow_radius`, 22 units, in
+  cells) into a LINEAR float texture. Each tap reads between two texels
+  (heat is LINEAR too; the compose still reads it with `texelFetch`), which
+  halves the fetches: thrust frame 3.43 → 2.6–2.9 ms in llvmpipe. The
+  compose samples the glow **bilinearly at every screen pixel** and
+  quantises `0.8 · g` into 0.10 alpha steps with a 1-px Bayer dither (cap
+  0.70): the falloff is smooth, and each pixel is still one of a few hard
+  levels. The colour runs from the accent to warm yellow as `g` rises.
+  Smoke lies over it. The glow runs only above 0.30 thrust (invisible at
+  idle, and it would cost two passes and a bigger grid), and the reach grows
+  by only 1.5 σ: beyond that it stays below the first step.
+- **Never write `smoothstep(hi, lo, x)`.** GLSL leaves edge0 ≥ edge1
+  undefined; the first rear glow used it.
+- The grid reach follows the plume (`extent()`, capped at 320 units); a
+  capture does not step the particles.
+- Tunables: `ship_plume_particles`, `ship_plume_rate` (900/s),
+  `ship_plume_speed` (340 units/s), `ship_plume_life_s` (0.55),
+  `ship_plume_spread` (0.10 rad), `ship_plume_glow` (1.0, 0 = off),
+  `ship_plume_glow_radius` (22 units), also in the dev UI.
+
+**Builds and colours** (`ship/builds.py`): `original` (the mockup),
+`ringschiff`, `pfeil`, `schlepper`, `segler`. Shapes name **colour roles**,
+not hex values (`"cargo_a:2"` = role `cargo_a`, shade 2), and `resolve(build,
+colors)` turns them into `(local points, closed, fill, stroke, width, alpha)`
+with `fill`/`stroke = ((r, g, b), kind)`, kind `accent` / `rail` / `plain`.
+`renderer.ship_build_colors` (config, dev UI "Ship › farben der bauform")
+overrides `DEFAULT_COLORS` per build and role.
+- **One role carries a family of near tones.** Large areas are split into
+  plates; each plate takes `shade(rgb, k)` (±9 % value per step, slightly
+  warmer hue, slightly less saturated). The player sets one colour per role
+  and still gets the variation.
+- **The original stays the mockup.** Its shapes keep hex values; each hex
+  belongs to a role and is recoloured **proportionally** (`hex · new /
+  default`), so the defaults reproduce the mockup exactly.
+- **Every build is 230 units long with its nozzles at x = −98 … −115.** The
+  plume (`ship_pixel.frag`, `art._plume_polygons`) is fixed behind that, and
+  `_ship_length_px` normalises on the length. Stay within |y| ≤ 60 (the
+  compose reach).
+- **Bright defaults wash out.** Cells are lifted ×1.55 before the ramp, so a
+  role above ~#8a… goes near white on the lit side (seen on the first sail).
+- The caches (`_ship_shapes`, vector geometry, cell VBOs) compare a key
+  `(build, sorted colours)`; a dev-UI edit rebuilds on the next frame.
+
+Rules, each from a seen failure:
+- **The ship needs about 36 cells along its length**
+  (`ship_pixel_min_cells`). At the bodies' small cell (3 px, 26 cells) every
+  rotation off the axes turned the silhouette into a blob; at 2 px (39 cells)
+  it holds at every angle. `_ship_cell_size` = min(small body cell,
+  length / min_cells), so 2 px at 1280×800, 3 px at 2560×1440, down to 1 px
+  under the zoom shrink.
+- **The grid is screen-aligned and hangs on the rounded ship centre**, like
+  the bodies; rotation re-rasterises the silhouette, translation moves it in
+  1-px steps.
+- **Only fills and two kinds of strokes become cells.** Accent strokes
+  become single emissive cells, rail strokes one cell row. The original's
+  struts every 8 units and bulkheads every 10 land on almost every cell and
+  turned radiator and hull into noise.
+- **Tags: 1.0 hull, 0.7 rail, 0.85 accent, tested as a band.** A plain
+  `tag > 0.8` matched the hull, which then drew as flat accent colour with no
+  outline.
+- **The light is steeper than for the bodies** (`z ≥ 0.75`) **plus a 0.40
+  ambient**: from above a flat ship is lit grazing most of the time, and the
+  hull sat entirely in the shadow step.
+- **Line width in the cell pass is 1 cell**, divided by `capture_scale`,
+  because `_set_line_width` multiplies by it.
+
+Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms; pixel 0.54–0.66 ms
+without particles; with particles, plume light and glow 1.35 ms idle and
+2.6–2.9 ms at full thrust (original / Schlepper, ~470 particles). The Python part is ≤ 0.31 ms (step 0.22 +
+point build 0.09); the rest is the heat pass and the extra texel fetch in
+software GL.
+
 ## Die Marke — `bodies/icon.py`
 
 Sinkt ein Körper unter `renderer.body_icon_min_radius_px`, wird er de-gerendert und
@@ -543,8 +708,9 @@ es sechs Uniform-Schreibvorgänge, der Rest läuft über `_set_uniform`.
   Claude Design mockup `Ship Mockup.dc.html`
   (project `7c1401de-e967-41a5-818a-742e9a6015b3`). The shape lists are kept
   in the mockup's own **SVG coordinates** (y down, viewBox `0 0 300 170`) so
-  they can be diffed against it line by line; `build(accent)` flips them into
-  local ship space (+x = nose, +y up, origin at the visual centre), flattens
+  they can be diffed against it line by line; `builds.resolve()` flips them
+  into local ship space (+x = nose, +y up, origin at the visual centre) and
+  `build(shapes, accent_rgb)` flattens
   the beziers/arcs/dashes, ear-clips every fill into triangles and merges the
   result into ~37 `(mode, rgba, width, start, count)` batches over one shared
   vertex array. Pure numbers — no pygame, no GL, no numba. **Order is the

@@ -32,6 +32,10 @@ schrittweite, und deshalb ist die schrittweite waehrend des brennens auf
 `tests/maneuver_execute_test.py` abschnitt 8 gegen die vorschau gemessen.
 """
 
+import math
+
+from physics.vec import Vec2
+
 from .plan import MIN_EXECUTABLE_DV
 from .profile import BurnProfile
 
@@ -249,10 +253,24 @@ class ManeuverExecutor:
 
         # Der schubbogen des HUDs zeigt damit die rampe -- kostenlos, weil
         # der regler ohnehin gezeichnet wird.
+        level = self.profile.throttle_at(max(0.0, (tau0 + tau1) * 0.5))
         if self.telemetry is not None:
             try:
-                self.telemetry.set_thrust_level(
-                    self.profile.throttle_at(max(0.0, (tau0 + tau1) * 0.5)))
+                self.telemetry.set_thrust_level(level)
+            except Exception:
+                pass
+        # Und das schiff "brennt" fuer die darstellung: dieselben zwei felder,
+        # die `schiffcontrol.apply_thrust` setzt (die hauptschleife leert sie
+        # je frame). Ohne sie zeigte ein autopilot-brennvorgang keine fahne.
+        # Die richtung ist die NASE, nicht die schubrichtung: das delta-v
+        # wirkt oben unabhaengig davon, und die hauptduese brennt auch,
+        # waehrend die nase noch nachdreht -- mit der schubrichtung blieb die
+        # fahne dann aus (render/ship.py verlangt schub nach vorn).
+        if self.ship is not None and dv > 0.0:
+            try:
+                theta = float(getattr(self.ship, 'theta', 0.0))
+                self.ship.last_thrust_direction = Vec2(math.cos(theta), -math.sin(theta))
+                self.ship.last_thrust_level = float(level)
             except Exception:
                 pass
 

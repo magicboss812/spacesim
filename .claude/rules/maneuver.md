@@ -199,6 +199,14 @@ zwei Bilder (§4 prüft das mit 1-Stunden-Frames: größter Überschuss 0.000e+0
 s). Innerhalb von `orient_lead_seconds` zwingt `_apply_maneuver()` in
 `runtime/loop.py` `camera.sim_dt` auf Echtzeit.
 
+**Der Ausführer meldet seinen Brennvorgang an die Darstellung.** Je
+Schritt mit Δv setzt er `ship.last_thrust_direction` (die **Nase**, nicht
+die Schubrichtung — die Hauptdüse brennt auch, während die Nase noch
+nachdreht) und `ship.last_thrust_level` = `profile.throttle_at(...)`, dieselben
+Felder wie `schiffcontrol.apply_thrust`; die Hauptschleife leert sie je
+Frame. Ohne das zeigte ein Autopilot-Brennvorgang keine Abgasfahne
+(`.claude/rules/body-art.md`, "Exhaust particles").
+
 **Handeingabe bricht immer ab.** Alle vier Steuertasten, nicht nur der
 Schub: wer im Brennvorgang dreht, macht die restliche Brenndauer ohnehin
 ungültig. Der Knoten bleibt dabei im Plan.

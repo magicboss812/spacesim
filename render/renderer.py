@@ -21,6 +21,7 @@ from render.text import TextMixin
 from render.background_draw import BackgroundDrawMixin
 from render.bodies import BodyDrawMixin
 from render.body_pixel import BodyPixelMixin
+from render.ship_pixel import ShipPixelMixin
 from render.ship import ShipDrawMixin
 from render.orbits import OrbitDrawMixin
 from render.prediction import PredictionDrawMixin
@@ -36,6 +37,7 @@ class Renderer(
     BodyDrawMixin,
     BodyPixelMixin,
     ShipDrawMixin,
+    ShipPixelMixin,
     OrbitDrawMixin,
     PredictionDrawMixin,
     ManeuverDrawMixin,
@@ -452,12 +454,56 @@ class Renderer(
         # spieler-regler daneben (dev-UI, reiter "Ship").
         self.ship_length_px = 78.0
         self.ship_render_scale = 1.0
-        self.ship_accent_color = ship_art.DEFAULT_ACCENT
+        # Bauform und farben (`ship/builds.py`): `ship_build` waehlt eine von
+        # BUILDS, `ship_build_colors` haelt je bauform {rolle: "#rrggbb"} und
+        # ueberschreibt damit die vorgaben (config, dev-UI "Ship").
+        self.ship_build = "original"
+        self.ship_build_colors = {}
         # Grundhelligkeit der abgasfahne ohne schub; unter schub faehrt sie
         # auf 1.0 hoch (siehe _draw_ship_sprite).
         self.ship_plume_idle = 0.22
         self._ship_geometry_cache = None
+        self._ship_shapes_cache = None
         self._ship_plume_level = 0.0
+        # Zeichenweise (`render/ship_pixel.py`): "halbton" oder "sprite" im
+        # pixel-stil der koerper, "vector" die vektor-zeichnung. Das schiff
+        # bleibt mindestens `ship_pixel_min_cells` zellen lang, sonst werden
+        # die zellen kleiner.
+        self.ship_pixel_style = "halbton"
+        self.ship_pixel_min_cells = 36.0
+        self._ship_cell_program = None
+        self._ship_pixel_program = None
+        self._ship_pixel_vao = None
+        self._ship_cell_vaos = []
+        self._ship_cells_cache = None
+        self._ship_cell_fbo = None
+        self._ship_cell_textures = ()
+        self._ship_clean_fbo = None
+        self._ship_clean_textures = ()
+        self._frame_output_fbo = None
+        # Partikel-fahne (`ship/plume.py`): nur im pixel-stil, relativ zum
+        # schiff. Rate in partikeln/s bei vollem schub, geschwindigkeit in
+        # einheiten/s (das schiff ist 230 lang), lebensdauer in s, streuung
+        # als winkel-sigma in rad.
+        self.ship_plume_particles = True
+        self.ship_plume_rate = 900.0
+        self.ship_plume_speed = 340.0
+        self.ship_plume_life_s = 0.55
+        self.ship_plume_spread = 0.10
+        self._ship_plume = None
+        self._ship_plume_program = None
+        self._ship_plume_vao = None
+        self._ship_plume_vbo = None
+        self._ship_heat_tex = None
+        self._ship_heat_fbo = None
+        # Schein der fahne: verstaerkung und gauss-radius (sigma) in
+        # einheiten der bauform; 0 schaltet ihn ab.
+        self.ship_plume_glow = 1.0
+        self.ship_plume_glow_radius = 22.0
+        self._ship_glow_program = None
+        self._ship_glow_vao = None
+        self._ship_glow_tex = ()
+        self._ship_glow_fbo = ()
         # --- zoom-abhaengige verkleinerung des schiffs -------------------
         # Das schiff bleibt in bildschirm-pixeln gezeichnet (siehe oben),
         # aber NICHT ueber jede zoomstufe gleich gross: weit herausgezoomt --
@@ -963,6 +1009,7 @@ class Renderer(
         # Das endziel: das fenster, beim hochaufgeloesten foto dessen
         # offscreen-framebuffer.
         output_fbo = self.output_framebuffer or self.ctx.screen
+        self._frame_output_fbo = output_fbo
         if self.enable_fxaa and self.fbo:
             target_fbo = self.fbo
         else:

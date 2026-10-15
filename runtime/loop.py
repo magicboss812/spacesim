@@ -181,6 +181,7 @@ def run(app):
             app.ship_control.last_thrust_direction = None
             if app.ship is not None:
                 setattr(app.ship, "last_thrust_direction", None)
+                setattr(app.ship, "last_thrust_level", 0.0)
             # Schiff-steuerung liest den tastaturzustand direkt (polling, keine
             # ereignisse) -- deshalb muss die eingabe-vorfahrt hier gesondert
             # geprueft werden, sonst fliegt das schiff waehrend einer

@@ -768,3 +768,4 @@ class Telemetry:
         self.thrust_level = max(0.0, min(1.0, float(level)))
         if self.ship_control is not None:
             self.ship_control.thrust_acc = self.thrust_max * self.thrust_level
+            self.ship_control.throttle = self.thrust_level

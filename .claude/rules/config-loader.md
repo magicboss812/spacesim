@@ -51,7 +51,8 @@ range and `orbit_line_full_alpha_mult` under **Renderer › visuals**.
 
 Ownership follows the *drawer*, not the subject: the ship's own look is under
 `renderer` (`ship_sprite_enabled`, `ship_length_px`, `ship_render_scale`,
-`ship_zoom_shrink_*`, `ship_accent_color`, `ship_plume_idle`) because the
+`ship_zoom_shrink_*`, `ship_build`, `ship_pixel_style`, `ship_build_colors`,
+`ship_plume_idle`, `ship_plume_*`) because the
 renderer owns it — `ship` holds the flight-model knobs. Same for what gets
 written next to a body: `body_label_mode` / `body_label_min_radius_px`.
 
