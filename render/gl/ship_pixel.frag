@@ -28,6 +28,11 @@ uniform sampler2D u_glow;      // einheit 3: weichgezeichnete hitze (schein), LI
 uniform float u_glow_gain;
 uniform float u_glow_temp;     // spool 0..1: farbe des scheins
 uniform vec2 u_origin;
+// Schiffsmitte relativ zu u_origin, ganze pixel und ein vielfaches von u_k.
+// Jedes bayer-muster zaehlt von HIER: u_origin wandert mit der reichweite
+// der fahne (zufaellige partikel), und von der ecke aus gezaehlt kippte
+// dabei das ganze dithern des rumpfs, auch im leerlauf.
+uniform ivec2 u_anchor;
 uniform ivec2 u_grid;
 uniform int u_k;
 uniform int u_style;
@@ -131,6 +136,8 @@ void main() {
     int k = u_k;
     ivec2 c = cell_of(rel);
     ivec2 sub = rel - c * k;
+    ivec2 q = rel - u_anchor;          // pixel ab schiffsmitte
+    ivec2 qc = c - u_anchor / k;       // zelle ab schiffsmitte
 
     vec4 cell, id;
     if (fetch(c, cell, id)) {
@@ -150,7 +157,7 @@ void main() {
                 ivec2 p = sub - ivec2(off, k - n - off);
                 ink = p.x >= 0 && p.y >= 0 && p.x < n && p.y < n;
             } else {
-                ink = bayer4(rel) < f;
+                ink = bayer4(q) < f;
             }
             if (!ink) {
                 fragColor = out_col(u_grout, 0.55);
@@ -186,7 +193,7 @@ void main() {
     // stufen von 0.10 alpha gedithert (je pixel, nicht je zelle).
     vec2 guv = (gl_FragCoord.xy - u_origin) / float(k) / vec2(textureSize(u_glow, 0));
     float g = texture(u_glow, guv).r * u_glow_gain;
-    float gb = bayer4(ivec2(floor(gl_FragCoord.xy)));
+    float gb = bayer4(q);
     float ga = clamp(floor(g * 0.80 / 0.10 + gb) * 0.10, 0.0, 0.70);
     // Farbe des scheins: innen heller, und mit dem schub waermer bis
     // weiss-blau (heisseres gas), bei wenig schub ein dunkles rot.
@@ -195,7 +202,7 @@ void main() {
     vec3 gc = mix(gout, gin, clamp(g * 0.9, 0.0, 0.75) * (0.45 + 0.55 * u_glow_temp));
 
     if (hs.x > 0.02 || hs.y > 0.02) {
-        vec4 f = fire(hs.x, hs.y, temp, bayer4(c));
+        vec4 f = fire(hs.x, hs.y, temp, bayer4(qc));
         if (f.a > 0.0) {
             if (u_style == 4) {
                 // Kondensat (halb durchsichtig) liegt UEBER dem schein.
@@ -213,7 +220,7 @@ void main() {
                 ivec2 p = sub - ivec2(off, k - n - off);
                 ink = p.x >= 0 && p.y >= 0 && p.x < n && p.y < n;
             } else {
-                ink = bayer4(rel) < cov;
+                ink = bayer4(q) < cov;
             }
             if (ink) {
                 fragColor = out_col(mix(gc, f.rgb, f.a < 1.0 && ga > 0.0 ? f.a : 1.0),
