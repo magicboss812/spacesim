@@ -9,6 +9,13 @@
 //   3 blaupause dunkle paneele, jede regionsgrenze ein strich in HUD-schrift
 //   4 sprite    volle zellen, gedithertes licht, dunkle 1-px-kontur aussen
 //   5 signal    einfarbig in HUD-schrift, jede zelle eine LED (punktmatrix)
+// Halbton mit EIGENEM raster (6-8): die form bleibt auf den feinen zellen,
+// der ton liegt auf einem groeberen druckraster (2 zellen teilung, an
+// u_origin) -- wie im druck, wo die kante scharf ist und nur die flaeche
+// gerastert. Bei 2 in der zelle selbst gab es nur zwei punktgroessen.
+//   6 rasterpunkt  quadratische punkte in regionsfarbe, gross gefast
+//   7 linienraster waagerechte zeilen in HUD-schrift, dicke = ton
+//   8 rautenraster 45-grad-raster aus rauten (die fase des HUD als punkt)
 // Ausserhalb der zellen: die abgasfahne als punktmatrix (bei 4 in stufen).
 //
 // Koordinaten: GL-pixel (y nach OBEN); u_origin ist die linke UNTERE ecke der
@@ -84,6 +91,8 @@ vec3 edge(ivec2 c, ivec2 d, bool owner, vec4 cell, vec4 id, vec3 col) {
         if (is_accent(id)) return col;
         if (u_style == 1) return lit_side ? u_rim : mix(col, u_ink, 0.40);
         if (u_style == 2) return lit_side ? u_rim : col;
+        if (u_style == 7) return lit_side ? u_ink : mix(u_ink, u_grout, 0.45);
+        if (u_style >= 6) return lit_side ? u_rim : mix(u_grout, u_ink, 0.30);
         if (u_style == 3) return lit_side ? u_ink : mix(u_ink, u_grout, 0.45);
         if (u_style == 4) return lit_side ? min(col * 1.25 + u_ink * 0.25, vec3(1.0))
                                           : col * 0.62;
@@ -96,10 +105,55 @@ vec3 edge(ivec2 c, ivec2 d, bool owner, vec4 cell, vec4 id, vec3 col) {
     float l = max(cell.a, nc.a);
     vec3 hi = max(cell.rgb, nc.rgb);
     if (u_style == 1) return mix(hi, u_ink, 0.30) * mix(0.62, 1.0, smoothstep(0.4, 0.95, l));
-    if (u_style == 2) return mix(u_grout, hi, 0.25);              // dunkle naht
+    if (u_style == 2 || u_style == 6 || u_style == 8) return mix(u_grout, hi, 0.25);   // dunkle naht
+    if (u_style == 7) return col;
     if (u_style == 3) return mix(mix(u_ink, u_grout, 0.55), u_ink, smoothstep(0.4, 0.95, l));
     if (u_style == 4) return min(cell.rgb, nc.rgb) * 0.55;        // selout
     return mix(hi, u_ink, 0.45);
+}
+
+// Ton einer zelle fuer das druckraster: aus der GESCHATTETEN farbe, damit
+// region (helle module, dunkle radiatoren) und licht beide mitreden.
+float screen_tone(vec4 cell, vec4 id) {
+    if (is_accent(id)) return 1.0;
+    // Gedeckelt: auch die hellste flaeche behaelt ihr raster, sonst wird
+    // eine beleuchtete flaeche zum vollen block und das raster ist weg.
+    return min(smoothstep(0.10, 0.62, luma(cell.rgb)), 0.80);
+}
+
+// Liegt das pixel `rel` bei ton v auf farbe? Raster 2 zellen teilung.
+bool screen_ink(ivec2 rel, float v, int style) {
+    int P = 2 * u_k;
+    float Pf = float(P);
+    if (v <= 0.02) return false;
+    if (style == 7) {
+        // Zeilen: von oben in jedem band, dicke 1..P px.
+        int band_y = rel.y - int(floor(float(rel.y) / Pf)) * P;
+        int t = clamp(int(floor(Pf * v + 0.5)), 1, max(P - 1, 1));
+        return (P - 1 - band_y) < t;
+    }
+    if (style == 8) {
+        // Rauten auf einem um eine halbe teilung versetzten raster (45 grad).
+        int row = int(floor(float(rel.y) / Pf));
+        float sx = float(rel.x) + ((row & 1) == 1 ? 0.5 * Pf : 0.0);
+        vec2 l = vec2(sx - floor(sx / Pf) * Pf, float(rel.y - row * P)) + 0.5 - 0.5 * Pf;
+        float r = Pf * sqrt(v * 0.5) + 0.25;
+        return abs(l.x) + abs(l.y) <= r;
+    }
+    // 6: quadrat, ab 4 px gefast -- die HUD-ecke.
+    ivec2 sp = ivec2(floor(vec2(rel) / Pf));
+    ivec2 q = rel - sp * P;
+    int n = clamp(int(floor(Pf * sqrt(v) + 0.5)), 1, P);
+    int off = (P - n) / 2;
+    ivec2 d = q - ivec2(off);
+    if (d.x < 0 || d.y < 0 || d.x >= n || d.y >= n) return false;
+    if (n >= 4 && n < P) {
+        int m = n - 1;
+        if (d.x + d.y < 1 || (m - d.x) + d.y < 1 || d.x + (m - d.y) < 1 || (m - d.x) + (m - d.y) < 1) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Abgasfahne: im vektor-mockup ineinander liegende ellipsen, zur duesen-
@@ -169,6 +223,28 @@ void main() {
                 fragColor = out_col(u_grout, 0.55);
                 return;
             }
+        } else if (u_style >= 6) {
+            float v = screen_tone(cell, id);
+            vec3 inkc;
+            if (acc) {
+                inkc = cell.rgb;
+            } else if (u_style == 7) {
+                inkc = mix(u_ink * vec3(0.42, 0.58, 0.68), u_ink * 0.92, smoothstep(0.3, 0.8, v));
+            } else {
+                // Punkte in der regionsfarbe, eine stufe angehoben.
+                inkc = min(cell.rgb * 1.30 + u_ink * 0.06, vec3(1.0));
+            }
+            bool on = acc || screen_ink(rel, v, u_style);
+            vec3 base = on ? inkc : u_grout;
+            float a = on ? 1.0 : (u_style == 7 ? 0.40 : 0.60);
+            vec3 e = base;
+            if (sub.x == k - 1) e = edge(c, ivec2(1, 0), true, cell, id, e);
+            else if (sub.x == 0) e = edge(c, ivec2(-1, 0), false, cell, id, e);
+            if (sub.y == 0) e = edge(c, ivec2(0, -1), true, cell, id, e);
+            else if (sub.y == k - 1) e = edge(c, ivec2(0, 1), false, cell, id, e);
+            if (any(notEqual(e, base))) a = 1.0;
+            fragColor = out_col(e, a);
+            return;
         } else if (u_style == 3) {
             // Blaupause: das paneel dunkel, die farbe nur als hauch.
             col = acc ? cell.rgb : mix(u_grout, cell.rgb, 0.22 + 0.18 * lit);
@@ -208,6 +284,14 @@ void main() {
                 if (dens > 0.62 + b) { fragColor = out_col(hot, 1.0); return; }
                 if (dens > 0.36 + b) { fragColor = out_col(u_accent, 1.0); return; }
                 if (dens > 0.16 + b) { fragColor = out_col(u_accent * 0.45, 1.0); return; }
+                discard;
+            }
+            if (u_style >= 6) {
+                if (screen_ink(rel, clamp(dens * 1.1, 0.0, 1.0), u_style)) {
+                    vec3 pc = mix(u_accent, hot, smoothstep(0.5, 0.9, dens));
+                    fragColor = out_col(pc, 0.95);
+                    return;
+                }
                 discard;
             }
             int n = u_style == 2 ? clamp(int(ceil(dens * float(s))), 1, s)

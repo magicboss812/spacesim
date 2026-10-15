@@ -298,6 +298,13 @@ drawn after the FXAA resolve anyway, straight into `_frame_output_fbo`):
    blaupause` (dark panels, every region boundary a HUD-ink stroke), `4
    sprite` (dithered ramp over all four steps, selout, 1-px outline one step
    above the ground), `5 signal` (monochrome HUD ink, every cell an LED).
+   `6 rasterpunkt`, `7 linienraster`, `8 rautenraster` are halftones on a
+   **separate print screen** (pitch 2 cells, anchored at the grid origin):
+   the silhouette stays on the fine cells and only the tone is screened,
+   as square dots (chamfered from 4 px), horizontal lines in HUD ink, or
+   diamonds on a half-offset screen. Tone = luma of the shaded cell, capped
+   at 0.80: uncapped, a lit panel filled solid and lost its screen. Style 2
+   screens inside the cell and has only two dot sizes at 2-px cells.
    The plume is a dot matrix outside the cells, `s = −(X²+Y²)/(2X)` being the
    closed form of the mockup's nested ellipses shrunk toward the nozzle.
 

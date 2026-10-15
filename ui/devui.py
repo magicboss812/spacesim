@@ -1073,7 +1073,8 @@ def draw_dev_panels(c: "DevContext"):
             _slider("fahne im leerlauf", c.renderer, 'ship_plume_idle', 0.0, 1.0, "%.2f",
                     tooltip="Grundhelligkeit der abgasfahne ohne schub.\n"
                             "Unter schub faehrt sie immer auf 1.0.")
-            styles = ["vektor", "1 led", "2 halbton", "3 blaupause", "4 sprite", "5 signal"]
+            styles = ["vektor", "1 led", "2 halbton", "3 blaupause", "4 sprite", "5 signal",
+                      "6 rasterpunkt", "7 linienraster", "8 rautenraster"]
             cur = max(0, min(len(styles) - 1, int(getattr(c.renderer, 'ship_pixel_style', 0))))
             changed, idx = imgui.combo("pixel-stil", cur, styles)
             if changed:

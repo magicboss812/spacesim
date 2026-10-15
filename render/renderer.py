@@ -461,8 +461,8 @@ class Renderer(
         self._ship_geometry_cache = None
         self._ship_plume_level = 0.0
         # Pixel-stil des schiffs (`render/ship_pixel.py`): 0 = vektor-
-        # zeichnung, 1..5 die auspraegungen (led, halbton, blaupause, sprite,
-        # signal). Das schiff bleibt mindestens so viele zellen lang, sonst
+        # zeichnung, 1..8 die auspraegungen (led, halbton, blaupause, sprite,
+        # signal, rasterpunkt, linienraster, rautenraster). Das schiff bleibt mindestens so viele zellen lang, sonst
         # werden die zellen kleiner.
         self.ship_pixel_style = 1
         self.ship_pixel_min_cells = 36.0
