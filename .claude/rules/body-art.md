@@ -400,6 +400,12 @@ styles only; the vector path keeps its nested-ellipse plume.
   by only 1.5 σ: beyond that it stays below the first step.
 - **Never write `smoothstep(hi, lo, x)`.** GLSL leaves edge0 ≥ edge1
   undefined; the first rear glow used it.
+- **`GL_POINT_SPRITE` must be on** (`render/pipelines.py`, once at init).
+  `ship_plume.frag` reads `gl_PointCoord`, and `runtime/window.py` requests
+  no profile, so SDL gives a *compatibility* context; there `gl_PointCoord`
+  is only defined with point sprites enabled, otherwise every particle is
+  discarded. llvmpipe got it right without it, NVIDIA 595.71 did not: heat
+  buffer 0 cells at full spool (no plume at all), 587–633 cells with it.
 - The grid reach follows the plume (`extent()`, capped at 320 units); a
   capture does not step the particles.
 - Tunables: `ship_plume_particles`, `ship_plume_rate` (900/s),

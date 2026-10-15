@@ -142,6 +142,17 @@ class ShaderPipelineMixin:
             'body_pixel.vert', 'ship_pixel.frag', 'ship_pixel')
         self._ship_plume_program = self._compile_shader_program(
             'ship_plume.vert', 'ship_plume.frag', 'ship_plume')
+        # ship_plume.frag liest gl_PointCoord. pygame/SDL liefert ohne
+        # profilwunsch einen COMPATIBILITY-kontext, und dort ist gl_PointCoord
+        # nur bei eingeschaltetem GL_POINT_SPRITE definiert -- sonst verwarf
+        # der shader jedes partikel (NVIDIA: hitzepuffer 0 statt 587 zellen,
+        # keine fahne). Einmal einschalten; im core-profil ist der aufruf
+        # GL_INVALID_ENUM, den fehler sofort abholen.
+        try:
+            self.ctx.enable_direct(0x8861)  # GL_POINT_SPRITE
+            _ = self.ctx.error
+        except Exception:
+            pass
         self._ship_glow_program = self._compile_shader_program(
             'body_pixel.vert', 'ship_glow.frag', 'ship_glow')
         quad = self._ensure_quad_vbo()
