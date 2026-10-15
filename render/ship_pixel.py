@@ -129,7 +129,7 @@ class ShipPixelMixin:
         return (self._ship_glow_vao is not None
                 and float(getattr(self, 'ship_plume_glow', 0.0)) > 0.0)
 
-    def _ship_plume_step(self, build, head):
+    def _ship_plume_step(self, body, build, head):
         """Die partikel einen echtzeit-schritt weiter; im foto (capture)
         steht die fahne still, sie zeigt den zustand des fensters."""
         if not bool(getattr(self, 'ship_plume_particles', True)) \
@@ -140,7 +140,9 @@ class ShipPixelMixin:
         sim = self._ship_plume
         capture = float(getattr(self, 'capture_scale', 1.0) or 1.0) != 1.0
         dt = 0.0 if capture else float(getattr(self, '_frame_real_dt', 0.0))
-        sim.step(dt, self._ship_plume_level, head, ship_builds.NOZZLES.get(build, ()),
+        sim.step(dt, self._ship_thrust_target(body),
+                 max(0.0, min(1.0, float(self.ship_plume_idle))),
+                 head, ship_builds.NOZZLES.get(build, ()),
                  float(self.ship_plume_rate), float(self.ship_plume_speed),
                  float(self.ship_plume_life_s), float(self.ship_plume_spread))
         return sim
@@ -198,15 +200,14 @@ class ShipPixelMixin:
         scale = length_px / geo.length
         hx, hy = math.cos(theta), -math.sin(theta)
         build = self._ship_build_name()
-        level = self._ship_plume_intensity(body, getattr(self, '_frame_real_dt', 0.0))
-        sim = self._ship_plume_step(build, (hx, hy))
+        sim = self._ship_plume_step(body, build, (hx, hy))
         # Reichweite um die mitte: nase (115) bzw. so weit, wie die fahne
         # gerade reicht (gedeckelt); jede bauform bleibt in |y| <= 60.
         span = 147.0 if sim is None else min(320.0, max(147.0, sim.extent()))
-        # Der schein erst ab sichtbarem schub: im leerlauf ist er ohnehin
+        # Der schein erst, wenn das triebwerk laeuft: im leerlauf ist er
         # unsichtbar und kostete zwei weichzeichner-paesse und ein groesseres
         # raster. Ueber 1.5 sigma hinaus bleibt er unter der ersten stufe.
-        glow = self._ship_glow_on() and sim is not None and level > 0.30
+        glow = self._ship_glow_on() and sim is not None and sim.spool > 0.12
         glow_r = float(self.ship_plume_glow_radius) if glow else 0.0
         reach = (span + 1.5 * glow_r) * scale + 2.0 * k
         while k < 64 and 2.0 * reach / k + 4 > _SHIP_CELL_CAP:
@@ -269,7 +270,10 @@ class ShipPixelMixin:
             if glow:
                 ctx.disable(moderngl.BLEND)
                 self._ship_glow_pass(max(0.5, glow_r * scale / k), n)
-                glow_gain = float(self.ship_plume_glow)
+                # Mit dem hochlaufen einblenden, nicht an einer schwelle
+                # anschalten: smoothstep(0.12, 0.55) des spool.
+                t = min(1.0, max(0.0, (sim.spool - 0.12) / 0.43))
+                glow_gain = float(self.ship_plume_glow) * t * t * (3.0 - 2.0 * t)
             else:
                 fbo = self._ship_glow_fbo[1]
                 fbo.use()

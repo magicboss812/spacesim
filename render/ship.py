@@ -257,30 +257,38 @@ class ShipDrawMixin:
         self._ship_geometry_cache = cache
         return cache
 
-    def _ship_plume_intensity(self, body, real_dt):
-        """Helligkeit der abgasfahne, weich zwischen leerlauf und schub.
+    def _ship_thrust_target(self, body):
+        """Hebelstellung, mit der die hauptduese GERADE brennt, 0..1.
 
-        `body.last_thrust_direction` wird je frame geleert und von
-        `schiffcontrol` gesetzt, sobald schub anliegt -- es ist also ein
-        echtes "brennt gerade"-signal. Nur schub NACH VORN zuendet die
-        hauptduese: beim rueckwaerts-schub (pfeil ab) sitzen die duesen an
-        der nase, hinten glimmt dann nur der leerlauf.
+        `body.last_thrust_direction` / `last_thrust_level` werden je frame
+        geleert und gesetzt, sobald schub anliegt -- von `schiffcontrol`
+        (pfeiltaste x HUD-hebel) und vom manoever-autopiloten (seine rampe).
+        Nur schub NACH VORN zuendet die hauptduese: beim rueckwaerts-schub
+        sitzen die duesen an der nase.
         """
-        idle = max(0.0, min(1.0, float(self.ship_plume_idle)))
-        target = idle
         thrust = getattr(body, 'last_thrust_direction', None)
-        if thrust is not None:
-            try:
-                # Der vergleich laeuft in WELTkoordinaten: theta und der
-                # schubvektor sind beide absolut, die frame-transformierte
-                # zeichenrichtung waere hier der falsche massstab.
-                theta_world = float(getattr(body, 'theta', 0.0))
-                dot = (float(thrust.x) * math.cos(theta_world)
-                       - float(thrust.y) * math.sin(theta_world))
-                if dot > 0.0:
-                    target = 1.0
-            except Exception:
-                target = 1.0
+        if thrust is None:
+            return 0.0
+        try:
+            # Der vergleich laeuft in WELTkoordinaten: theta und der
+            # schubvektor sind beide absolut, die frame-transformierte
+            # zeichenrichtung waere hier der falsche massstab.
+            theta_world = float(getattr(body, 'theta', 0.0))
+            dot = (float(thrust.x) * math.cos(theta_world)
+                   - float(thrust.y) * math.sin(theta_world))
+        except Exception:
+            dot = 1.0
+        if dot <= 0.0:
+            return 0.0
+        level = getattr(body, 'last_thrust_level', None)
+        return 1.0 if level is None else max(0.0, min(1.0, float(level)))
+
+    def _ship_plume_intensity(self, body, real_dt):
+        """Helligkeit der VEKTOR-fahne: weich zwischen leerlauf und der
+        hebelstellung. (Der pixel-stil hat sein eigenes triebwerksmodell,
+        `ship/plume.py`.)"""
+        idle = max(0.0, min(1.0, float(self.ship_plume_idle)))
+        target = max(idle, self._ship_thrust_target(body))
         # Zeitkonstante ~80 ms, mit dem ECHTEN frame-delta gerechnet, damit
         # das aufflammen bei 30 wie bei 240 fps gleich schnell ist.
         dt = max(0.0, float(real_dt))

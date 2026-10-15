@@ -14,6 +14,10 @@ class schiffcontrol:
         self.schiff = schiff
         self.rotation_speed = 3.0
         self.thrust_acc = 600.0
+        # Hebelstellung 0..1 (HUD-schubbogen, `Telemetry.set_thrust_level`).
+        # Die beschleunigung traegt sie schon in `thrust_acc`; hier steht sie
+        # noch einmal fuer die DARSTELLUNG (abgasfahne, render/ship_pixel.py).
+        self.throttle = 1.0
         self.last_thrust_direction = None
         # Active orientation autopilot (one of SNAP_MODES) or None. Latched:
         # toggled on/off by a key tap; the renderer computes the target heading
@@ -25,6 +29,7 @@ class schiffcontrol:
         self._snap_locked = False
         if self.schiff is not None:
             setattr(self.schiff, "last_thrust_direction", None)
+            setattr(self.schiff, "last_thrust_level", 0.0)
 
     def handle_rotation(self, keys, real_dt):
         """rotation mit echtem (wanduhr-)delta behandeln damit das drehen sich glatt anfühlt.
@@ -48,6 +53,8 @@ class schiffcontrol:
             thrust_direction = direction if thrust_input > 0.0 else direction * -1.0
             self.last_thrust_direction = thrust_direction.copy()
             setattr(self.schiff, "last_thrust_direction", thrust_direction.copy())
+            setattr(self.schiff, "last_thrust_level",
+                    max(0.0, min(1.0, abs(thrust_input) * float(self.throttle))))
             delta_v = thrust_direction * (abs(thrust_input) * self.thrust_acc * float(real_dt))
             self.schiff.velocity += delta_v
 

@@ -325,8 +325,37 @@ styles only; the vector path keeps its nested-ellipse plume.
 - **Small nozzles are compensated** (`heat × min(3.2, 15 / r)`): with the
   same particle count their points covered one cell each, and the Ringschiff
   and Pfeil plumes stayed red.
-- **Ignition burst** of 70 particles when thrust crosses 0.45; idle emits
-  `rate · level^2.5` (at 0.22 about 2 % of full thrust, a flicker).
+- **Driven by the throttle, through a small engine model** (`PlumeParticles.
+  step(dt, throttle, idle, …)`). The throttle comes from
+  `Renderer._ship_thrust_target(body)`: `body.last_thrust_level` (0..1) while
+  `body.last_thrust_direction` points along the nose. `schiffcontrol.
+  apply_thrust` sets it to key × `throttle` (the HUD lever, written by
+  `Telemetry.set_thrust_level`), the manoeuvre executor to its ramp
+  (`profile.throttle_at`); `runtime/loop.py` clears both every frame.
+  - `spool` follows the throttle (up 0.22 s, down 0.12 s). The velocity
+    change stays immediate (physics); only the flame needs time.
+  - **Each particle keeps the state of its emission**: exhaust speed
+    `speed·(0.40 + 0.60 s)`, cone `spread·(1.8 − 0.8 s)`, size, heat and
+    lifetime all depend on the spool at that moment. A lever change
+    therefore travels down the plume with the flow (seen in the 100 → 30 %
+    strip: the hot section detaches and drifts out). Low thrust gives a
+    short, wide, red flame; full thrust a long, tight one with a white core.
+  - **Flow front**: after ignition it runs out at the exhaust speed; the
+    shock diamonds (2 + 3·core of them, spacing growing with the exhaust
+    speed) only light up once it has passed them.
+  - **Ignition** is a small, slow puff (24 particles); the plume then grows
+    outward with its particles. **Shutdown** only stops the supply: the rest
+    drifts off and cools, and the nozzle glow cools over 0.8 s
+    (`nozzle_temp`). An earlier 70-particle burst at full heat made the
+    plume appear out of nowhere.
+  - Idle is a pilot flame: `rate · idle^2.5` extra particles and a faint
+    nozzle glow.
+  - The glow fades in with `smoothstep(0.12, 0.55, spool)` instead of a
+    switch.
+  - The real-loop check of an armed 300 m/s burn: 61 frames of thrust,
+    spool 0.03 → 0.98 over the burn, 0.41 → 0.03 after cut-off. At the
+    lowest warp (60 sim-s per real s) a 30 m/s burn lasts only ~0.06 s on
+    screen, so short burns show as a brief puff.
 - **The plume lights the hull per cell.** `PlumeParticles.light_sources()`
   gives up to 8 point lights each frame: one glow per nozzle plus up to four
   heat-weighted centroids of the particles, bucketed by age (age ≈ distance).

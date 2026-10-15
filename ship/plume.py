@@ -8,14 +8,29 @@ partikel in ihrer alten richtung weiter und die fahne kruemmt sich. Die
 bewegung des schiffs selbst traegt die ganze fahne mit -- sie existiert nur
 relativ zu ihm.
 
-Dazu kommen je frame drei feste lichtpunkte, die nicht simuliert werden:
-das gluehen an der duese und, unter vollem schub, die schockknoten
-(machsche rauten) auf der achse hinter jeder duese.
+Das triebwerk ist ein kleines modell, nicht ein skalierungsfaktor:
+
+- **Hochlaufen.** `spool` folgt der hebelstellung mit einer zeitkonstante
+  (hoch 0.22 s, runter 0.12 s). Die geschwindigkeit des schiffs aendert
+  sich sofort (das macht die physik); die FLAMME braucht ihre zeit.
+- **Jedes partikel traegt den zustand seines ausstosses.** Austrittstempo,
+  groesse, streuung, hitze und lebensdauer haengen am spool im moment der
+  emission. Eine aenderung am hebel wandert deshalb mit der stroemung die
+  fahne hinunter, statt die ganze fahne auf einmal umzuskalieren: wenig
+  schub gibt eine kurze, breite, flackernde flamme, voller schub eine
+  lange, enge mit weissem kern.
+- **Strömungsfront.** Nach der zuendung laeuft eine front mit dem
+  austrittstempo von der duese weg; die schockknoten (machsche rauten)
+  erscheinen erst, wenn sie sie erreicht hat. Ihr abstand waechst mit dem
+  austrittstempo, ihre zahl mit dem schub.
+- **Zuendung und abschalten.** Beim zuenden ein kleiner, langsamer puff an
+  der duese; danach waechst die fahne mit ihren partikeln nach aussen. Beim
+  abschalten endet nur der nachschub -- der rest treibt ab und kuehlt aus,
+  und die duese glueht langsam nach (`nozzle_temp`, abkuehlung 0.8 s).
 
 `render_points()` liefert (m, 5)-float32-zeilen (x, y, groesse, hitze,
-rauch); `render/ship_pixel.py` streut sie als punkte in einen
-hitze-puffer im zellraster des schiffs, und `ship_pixel.frag` faerbt die
-hitze ueber eine geditherte glut-rampe aus der akzentfarbe.
+rauch) fuer den hitze-puffer, `light_sources()` die fahne als punktlichter
+fuer den rumpf.
 
 Rein numerisch -- kein pygame, kein GL.
 """
@@ -24,9 +39,16 @@ import math
 import numpy as np
 
 MAX_PARTICLES = 1400
-# Zuendung: so viele partikel auf einmal, wenn der schub hochfaehrt.
-IGNITION_BURST = 70
-IGNITION_LEVEL = 0.45
+
+SPOOL_UP_S = 0.22
+SPOOL_DOWN_S = 0.12
+NOZZLE_HEAT_S = 0.10
+NOZZLE_COOL_S = 0.80
+FIRING = 0.04          # ab diesem spool gilt das triebwerk als laufend
+
+
+def _approach(value, target, dt, tau):
+    return value + (target - value) * (1.0 - math.exp(-dt / max(tau, 1e-4)))
 
 
 class PlumeParticles:
@@ -42,27 +64,60 @@ class PlumeParticles:
         self.heat0 = np.zeros(n)
         self.alive = np.zeros(n, dtype=bool)
         self._carry = 0.0
-        self._prev_level = 0.0
-        self.level = 0.0
+        self.spool = 0.0           # triebwerksleistung 0..1
+        self.nozzle_temp = 0.0     # gluehen der duese 0..1 (traege)
+        self.front = 0.0           # stroemungsfront seit der zuendung, einheiten
+        self.idle = 0.0
         self.head = (1.0, 0.0)
         self.nozzles = ()
+        self._firing = False
+        self._speed = 0.0
         self._flicker = 1.0
+
+    # Altname: der renderer las frueher `level` (0..1) -- jetzt der spool.
+    @property
+    def level(self):
+        return max(self.spool, self.idle)
 
     def clear(self):
         self.alive[:] = False
         self._carry = 0.0
+        self.spool = 0.0
+        self.nozzle_temp = 0.0
+        self.front = 0.0
+        self._firing = False
 
-    def step(self, dt, level, head, nozzles, rate, speed, life, spread):
-        """Ein zeitschritt (echtzeit, s). level 0..1 = schub (leerlauf ~0.2)."""
-        self.level = float(level)
+    def step(self, dt, throttle, idle, head, nozzles, rate, speed, life, spread):
+        """Ein echtzeit-schritt. throttle 0..1 = hebelstellung, mit der die
+        hauptduese gerade brennt (0 = aus); idle = zuendflamme 0..1."""
         self.head = (float(head[0]), float(head[1]))
         self.nozzles = tuple(nozzles)
+        self.idle = max(0.0, float(idle))
         dt = max(0.0, min(float(dt), 0.05))
         if dt <= 0.0:
             return
         rng = self.rng
         self._flicker = float(rng.uniform(0.86, 1.08))
+        target = max(0.0, min(1.0, float(throttle)))
 
+        # --- triebwerk -----------------------------------------------------
+        self.spool = _approach(self.spool, target, dt,
+                               SPOOL_UP_S if target > self.spool else SPOOL_DOWN_S)
+        glow_target = max(self.spool, self.idle * 0.6)
+        self.nozzle_temp = _approach(self.nozzle_temp, glow_target, dt,
+                                     NOZZLE_HEAT_S if glow_target > self.nozzle_temp
+                                     else NOZZLE_COOL_S)
+        s = self.spool
+        ex_speed = float(speed) * (0.40 + 0.60 * s)
+        self._speed = ex_speed
+        firing = target > 0.0 or s > FIRING
+        if firing and not self._firing and target > 0.0:
+            self.front = 0.0
+            self._ignite(speed)
+        self._firing = firing
+        self.front = self.front + ex_speed * dt if firing else 0.0
+
+        # --- bestehende partikel -----------------------------------------
         a = self.alive
         self.age[a] += dt
         self.alive &= self.age < self.life
@@ -70,19 +125,22 @@ class PlumeParticles:
         self.vel[a] *= math.exp(-1.8 * dt)
         self.pos[a] += self.vel[a] * dt
 
-        lvl = max(0.0, float(level))
-        want = float(rate) * lvl ** 2.5 * dt + self._carry
+        # --- nachschub: hauptstrom nach spool, dazu die zuendflamme -------
+        out = s ** 1.2 + self.idle ** 2.5
+        want = float(rate) * out * dt + self._carry
         count = int(want)
         self._carry = want - count
-        burst = IGNITION_BURST if (lvl > IGNITION_LEVEL >= self._prev_level) else 0
-        self._prev_level = lvl
-        if self.nozzles:
-            if count:
-                self._emit(count, lvl, speed, life, spread, 1.0)
-            if burst:
-                self._emit(burst, 1.0, speed * 1.35, life * 0.8, spread * 2.2, 1.5)
+        if count and self.nozzles:
+            self._emit(count, s, ex_speed, life, spread)
 
-    def _emit(self, count, lvl, speed, life, spread, boost):
+    def _ignite(self, speed):
+        """Zuendpuff: wenige, langsame, weit gestreute partikel an der duese
+        -- ein aufflackern, kein voller strahl."""
+        if not self.nozzles:
+            return
+        self._emit(24, 0.35, float(speed) * 0.22, 0.30, 0.65, boost=1.2)
+
+    def _emit(self, count, s, ex_speed, life, spread, boost=1.0):
         rng = self.rng
         free = np.flatnonzero(~self.alive)[:count]
         m = len(free)
@@ -95,22 +153,42 @@ class PlumeParticles:
         u = rng.uniform(-0.7, 0.7, m)                      # quer ueber die duese
         lx = nx + rng.uniform(-1.5, 0.5, m)
         ly = ny + u * nr
-        sp = speed * rng.uniform(0.75, 1.25, m)
+        # Wenig schub: traeger, breiter, unruhiger; voller schub: eng.
+        cone = float(spread) * (1.8 - 0.8 * s)
+        sp = ex_speed * rng.uniform(0.75, 1.25, m)
         vx_l = -sp
-        vy_l = sp * rng.normal(0.0, spread, m) + u * sp * 0.10
+        vy_l = sp * rng.normal(0.0, cone, m) + u * sp * 0.10
         hx, hy = self.head
         self.pos[free, 0] = hx * lx - hy * ly
         self.pos[free, 1] = hy * lx + hx * ly
         self.vel[free, 0] = hx * vx_l - hy * vy_l
         self.vel[free, 1] = hy * vx_l + hx * vy_l
         self.age[free] = 0.0
-        self.life[free] = life * rng.uniform(0.6, 1.2, m)
-        self.size0[free] = nr * rng.uniform(0.30, 0.55, m) * boost
+        self.life[free] = float(life) * (0.70 + 0.30 * s) * rng.uniform(0.6, 1.2, m)
+        self.size0[free] = nr * rng.uniform(0.30, 0.55, m) * (0.75 + 0.35 * s) * boost
         # Kleine duesen geben kleinere partikel und damit weniger
         # ueberlagerung; ohne ausgleich bliebe ihre fahne rot statt weiss.
         comp = np.minimum(3.2, 15.0 / np.maximum(nr, 1.0))
-        self.heat0[free] = rng.uniform(0.20, 0.34, m) * (0.25 + 0.75 * lvl) * boost * comp
+        self.heat0[free] = rng.uniform(0.20, 0.34, m) * (0.25 + 0.75 * s) * boost * comp
         self.alive[free] = True
+
+    def _diamonds(self, x, y, r):
+        """Schockknoten hinter einer duese: (abstand, groesse, hitze)."""
+        s = self.spool
+        core = max(0.0, (s - 0.35) / 0.65)
+        if core <= 0.0:
+            return []
+        count = 2 + int(round(3.0 * core))
+        gap = r * (1.3 + 1.1 * s)                  # waechst mit dem austrittstempo
+        out = []
+        for i in range(count):
+            d = r * 1.5 + gap * i
+            # Erst wenn die stroemungsfront den knoten erreicht hat.
+            reach = min(1.0, max(0.0, (self.front - d) / max(r, 1.0)))
+            h = (1.9 - 0.36 * i) * core * reach * self._flicker
+            if h > 0.0:
+                out.append((d, r * (0.62 - 0.08 * i), h))
+        return out
 
     def render_points(self):
         a = self.alive
@@ -120,23 +198,19 @@ class PlumeParticles:
         smoke = 0.45 * t * (1.0 - t) * 4.0 * np.clip(1.0 - self.heat0[a] * (1.0 - t), 0.0, 1.0)
         parts = [np.column_stack((self.pos[a], size, heat, smoke))]
 
-        # Feste lichtpunkte: gluehen an der duese, schockknoten bei schub.
+        # Feste lichtpunkte: gluehen der duese, schockknoten.
         hx, hy = self.head
-        lvl = self.level
         extra = []
         for x, y, r in self.nozzles:
             def put(lx, ly, sz, h):
                 extra.append((hx * lx - hy * ly, hy * lx + hx * ly, sz, h, 0.0))
-            put(x - 0.25 * r, y, 1.10 * r, (0.30 + 1.10 * lvl) * self._flicker)
-            core = max(0.0, (lvl - 0.40) / 0.60)
-            if core > 0.0:
-                for i in range(4):
-                    d = r * (1.6 + 2.0 * i)
-                    put(x - d, y, r * (0.62 - 0.10 * i),
-                        (1.9 - 0.38 * i) * core * self._flicker)
+            put(x - 0.25 * r, y, 1.10 * r,
+                (0.30 * min(1.0, self.idle / 0.22) + 1.10 * self.nozzle_temp) * self._flicker)
+            for d, sz, h in self._diamonds(x, y, r):
+                put(x - d, y, sz, h)
         if extra:
             parts.append(np.asarray(extra))
-        out = np.concatenate(parts, axis=0) if parts else np.zeros((0, 5))
+        out = np.concatenate(parts, axis=0)
         return np.ascontiguousarray(out, dtype=np.float32)
 
     def light_sources(self, max_lights=8):
@@ -146,11 +220,10 @@ class PlumeParticles:
         radius) im selben raum wie die partikel."""
         out = []
         hx, hy = self.head
-        lvl = self.level
         for x, y, r in self.nozzles:
             lx, ly = x - 0.25 * r, y
-            out.append((hx * lx - hy * ly, hy * lx + hx * ly,
-                        (0.25 + 1.0 * lvl) * self._flicker, 1.6 * r))
+            strength = (0.25 * min(1.0, self.idle / 0.22) + 1.0 * self.nozzle_temp) * self._flicker
+            out.append((hx * lx - hy * ly, hy * lx + hx * ly, strength, 1.6 * r))
         a = self.alive
         if a.any():
             t = np.clip(self.age[a] / self.life[a], 0.0, 1.0)
