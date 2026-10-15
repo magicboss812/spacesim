@@ -338,6 +338,56 @@ body art (see `bodies/style.py`). FXAA lives inline in `render/renderer.py`.
 > distance and `smoothstep(±0.5)` gives an exactly 1px antialiased edge
 > without `fwidth` and without depending on viewport size.
 
+## The prediction line has six styles (`render/prediction_pixel.py`, 2026-10-15)
+
+`renderer.prediction_line_style`: `klassisch` (the old smooth GL line, now in
+`prediction_line_color` with its own width/alpha), `kontur` (default; 2-px band,
+1-px dark edge), `perlen` (2×2 beads on a 1-px thread), `lineal` (1-px line,
+time ticks), `halbton` (coverage falls with look-ahead, ordered dither),
+`schiene` (3-px two-tone rail, arrowheads in flight direction). Settings per
+style in `prediction_line_styles`, dev UI **Prediction line**. The sampling
+chain above is untouched; the style only replaces the final `_draw_polyline`
+loop, so `prediction_projection_test` still pins the runs at 0 px.
+
+- **Two passes, MAX blending.** Segments (instanced quads) and marks write
+  channels into a window-size buffer (r line, g dark edge, b rail, a mark
+  colour); the fragment tests the PIXEL CENTRE's distance to the segment, so
+  bands are hard pixels. Adjacent segments overlap at every joint; with alpha
+  blending the joints showed darker (edge over edge) and brighter spots. The
+  compose then layers edge → rail → line → mark onto the frame.
+- **Time per vertex comes from the projected dense curve**
+  (`_pred_time_src`, stored by `_adaptive_prediction_screen_points`); the runs
+  after clip/RDP carry none. `_map_run_times` walks it monotonically and
+  starts each run at the FIRST source segment within 1 px from the cursor,
+  never the nearest overall: a multi-revolution line crosses itself.
+- **Marks sit on multiples of ABSOLUTE time** (`_pred_crossings`), so they
+  stand on the orbit and the ship moves past them; counted from the ship they
+  would crawl along the line every frame. Measured against the Hermite
+  position at the mark's time: max 0.014 px at 6e-6, 2e-5 and 1e-4 px/m. The
+  step comes from a ladder of round values (1 s … 100 a) for a minimum spacing
+  at the 20 % quantile of the screen speed, with hysteresis 0.85–3.2 × the
+  minimum (the ladder steps ≤ 2.5×, so no value pair can alternate).
+- **The dither counts in curve coordinates** (arc length from an
+  absolute-time anchor, distance across), not screen pixels: a following
+  camera shifts the line on screen every frame and a screen-anchored pattern
+  would crawl over it.
+- **Segments are thinned to ~3 px** (`_pred_thin`). The runs are refined for
+  the smooth line to 0.58 px per segment (2e-5 px/m); as quads each pixel was
+  shaded ~10×. 3643 → 710 segments, pass 4.9 → 2.8 ms (llvmpipe). Chord error
+  at 100 px curvature radius 0.011 px. Marks use the full run.
+- **Compose and clear run over 16-px tiles** the line touches, not its
+  bounding box (nearly the screen when zoomed in).
+- Cost of `draw_prediction` (1280×800, llvmpipe, `gl.finish()`): klassisch
+  1.7–2.1 ms, styles 2.9–4.5 ms; about 1 ms of the difference is Python + GL
+  calls, the rest software rasterisation.
+- The GL fields `_pred_*` are created by `_init_prediction_pixel_pipeline`
+  inside `_init_opengl`, which runs BEFORE the attribute block of
+  `Renderer.__init__`: defining them there again set the VAO back to None.
+- Harness trap: under `xvfb-run` the default screen is 1280×1024, so the line's
+  top-down coordinates sit 224 px off rows read with `gl.screen.read(viewport=
+  (0, 0, 1280, 800))[::-1]`. `_world_to_screen_xy_at_time` agrees with the
+  runs; only the readback is shifted.
+
 ## The ship is drawn in SCREEN pixels, not world geometry
 
 `_draw_ship_sprite` draws `ship/art.py` geometry — at a true scale the ship

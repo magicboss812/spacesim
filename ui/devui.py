@@ -26,6 +26,7 @@ import numpy as np
 from render import background
 from bodies import icon as body_icon
 from ship import builds as ship_builds
+from render import prediction_pixel as pred_pixel
 
 try:
     from imgui_bundle import imgui
@@ -409,6 +410,90 @@ def _checkbox(label, obj, attr, tooltip=None):
     if tooltip and imgui.is_item_hovered():
         imgui.set_tooltip(tooltip)
     return changed
+
+
+# Regler je einstellung der vorhersagelinie: (min, max, format, tooltip).
+# Ganzzahlige vorgaben in DEFAULT_STYLE_SETTINGS werden zu slider_int.
+_PRED_LINE_RANGES = {
+    'width': (1.0, 6.0, "%.1f", "Breite des bands, design-einheiten (ui_px,\n"
+                                "auf ganze pixel gerundet)."),
+    'alpha': (0.05, 1.0, "%.2f", "Deckkraft der glatten linie."),
+    'outline': (0.0, 3.0, "%.1f", "Dunkler saum je seite, design-einheiten."),
+    'outline_alpha': (0.0, 1.0, "%.2f", "Deckkraft des saums."),
+    'size': (1.0, 6.0, "%.1f", "Kantenlaenge einer perle; jede n-te ist eine\n"
+                               "zelle groesser und in der markenfarbe."),
+    'spacing': (4.0, 60.0, "%.0f", "Mindestabstand der marken in design-einheiten.\n"
+                                   "Der zeittakt dazu kommt aus einer leiter runder\n"
+                                   "werte (1 s ... 100 a) und haelt eine hysterese."),
+    'major_every': (1, 20, None, "Jede n-te marke ist gross; gezaehlt ab einem\n"
+                                 "vielfachen der absoluten zeit, steht also still."),
+    'thread_alpha': (0.0, 1.0, "%.2f", "Deckkraft des 1-px-fadens zwischen den perlen."),
+    'ring_alpha': (0.0, 1.0, "%.2f", "Dunkler ring um die kleinen perlen."),
+    'tick': (1.0, 10.0, "%.0f", "Laenge der kleinen striche (eine seite)."),
+    'major_tick': (1.0, 12.0, "%.0f", "Laenge der grossen striche (je seite)."),
+    'min_coverage': (0.0, 1.0, "%.2f", "Deckung am ende der linie (am schiff: voll)."),
+    'steps': (1, 8, None, "Stufen der deckung ueber die vorausschau."),
+    'arrow': (2.0, 10.0, "%.0f", "Schenkellaenge der pfeilspitzen."),
+    'rail_alpha': (0.0, 1.0, "%.2f", "Deckkraft der dunkleren aussenstreifen."),
+}
+
+
+def _rgb_to_hex(col):
+    return '#%02x%02x%02x' % tuple(
+        int(round(min(1.0, max(0.0, float(v))) * 255.0)) for v in col)
+
+
+def _prediction_line_panel(r):
+    """Zeichenweise, farben und die einstellungen der GEWAEHLTEN
+    zeichenweise (`render/prediction_pixel.py`). Geschrieben wird in
+    `prediction_line_styles[stil]`, also dieselbe form wie config.json."""
+    styles = list(pred_pixel.STYLES)
+    style = r._pred_style()
+    changed, idx = imgui.combo("zeichenweise", styles.index(style), styles)
+    if changed:
+        r.prediction_line_style = style = styles[idx]
+    line, mark = r._pred_colors()
+    changed, col = imgui.color_edit3("linienfarbe", list(line))
+    if changed:
+        r.prediction_line_color = _rgb_to_hex(col)
+    changed, col = imgui.color_edit3("markenfarbe", list(mark))
+    if changed:
+        r.prediction_line_mark_color = _rgb_to_hex(col)
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Grosse perlen, lange striche, pfeilspitzen.")
+    if style not in ('klassisch', 'halbton'):     # halbton hat eigene stufen
+        changed, v = imgui.slider_int("verblassen: stufen",
+                                      int(r.prediction_line_fade_steps), 1, 8)
+        if changed:
+            r.prediction_line_fade_steps = int(v)
+        _slider("verblassen: am ende", r, 'prediction_line_fade_min', 0.0, 1.0, "%.2f",
+                tooltip="Deckkraft am ende der gezeichneten linie; am\n"
+                        "schiff ist sie 1. Dazwischen harte stufen.")
+    imgui.separator_text(style)
+    current = r._pred_settings(style)
+    own = r.prediction_line_styles.setdefault(style, {})
+    for key, value in current.items():
+        lo, hi, fmt, tip = _PRED_LINE_RANGES.get(key, (0.0, 10.0, "%.2f", None))
+        if fmt is None:
+            changed, v = imgui.slider_int(key, int(value), int(lo), int(hi))
+        else:
+            changed, v = imgui.slider_float(key, float(value), float(lo), float(hi), fmt)
+        if changed:
+            own[key] = int(v) if fmt is None else float(v)
+        if tip and imgui.is_item_hovered():
+            imgui.set_tooltip(tip)
+    if imgui.button("vorgaben"):
+        r.prediction_line_styles[style] = {}
+    if imgui.is_item_hovered():
+        imgui.set_tooltip("Diese zeichenweise auf die vorgaben aus\n"
+                          "render/prediction_pixel.py zuruecksetzen.")
+    dt = r.debug_info.get('pred_pixel_mark_dt')
+    if style in ('perlen', 'lineal', 'schiene'):
+        imgui.text(f"marken: {r.debug_info.get('pred_pixel_marks', 0)}"
+                   + (f", takt {dt:g} s" if dt else ""))
+    err = r.debug_info.get('pred_pixel_error')
+    if err:
+        imgui.text_colored((1.0, 0.45, 0.35, 1.0), err)
 
 
 # Die vier gezeichneten graphen: (serie, titel, farbe, budget-strich?).
@@ -876,6 +961,10 @@ def draw_dev_panels(c: "DevContext"):
             _checkbox("time-dependent bodies", p, 'use_time_dependent_bodies')
             if imgui.button("reset predictor"):
                 p.reset()
+
+    # ---------------------------------------------------- Prediction line
+    if c.renderer is not None and imgui.collapsing_header("Prediction line"):
+        _prediction_line_panel(c.renderer)
 
     # ------------------------------------------------------------ Renderer
     if imgui.collapsing_header("Renderer"):

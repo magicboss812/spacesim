@@ -25,6 +25,7 @@ from render.ship_pixel import ShipPixelMixin
 from render.ship import ShipDrawMixin
 from render.orbits import OrbitDrawMixin
 from render.prediction import PredictionDrawMixin
+from render.prediction_pixel import PredictionPixelMixin
 from render.maneuver import ManeuverDrawMixin
 
 
@@ -40,6 +41,7 @@ class Renderer(
     ShipPixelMixin,
     OrbitDrawMixin,
     PredictionDrawMixin,
+    PredictionPixelMixin,
     ManeuverDrawMixin,
 ):
     """Der Renderer -- zusammengesetzt aus mixins, ein zustand.
@@ -251,6 +253,21 @@ class Renderer(
         self.prediction_sampling_reference_scale = 1e-6
         self.prediction_visibility_margin_px = 128.0
         self.prediction_bypass_fxaa = True
+        # Zeichenweise der vorhersagelinie (`render/prediction_pixel.py`):
+        # "klassisch" | "kontur" | "perlen" | "lineal" | "halbton" | "schiene".
+        # `prediction_line_styles` haelt je zeichenweise abweichende werte
+        # (vorgaben: DEFAULT_STYLE_SETTINGS dort).
+        self.prediction_line_style = "kontur"
+        self.prediction_line_color = "#97dce4"
+        self.prediction_line_mark_color = "#e6f4f8"
+        self.prediction_line_fade_steps = 4
+        self.prediction_line_fade_min = 0.42
+        self.prediction_line_styles = {}
+        # (die GL-felder `_pred_*` legt `_init_prediction_pixel_pipeline` an;
+        # sie laeuft in `_init_opengl`, also VOR dieser stelle)
+        self._pred_time_src = None
+        self._pred_mark_dt = None
+        self._pred_mark_key = None
         self.prediction_render_max_raw_scan = 3000
         self.prediction_render_max_draw_points = 4000
         self.prediction_render_max_world_length = None
