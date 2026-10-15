@@ -11,7 +11,8 @@
 // Ausserhalb der zellen: die abgasfahne aus dem hitze-puffer der partikel
 // (`ship/plume.py`, `ship_plume.{vert,frag}`), gefaerbt ueber eine
 // geditherte glut-rampe aus der akzentfarbe -- weissgluehender kern, gelb,
-// akzent, glut, rauch. Halbton als punkte, sprite in ganzen zellen.
+// akzent, glut, kondensat; der farbton folgt der temperatur der partikel.
+// Halbton als punkte, sprite in ganzen zellen.
 // Darunter der SCHEIN: die hitze, in zwei gauss-paessen weichgezeichnet
 // (`ship_glow.frag`), hier je BILDSCHIRMPIXEL bilinear abgetastet und in
 // alpha-stufen mit 1-px-bayer gedithert -- weich im verlauf, hart im pixel.
@@ -22,9 +23,10 @@
 
 uniform sampler2D u_cells;     // farbe + licht (0..1)
 uniform sampler2D u_ids;       // regions-kennung + kennzeichen
-uniform sampler2D u_heat;      // einheit 2: hitze + rauch der partikel
+uniform sampler2D u_heat;      // einheit 2: hitze, kondensat, hitze x temperatur
 uniform sampler2D u_glow;      // einheit 3: weichgezeichnete hitze (schein), LINEAR
 uniform float u_glow_gain;
+uniform float u_glow_temp;     // spool 0..1: farbe des scheins
 uniform vec2 u_origin;
 uniform ivec2 u_grid;
 uniform int u_k;
@@ -92,23 +94,34 @@ vec3 edge(ivec2 c, ivec2 d, bool owner, vec4 cell, vec4 id, vec3 col) {
     return mix(u_grout, max(cell.rgb, nc.rgb), 0.25);            // dunkle naht
 }
 
-// Glut-rampe: hitze -> farbe und deckung. Die grenzen sind mit bayer
-// verrauscht, damit die stufen als pixel-kanten und nicht als ringe lesen.
-vec4 fire(float h, float smoke, float b) {
+// Glut-rampe: die HITZE waehlt die stufe (helligkeit, deckung), die
+// TEMPERATUR der zelle (hitzegewichtet aus den partikeln) den farbton:
+// kuehl = tiefes rot und dunkle glut, mittel = akzent/orange, heiss = gelb
+// mit weissem bis weiss-blauem kern. Die grenzen sind mit bayer verrauscht,
+// damit die stufen als pixel-kanten und nicht als ringe lesen. Im vakuum
+// gibt es keinen rauch, nur duennes kaltes kondensat.
+vec4 fire(float h, float cold, float T, float b) {
     float hh = h + (b - 0.5) * 0.22;
-    vec3 white = vec3(1.0, 0.97, 0.90);
-    vec3 yellow = vec3(1.0, 0.86, 0.45);
-    if (hh > 1.70) return vec4(white, 1.0);
-    if (hh > 1.05) return vec4(mix(u_accent, yellow, 0.72), 1.0);
-    if (hh > 0.62) return vec4(mix(u_accent, yellow, 0.38), 1.0);
-    if (hh > 0.32) return vec4(u_accent, 1.0);
-    if (hh > 0.14) return vec4(u_accent * 0.55, 0.92);
-    if (smoke + (b - 0.5) * 0.12 > 0.10) {
-        // Rauch im schein der glut: je mehr hitze in der zelle, desto
-        // waermer und heller -- kalt am ende der fahne.
-        vec3 cold = mix(u_grout, u_ink, 0.22);
-        vec3 warm = mix(u_accent * 0.55, vec3(1.0, 0.75, 0.45), 0.25);
-        return vec4(mix(cold, warm, clamp(h * 6.0, 0.0, 0.85)), 0.50 + 0.25 * clamp(h * 6.0, 0.0, 1.0));
+    float warm = smoothstep(0.25, 0.75, T);
+    float hot = smoothstep(0.80, 1.00, T);
+    vec3 red = u_accent * vec3(0.78, 0.55, 0.55);
+    vec3 orange = mix(u_accent, vec3(1.0, 0.58, 0.24), 0.55);
+    vec3 yellow = mix(vec3(1.0, 0.70, 0.30), vec3(1.0, 0.90, 0.55), warm);
+    vec3 white = mix(vec3(1.0, 0.95, 0.84), vec3(0.84, 0.92, 1.0), hot);
+    if (hh > 1.95) return vec4(mix(yellow, white, 0.35 + 0.65 * warm), 1.0);
+    if (hh > 1.15) return vec4(mix(orange, yellow, 0.35 + 0.65 * warm), 1.0);
+    if (hh > 0.62) return vec4(mix(red, orange, 0.25 + 0.75 * warm), 1.0);
+    if (hh > 0.30) return vec4(mix(red, u_accent, warm), 1.0);
+    if (hh > 0.13) return vec4(mix(red * 0.55, u_accent * 0.55, warm), 0.92);
+    // Duennes gas am rand der aufweitung: im vakuum laeuft der strahl nicht
+    // in einer kante aus, sondern verduennt sich -- eine letzte, schwache
+    // und licht gesetzte stufe.
+    if (hh > 0.05 && b < 0.6) return vec4(mix(red * 0.40, u_accent * 0.45, warm), 0.65);
+    if (cold + (b - 0.5) * 0.10 > 0.09) {
+        // Kondensat: kuehl und duenn, im schein der glut leicht angewaermt.
+        vec3 c = mix(u_grout, u_ink * vec3(0.72, 0.82, 0.92), 0.20);
+        vec3 lit = mix(red * 0.6, vec3(1.0, 0.75, 0.45), 0.25);
+        return vec4(mix(c, lit, clamp(h * 6.0, 0.0, 0.7)), 0.32 + 0.25 * clamp(h * 6.0, 0.0, 1.0));
     }
     return vec4(0.0);
 }
@@ -164,8 +177,10 @@ void main() {
         }
     }
 
-    vec2 hs = (c.x >= 0 && c.y >= 0 && c.x < u_grid.x && c.y < u_grid.y)
-            ? texelFetch(u_heat, c, 0).rg : vec2(0.0);
+    vec4 hq = (c.x >= 0 && c.y >= 0 && c.x < u_grid.x && c.y < u_grid.y)
+            ? texelFetch(u_heat, c, 0) : vec4(0.0);
+    vec2 hs = hq.rg;
+    float temp = hq.r > 0.005 ? hq.b / hq.r : 0.5;
 
     // Schein an diesem pixel: stetig zwischen den zellmitten, dann in
     // stufen von 0.10 alpha gedithert (je pixel, nicht je zelle).
@@ -173,13 +188,17 @@ void main() {
     float g = texture(u_glow, guv).r * u_glow_gain;
     float gb = bayer4(ivec2(floor(gl_FragCoord.xy)));
     float ga = clamp(floor(g * 0.80 / 0.10 + gb) * 0.10, 0.0, 0.70);
-    vec3 gc = mix(u_accent, vec3(1.0, 0.82, 0.48), clamp(g * 0.9, 0.0, 0.75));
+    // Farbe des scheins: innen heller, und mit dem schub waermer bis
+    // weiss-blau (heisseres gas), bei wenig schub ein dunkles rot.
+    vec3 gin = mix(vec3(1.0, 0.70, 0.36), vec3(0.88, 0.92, 1.0), u_glow_temp * u_glow_temp * 0.6);
+    vec3 gout = mix(u_accent * vec3(0.85, 0.6, 0.6), u_accent, u_glow_temp);
+    vec3 gc = mix(gout, gin, clamp(g * 0.9, 0.0, 0.75) * (0.45 + 0.55 * u_glow_temp));
 
     if (hs.x > 0.02 || hs.y > 0.02) {
-        vec4 f = fire(hs.x, hs.y, bayer4(c));
+        vec4 f = fire(hs.x, hs.y, temp, bayer4(c));
         if (f.a > 0.0) {
             if (u_style == 4) {
-                // Rauch (halb durchsichtig) liegt UEBER dem schein.
+                // Kondensat (halb durchsichtig) liegt UEBER dem schein.
                 fragColor = out_col(mix(gc, f.rgb, f.a < 1.0 && ga > 0.0 ? f.a : 1.0),
                                     max(f.a, ga));
                 return;

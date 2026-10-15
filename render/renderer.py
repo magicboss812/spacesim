@@ -487,7 +487,7 @@ class Renderer(
         # als winkel-sigma in rad.
         self.ship_plume_particles = True
         self.ship_plume_rate = 900.0
-        self.ship_plume_speed = 340.0
+        self.ship_plume_speed = 300.0
         self.ship_plume_life_s = 0.55
         self.ship_plume_spread = 0.10
         self._ship_plume = None

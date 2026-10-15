@@ -19,17 +19,25 @@ Das triebwerk ist ein kleines modell, nicht ein skalierungsfaktor:
   fahne hinunter, statt die ganze fahne auf einmal umzuskalieren: wenig
   schub gibt eine kurze, breite, flackernde flamme, voller schub eine
   lange, enge mit weissem kern.
-- **Strömungsfront.** Nach der zuendung laeuft eine front mit dem
-  austrittstempo von der duese weg; die schockknoten (machsche rauten)
-  erscheinen erst, wenn sie sie erreicht hat. Ihr abstand waechst mit dem
-  austrittstempo, ihre zahl mit dem schub.
+- **Vakuum.** Kein umgebungsdruck: also KEINE schockknoten (machsche
+  rauten brauchen eine atmosphaere, gegen die der strahl anprallt), kein
+  bremsen der partikel und kein quellender rauch. Der strahl ist
+  unterexpandiert und weitet sich frei auf -- je hoeher der kammerdruck
+  (schub), desto weiter der kegel. An seine stelle tritt ein heisser
+  KERN direkt hinter der duese, dessen laenge mit dem schub waechst und
+  den die stroemungsfront nach der zuendung freilegt. Was am ende bleibt,
+  ist duenner kalter niederschlag (kondensat), kein rauch.
+- **Temperatur je partikel.** Sie haengt am spool beim ausstoss (plus
+  streuung) und sinkt mit dem alter; der zusammenbau waehlt daraus den
+  FARBTON (wenig schub: dunkles rot, voller schub: gelb mit weiss-blauem
+  kern), die hitze nur die helligkeit.
 - **Zuendung und abschalten.** Beim zuenden ein kleiner, langsamer puff an
   der duese; danach waechst die fahne mit ihren partikeln nach aussen. Beim
   abschalten endet nur der nachschub -- der rest treibt ab und kuehlt aus,
   und die duese glueht langsam nach (`nozzle_temp`, abkuehlung 0.8 s).
 
-`render_points()` liefert (m, 5)-float32-zeilen (x, y, groesse, hitze,
-rauch) fuer den hitze-puffer, `light_sources()` die fahne als punktlichter
+`render_points()` liefert (m, 6)-float32-zeilen (x, y, groesse, hitze,
+kalt, temperatur) fuer den hitze-puffer, `light_sources()` die fahne als punktlichter
 fuer den rumpf.
 
 Rein numerisch -- kein pygame, kein GL.
@@ -62,6 +70,7 @@ class PlumeParticles:
         self.life = np.ones(n)
         self.size0 = np.zeros(n)
         self.heat0 = np.zeros(n)
+        self.temp0 = np.zeros(n)
         self.alive = np.zeros(n, dtype=bool)
         self._carry = 0.0
         self.spool = 0.0           # triebwerksleistung 0..1
@@ -97,8 +106,11 @@ class PlumeParticles:
         if dt <= 0.0:
             return
         rng = self.rng
-        self._flicker = float(rng.uniform(0.86, 1.08))
         target = max(0.0, min(1.0, float(throttle)))
+        # Flackern: bei wenig schub (niedriger kammerdruck, unruhige
+        # verbrennung) deutlich staerker als bei vollem.
+        amp = 0.10 + 0.22 * (1.0 - self.spool)
+        self._flicker = float(1.0 + rng.uniform(-amp, amp * 0.5))
 
         # --- triebwerk -----------------------------------------------------
         self.spool = _approach(self.spool, target, dt,
@@ -122,7 +134,8 @@ class PlumeParticles:
         self.age[a] += dt
         self.alive &= self.age < self.life
         a = self.alive
-        self.vel[a] *= math.exp(-1.8 * dt)
+        # Vakuum: nichts bremst. Die partikel fliegen geradeaus weiter und
+        # verblassen durch ausdehnung, nicht durch abbremsen.
         self.pos[a] += self.vel[a] * dt
 
         # --- nachschub: hauptstrom nach spool, dazu die zuendflamme -------
@@ -153,8 +166,10 @@ class PlumeParticles:
         u = rng.uniform(-0.7, 0.7, m)                      # quer ueber die duese
         lx = nx + rng.uniform(-1.5, 0.5, m)
         ly = ny + u * nr
-        # Wenig schub: traeger, breiter, unruhiger; voller schub: eng.
-        cone = float(spread) * (1.8 - 0.8 * s)
+        # Vakuum: der strahl ist unterexpandiert und weitet sich frei auf;
+        # mehr kammerdruck (schub) heisst weiterer kegel. Wenig schub: eng
+        # und kurz.
+        cone = float(spread) * (0.55 + 1.25 * s)
         sp = ex_speed * rng.uniform(0.75, 1.25, m)
         vx_l = -sp
         vy_l = sp * rng.normal(0.0, cone, m) + u * sp * 0.10
@@ -165,49 +180,64 @@ class PlumeParticles:
         self.vel[free, 1] = hy * vx_l + hx * vy_l
         self.age[free] = 0.0
         self.life[free] = float(life) * (0.70 + 0.30 * s) * rng.uniform(0.6, 1.2, m)
-        self.size0[free] = nr * rng.uniform(0.30, 0.55, m) * (0.75 + 0.35 * s) * boost
+        self.size0[free] = nr * rng.uniform(0.30, 0.55, m) * (0.70 + 0.40 * s) * boost
         # Kleine duesen geben kleinere partikel und damit weniger
         # ueberlagerung; ohne ausgleich bliebe ihre fahne rot statt weiss.
         comp = np.minimum(3.2, 15.0 / np.maximum(nr, 1.0))
         self.heat0[free] = rng.uniform(0.20, 0.34, m) * (0.25 + 0.75 * s) * boost * comp
+        # Temperatur beim ausstoss: aus dem spool, je partikel gestreut --
+        # daher die lebendigen farbwechsel im strahl.
+        self.temp0[free] = np.clip((0.22 + 0.78 * s) * rng.uniform(0.85, 1.12, m), 0.0, 1.1)
         self.alive[free] = True
 
-    def _diamonds(self, x, y, r):
-        """Schockknoten hinter einer duese: (abstand, groesse, hitze)."""
+    def _core(self, x, y, r):
+        """Heisser kern hinter einer duese: punkte (abstand, groesse, hitze,
+        temperatur) entlang der achse, zur spitze hin duenner und kuehler.
+        Seine laenge waechst mit dem schub; nach der zuendung legt ihn die
+        stroemungsfront frei. (Keine schockknoten -- im vakuum gibt es
+        keinen umgebungsdruck, gegen den sie sich bilden koennten.)"""
         s = self.spool
-        core = max(0.0, (s - 0.35) / 0.65)
+        core = max(0.0, min(1.0, (s - 0.15) / 0.70))
         if core <= 0.0:
             return []
-        count = 2 + int(round(3.0 * core))
-        gap = r * (1.3 + 1.1 * s)                  # waechst mit dem austrittstempo
+        length = r * (1.2 + 5.0 * core)
+        n = 7
         out = []
-        for i in range(count):
-            d = r * 1.5 + gap * i
-            # Erst wenn die stroemungsfront den knoten erreicht hat.
+        for i in range(n):
+            f = i / (n - 1)
+            d = r * 0.4 + length * f
             reach = min(1.0, max(0.0, (self.front - d) / max(r, 1.0)))
-            h = (1.9 - 0.36 * i) * core * reach * self._flicker
+            h = (1.75 - 1.1 * f) * core * reach * self._flicker
             if h > 0.0:
-                out.append((d, r * (0.62 - 0.08 * i), h))
+                out.append((d, r * (0.58 - 0.30 * f), h, 1.0 - 0.25 * f))
         return out
 
     def render_points(self):
         a = self.alive
         t = np.clip(self.age[a] / self.life[a], 0.0, 1.0)
-        size = self.size0[a] * (1.0 + 1.7 * t)
-        heat = self.heat0[a] * (1.0 - t) ** 1.7
-        smoke = 0.45 * t * (1.0 - t) * 4.0 * np.clip(1.0 - self.heat0[a] * (1.0 - t), 0.0, 1.0)
-        parts = [np.column_stack((self.pos[a], size, heat, smoke))]
+        # Freie ausdehnung: bei vollem schub blaeht sich der strahl staerker
+        # auf (ballistisch, kein quellen wie rauch).
+        size = self.size0[a] * (1.0 + (1.2 + 1.6 * self.temp0[a]) * t)
+        # Langsamer als in luft: im vakuum kuehlt das gas nur durch
+        # ausdehnung, nicht durch mischen mit umgebung.
+        heat = self.heat0[a] * (1.0 - t) ** 1.4
+        temp = self.temp0[a] * (1.0 - 0.55 * t)
+        # Kondensat: am ende, wenn das gas ausgekuehlt ist, ein duenner
+        # kalter rest -- viel weniger als rauch in einer atmosphaere.
+        cold = 0.22 * np.clip((t - 0.45) / 0.55, 0.0, 1.0) * (1.0 - t) * 4.0
+        parts = [np.column_stack((self.pos[a], size, heat, cold, temp))]
 
-        # Feste lichtpunkte: gluehen der duese, schockknoten.
+        # Feste lichtpunkte: gluehen der duese, heisser kern.
         hx, hy = self.head
         extra = []
         for x, y, r in self.nozzles:
-            def put(lx, ly, sz, h):
-                extra.append((hx * lx - hy * ly, hy * lx + hx * ly, sz, h, 0.0))
+            def put(lx, ly, sz, h, tp):
+                extra.append((hx * lx - hy * ly, hy * lx + hx * ly, sz, h, 0.0, tp))
             put(x - 0.25 * r, y, 1.10 * r,
-                (0.30 * min(1.0, self.idle / 0.22) + 1.10 * self.nozzle_temp) * self._flicker)
-            for d, sz, h in self._diamonds(x, y, r):
-                put(x - d, y, sz, h)
+                (0.30 * min(1.0, self.idle / 0.22) + 1.10 * self.nozzle_temp) * self._flicker,
+                0.25 + 0.70 * self.nozzle_temp)
+            for d, sz, h, tp in self._core(x, y, r):
+                put(x - d, y, sz, h, tp)
         if extra:
             parts.append(np.asarray(extra))
         out = np.concatenate(parts, axis=0)
