@@ -329,8 +329,14 @@ styles only; the vector path keeps its nested-ellipse plume.
   `(1 − t)^1.4`), and **no billowing smoke**, only thin cold condensate at
   the end. The jet is under-expanded, so the cone gets WIDER with thrust
   (`spread · (0.55 + 1.25 s)`), and particles swell more when hot. A hot
-  core of 7 points on the axis, length `r · (1.2 + 5·core)`, replaces the
-  diamonds and is uncovered by the flow front after ignition.
+  core of points behind the nozzle, length `r · (1.2 + 5·core)`, replaces
+  the diamonds and is uncovered by the flow front after ignition.
+  **The core follows the flow, not the hull**: each point sits where the
+  gas that left `d / speed` ago is, on the heading of that moment (a 1-s
+  heading history, `_heading_at`). Rigid on the current axis it swung with
+  the ship and stood out of the bent plume as a separate straight beam
+  while turning. Its points are spaced ≤ 0.14 r (up to 40, heat per point
+  scaled by spacing): 7 points left the thin end as a row of dots.
 - **Temperature per particle**: `(0.22 + 0.78 s) · U(0.85, 1.12)` at
   emission, dropping 55 % over its life. The scatter is what makes the
   colour live; low thrust also flickers harder (`±(0.10 + 0.22·(1 − s))`).

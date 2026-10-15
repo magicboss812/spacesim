@@ -93,6 +93,11 @@ class PlumeParticles:
         self._flicker_target = 1.0
         self._flicker_hold = 0.0
         self._lights = None        # (n, 4) geglaettet: x, y, staerke, radius
+        # Kurs der letzten sekunde (zeit, winkel ohne spruenge): der kern
+        # folgt dem kurs, mit dem sein gas die duese verliess.
+        self._time = 0.0
+        self._hist_t = []
+        self._hist_a = []
 
     # Altname: der renderer las frueher `level` (0..1) -- jetzt der spool.
     @property
@@ -109,6 +114,8 @@ class PlumeParticles:
         self._flicker = self._flicker_target = 1.0
         self._flicker_hold = 0.0
         self._lights = None
+        self._hist_t = []
+        self._hist_a = []
 
     def step(self, dt, throttle, idle, head, nozzles, rate, speed, life, spread):
         """Ein echtzeit-schritt. throttle 0..1 = hebelstellung, mit der die
@@ -121,6 +128,7 @@ class PlumeParticles:
             return
         rng = self.rng
         target = max(0.0, min(1.0, float(throttle)))
+        self._record_heading(dt)
         # Flackern: bei wenig schub (niedriger kammerdruck, unruhige
         # verbrennung) deutlich staerker als bei vollem.
         self._flicker_hold -= dt
@@ -210,6 +218,30 @@ class PlumeParticles:
         self.temp0[free] = np.clip((0.22 + 0.78 * s) * rng.uniform(0.85, 1.12, m), 0.0, 1.1)
         self.alive[free] = True
 
+    def _record_heading(self, dt):
+        self._time += dt
+        a = math.atan2(self.head[1], self.head[0])
+        if self._hist_a:
+            prev = self._hist_a[-1]
+            a = prev + (a - prev + math.pi) % (2.0 * math.pi) - math.pi
+        self._hist_t.append(self._time)
+        self._hist_a.append(a)
+        cut = 0
+        while cut < len(self._hist_t) - 2 and self._hist_t[cut + 1] < self._time - 1.0:
+            cut += 1
+        if cut:
+            del self._hist_t[:cut]
+            del self._hist_a[:cut]
+
+    def _heading_at(self, ages):
+        """Kurs (hx, hy) vor `ages` sekunden; vor dem aeltesten eintrag der
+        aelteste, ohne verlauf der aktuelle."""
+        ages = np.asarray(ages, dtype=float)
+        if len(self._hist_t) < 2:
+            return (np.full(ages.shape, self.head[0]), np.full(ages.shape, self.head[1]))
+        a = np.interp(self._time - ages, self._hist_t, self._hist_a)
+        return np.cos(a), np.sin(a)
+
     def _core(self, x, y, r):
         """Heisser kern hinter einer duese: punkte (abstand, groesse, hitze,
         temperatur) entlang der achse, zur spitze hin duenner und kuehler.
@@ -221,15 +253,25 @@ class PlumeParticles:
         if core <= 0.0:
             return []
         length = r * (1.2 + 5.0 * core)
-        n = 7
+        # Dicht genug, dass die punkte ineinanderlaufen: abstand hoechstens
+        # der halbe kleinste radius (0.28 r). Mit 7 festen punkten lag das
+        # ende als punktreihe da. Die hitze je punkt folgt dem abstand, die
+        # hitze je laenge bleibt die der alten 7 punkte.
+        n = max(7, min(40, int(math.ceil(length / (0.14 * r))) + 1))
+        dens = 6.0 / (n - 1)
+        f = np.linspace(0.0, 1.0, n)
+        d = r * 0.4 + length * f
+        # Jeder punkt sitzt dort, wo das gas ist, das vor d / tempo die duese
+        # verliess -- dreht das schiff, kruemmt sich der kern mit der fahne,
+        # statt starr auf der achse mitzuschwenken.
+        hx, hy = self._heading_at(d / max(self._speed, 1.0))
+        reach = np.clip((self.front - d) / max(r, 1.0), 0.0, 1.0)
+        h = (1.75 - 1.1 * f) * core * reach * self._flicker * dens
         out = []
         for i in range(n):
-            f = i / (n - 1)
-            d = r * 0.4 + length * f
-            reach = min(1.0, max(0.0, (self.front - d) / max(r, 1.0)))
-            h = (1.75 - 1.1 * f) * core * reach * self._flicker
-            if h > 0.0:
-                out.append((d, r * (0.58 - 0.30 * f), h, 1.0 - 0.25 * f))
+            if h[i] > 0.0:
+                out.append((float(d[i]), r * (0.58 - 0.30 * float(f[i])), float(h[i]),
+                            1.0 - 0.25 * float(f[i]), float(hx[i]), float(hy[i])))
         return out
 
     def render_points(self):
@@ -256,8 +298,9 @@ class PlumeParticles:
             put(x - 0.25 * r, y, 1.10 * r,
                 (0.30 * min(1.0, self.idle / 0.22) + 1.10 * self.nozzle_temp) * self._flicker,
                 0.25 + 0.70 * self.nozzle_temp)
-            for d, sz, h, tp in self._core(x, y, r):
-                put(x - d, y, sz, h, tp)
+            for d, sz, h, tp, chx, chy in self._core(x, y, r):
+                lx, ly = x - d, y
+                extra.append((chx * lx - chy * ly, chy * lx + chx * ly, sz, h, 0.0, tp))
         if extra:
             parts.append(np.asarray(extra))
         out = np.concatenate(parts, axis=0)
