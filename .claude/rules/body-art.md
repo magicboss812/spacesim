@@ -10,6 +10,9 @@ paths:
   - "render/gl/ship_cell.vert"
   - "render/gl/ship_cell.frag"
   - "render/gl/ship_pixel.frag"
+  - "render/gl/ship_plume.vert"
+  - "render/gl/ship_plume.frag"
+  - "ship/plume.py"
   - "render/gl/body_icon.vert"
   - "render/gl/body_icon.frag"
   - "render/gl/body_surface.vert"
@@ -297,11 +300,41 @@ FXAA resolve anyway, straight into `_frame_output_fbo`):
    `2 halbton` (light → coverage: shrinking square from 4-px cells, ordered
    dither inside the cell below; dark seams between regions, bright rim on
    the lit side) and `4 sprite` (dithered ramp over all four steps, selout,
-   1-px outline one step above the ground). The plume is drawn outside the
-   cells, `s = −(X²+Y²)/(2X)` being the closed form of the mockup's nested
-   ellipses shrunk toward the nozzle: dots for halbton, stepped cells for
-   sprite. LED, blueprint, signal and three print-screen halftones were
-   built and removed again on request (commit history, 2026-10-15).
+   1-px outline one step above the ground). Outside the cells the compose
+   reads the **heat buffer** of the particle plume (below). LED, blueprint,
+   signal and three print-screen halftones were built and removed again on
+   request (commit history, 2026-10-15).
+
+**Exhaust particles** (`ship/plume.py`, `ship_plume.{vert,frag}`), pixel
+styles only; the vector path keeps its nested-ellipse plume.
+- **Relative, never in world coordinates.** Particles live in a frame
+  centred on the ship but NOT rotating with it (screen axes, build units).
+  They leave a nozzle (`builds.NOZZLES`, per build) along the current
+  heading, so a turning ship bends its plume; the ship's own motion carries
+  the whole plume.
+- **Heat, not sprites.** Each frame the particles go as points, additively,
+  into a float16 heat buffer on the ship's cell grid (rg = heat, smoke). The
+  compose maps heat through a Bayer-dithered ramp built from the build's
+  accent: white-hot > 1.70, yellow > 1.05, warm > 0.62, accent > 0.32,
+  ember > 0.14, then translucent smoke. The core comes from particle
+  density. Per-particle heat 0.20–0.34 (an earlier 0.9–1.3 turned the whole
+  plume into a white blob).
+- **Fixed light points on top of the simulation:** a glow at each nozzle,
+  and above 40 % thrust four shock diamonds on the axis behind it.
+- **Small nozzles are compensated** (`heat × min(3.2, 15 / r)`): with the
+  same particle count their points covered one cell each, and the Ringschiff
+  and Pfeil plumes stayed red.
+- **Ignition burst** of 70 particles when thrust crosses 0.45; idle emits
+  `rate · level^2.5` (at 0.22 about 2 % of full thrust, a flicker).
+- **The hull rear glows** under thrust (`u_thrust`, `u_glow` in
+  `ship_cell.frag`), colour only, so no seams appear. Write that falloff as
+  `1 − smoothstep(lo, hi, x)`: GLSL's smoothstep is undefined for edge0 >
+  edge1.
+- The grid reach follows the plume (`extent()`, capped at 320 units); a
+  capture does not step the particles.
+- Tunables: `ship_plume_particles`, `ship_plume_rate` (900/s),
+  `ship_plume_speed` (340 units/s), `ship_plume_life_s` (0.55),
+  `ship_plume_spread` (0.10 rad), also in the dev UI.
 
 **Builds and colours** (`ship/builds.py`): `original` (the mockup),
 `ringschiff`, `pfeil`, `schlepper`, `segler`. Shapes name **colour roles**,
@@ -349,8 +382,11 @@ Rules, each from a seen failure:
 - **Line width in the cell pass is 1 cell**, divided by `capture_scale`,
   because `_set_line_width` multiplies by it.
 
-Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms, pixel 0.54–0.66 ms
-per frame (original build).
+Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms; pixel 0.54–0.66 ms
+without particles, 1.27 ms idle and 1.79 ms at full thrust with them
+(original build, ~470 particles). The Python part is ≤ 0.31 ms (step 0.22 +
+point build 0.09); the rest is the heat pass and the extra texel fetch in
+software GL.
 
 ## Die Marke — `bodies/icon.py`
 

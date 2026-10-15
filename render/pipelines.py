@@ -140,6 +140,8 @@ class ShaderPipelineMixin:
             'ship_cell.vert', 'ship_cell.frag', 'ship_cell')
         self._ship_pixel_program = self._compile_shader_program(
             'body_pixel.vert', 'ship_pixel.frag', 'ship_pixel')
+        self._ship_plume_program = self._compile_shader_program(
+            'ship_plume.vert', 'ship_plume.frag', 'ship_plume')
         quad = self._ensure_quad_vbo()
         try:
             if self._ship_pixel_program is not None:
@@ -147,6 +149,7 @@ class ShaderPipelineMixin:
                     self._ship_pixel_program, [(quad, '2f', 'a_pos')])
                 self._ship_pixel_program['u_cells'].value = 0
                 self._ship_pixel_program['u_ids'].value = 1
+                self._ship_pixel_program['u_heat'].value = 2
             if self._body_layer_program is not None:
                 self._body_layer_vao = self.ctx.vertex_array(
                     self._body_layer_program, [(quad, '2f', 'a_pos')])

@@ -569,6 +569,11 @@ class ConfigLoader:
             ('ship_build', 'ship_build', str),
             ('ship_pixel_style', 'ship_pixel_style', str),
             ('ship_build_colors', 'ship_build_colors', _ship_colors),
+            ('ship_plume_particles', 'ship_plume_particles', bool),
+            ('ship_plume_rate', 'ship_plume_rate', float),
+            ('ship_plume_speed', 'ship_plume_speed', float),
+            ('ship_plume_life_s', 'ship_plume_life_s', float),
+            ('ship_plume_spread', 'ship_plume_spread', float),
             ('ship_pixel_min_cells', 'ship_pixel_min_cells', float),
             # Zoom-abhaengige verkleinerung des schiffs (px je meter)
             ('ship_zoom_shrink_enabled', 'ship_zoom_shrink_enabled', bool),

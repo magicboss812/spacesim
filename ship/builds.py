@@ -325,6 +325,17 @@ def _segler():
     return s.shapes
 
 
+# Duesen je bauform: (x, y, radius) im lokalen raum, x am duesenende. Daraus
+# speist sich die partikel-fahne (`ship/plume.py`).
+NOZZLES = {
+    "original": ((-115.0, 0.0, 15.0),),
+    "ringschiff": ((-115.0, -12.0, 6.0), (-115.0, 0.0, 6.0), (-115.0, 12.0, 6.0)),
+    "pfeil": ((-114.0, -8.0, 7.5), (-114.0, 8.0, 7.5)),
+    "schlepper": ((-115.0, 0.0, 22.0),),
+    "segler": ((-115.0, 0.0, 9.0),),
+}
+
+
 _BUILDERS = {
     "ringschiff": _ringschiff,
     "pfeil": _pfeil,

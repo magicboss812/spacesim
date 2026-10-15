@@ -481,6 +481,21 @@ class Renderer(
         self._ship_clean_fbo = None
         self._ship_clean_textures = ()
         self._frame_output_fbo = None
+        # Partikel-fahne (`ship/plume.py`): nur im pixel-stil, relativ zum
+        # schiff. Rate in partikeln/s bei vollem schub, geschwindigkeit in
+        # einheiten/s (das schiff ist 230 lang), lebensdauer in s, streuung
+        # als winkel-sigma in rad.
+        self.ship_plume_particles = True
+        self.ship_plume_rate = 900.0
+        self.ship_plume_speed = 340.0
+        self.ship_plume_life_s = 0.55
+        self.ship_plume_spread = 0.10
+        self._ship_plume = None
+        self._ship_plume_program = None
+        self._ship_plume_vao = None
+        self._ship_plume_vbo = None
+        self._ship_heat_tex = None
+        self._ship_heat_fbo = None
         # --- zoom-abhaengige verkleinerung des schiffs -------------------
         # Das schiff bleibt in bildschirm-pixeln gezeichnet (siehe oben),
         # aber NICHT ueber jede zoomstufe gleich gross: weit herausgezoomt --

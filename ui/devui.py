@@ -1104,6 +1104,17 @@ def draw_dev_panels(c: "DevContext"):
                     imgui.set_tooltip("Farben dieser bauform auf die vorgaben\n"
                                       "aus ship/builds.py zuruecksetzen.")
                 imgui.tree_pop()
+            imgui.text("abgas-partikel (pixel-stil)")
+            _checkbox("partikel", c.renderer, 'ship_plume_particles',
+                      "Aus = keine fahne im pixel-stil (der vektor-weg\n"
+                      "hat seine eigene).")
+            _slider("rate (1/s)", c.renderer, 'ship_plume_rate', 100.0, 2500.0, "%.0f",
+                    tooltip="Partikel je sekunde bei vollem schub.\n"
+                            "Leerlauf: rate * leerlauf^2.5.")
+            _slider("tempo (einh./s)", c.renderer, 'ship_plume_speed', 100.0, 800.0, "%.0f",
+                    tooltip="Austrittstempo; das schiff ist 230 einheiten lang.")
+            _slider("lebensdauer (s)", c.renderer, 'ship_plume_life_s', 0.15, 1.5, "%.2f")
+            _slider("streuung (rad)", c.renderer, 'ship_plume_spread', 0.0, 0.4, "%.2f")
             _slider("min. zellen (laenge)", c.renderer, 'ship_pixel_min_cells', 12.0, 80.0, "%.0f",
                     tooltip="So viele zellen lang bleibt das schiff mindestens;\n"
                             "darunter werden die zellen kleiner (bis 1 px).")

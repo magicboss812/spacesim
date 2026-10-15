@@ -20,6 +20,8 @@ import moderngl
 
 from render.body_pixel import _HUD_GROUND, _HUD_INK, _mix
 from ship import art as ship_art
+from ship import builds as ship_builds
+from ship import plume as ship_plume
 
 # Groesster puffer in zellen; ein schiff, das mehr braucht, bekommt groessere
 # zellen statt eines groesseren puffers.
@@ -91,6 +93,61 @@ class ShipPixelMixin:
 
         self._ship_cell_textures, self._ship_cell_fbo = pair()
         self._ship_clean_textures, self._ship_clean_fbo = pair()
+        heat = self.ctx.texture(cap, 2, dtype='f2')
+        heat.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._ship_heat_tex = heat
+        self._ship_heat_fbo = self.ctx.framebuffer(color_attachments=[heat])
+
+    def _ship_plume_step(self, build, head):
+        """Die partikel einen echtzeit-schritt weiter; im foto (capture)
+        steht die fahne still, sie zeigt den zustand des fensters."""
+        if not bool(getattr(self, 'ship_plume_particles', True)) \
+                or self._ship_plume_program is None:
+            return None
+        if self._ship_plume is None:
+            self._ship_plume = ship_plume.PlumeParticles()
+        sim = self._ship_plume
+        capture = float(getattr(self, 'capture_scale', 1.0) or 1.0) != 1.0
+        dt = 0.0 if capture else float(getattr(self, '_frame_real_dt', 0.0))
+        sim.step(dt, self._ship_plume_level, head, ship_builds.NOZZLES.get(build, ()),
+                 float(self.ship_plume_rate), float(self.ship_plume_speed),
+                 float(self.ship_plume_life_s), float(self.ship_plume_spread))
+        return sim
+
+    def _ship_heat_pass(self, sim, scale, center, k, n):
+        """Partikel als punkte additiv in den hitze-puffer (zellraster)."""
+        fbo = self._ship_heat_fbo
+        fbo.use()
+        fbo.viewport = (0, 0, n, n)
+        fbo.clear(0.0, 0.0, 0.0, 0.0, viewport=(0, 0, n, n))
+        if sim is None:
+            return
+        pts = sim.render_points()
+        if len(pts) == 0:
+            return
+        ctx = self.ctx
+        need = pts.nbytes
+        if self._ship_plume_vbo is None or self._ship_plume_vbo.size < need:
+            for obj in (self._ship_plume_vao, self._ship_plume_vbo):
+                if obj is not None:
+                    obj.release()
+            self._ship_plume_vbo = ctx.buffer(reserve=max(need, (ship_plume.MAX_PARTICLES + 64) * 20))
+            self._ship_plume_vao = ctx.vertex_array(
+                self._ship_plume_program,
+                [(self._ship_plume_vbo, '2f 3f', 'a_pos', 'a_attr')])
+        self._ship_plume_vbo.write(pts.tobytes())
+        prog = self._ship_plume_program
+        prog['u_scale'].value = float(scale)
+        prog['u_center'].value = (float(center[0]), float(center[1]))
+        prog['u_cell'].value = float(k)
+        prog['u_grid'].value = (float(n), float(n))
+        ctx.enable(moderngl.BLEND | moderngl.PROGRAM_POINT_SIZE)
+        ctx.blend_func = (moderngl.ONE, moderngl.ONE)
+        try:
+            self._ship_plume_vao.render(moderngl.POINTS, vertices=len(pts))
+        finally:
+            ctx.disable(moderngl.PROGRAM_POINT_SIZE)
+            ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
     def _draw_ship_pixel(self, body, x, y, theta, rgb, dest_fbo):
         """Das schiff im pixel-stil. x/y top-down. True, wenn gezeichnet."""
@@ -108,12 +165,16 @@ class ShipPixelMixin:
         length_px = self._ship_length_px()
         k = self._ship_cell_size(length_px)
         scale = length_px / geo.length
-        # Reichweite um die mitte: nase bis ende der fahne (145 einheiten
-        # hinter der mitte); jede bauform bleibt in |y| <= 60.
-        reach = 147.0 * scale + 2.0 * k
+        hx, hy = math.cos(theta), -math.sin(theta)
+        build = self._ship_build_name()
+        level = self._ship_plume_intensity(body, getattr(self, '_frame_real_dt', 0.0))
+        sim = self._ship_plume_step(build, (hx, hy))
+        # Reichweite um die mitte: nase (115) bzw. so weit, wie die fahne
+        # gerade reicht (gedeckelt); jede bauform bleibt in |y| <= 60.
+        span = 147.0 if sim is None else min(320.0, max(147.0, sim.extent()))
+        reach = span * scale + 2.0 * k
         while k < 64 and 2.0 * reach / k + 4 > _SHIP_CELL_CAP:
             k += 1
-        hx, hy = math.cos(theta), -math.sin(theta)
         oy_up = self._ortho_y(y)
         ox, oy = int(round(x)), int(round(oy_up))
         i0 = math.floor(-reach / k) - 1
@@ -144,6 +205,9 @@ class ShipPixelMixin:
             prog['u_light_exp'].value = float(self.body_light_exponent)
             prog['u_emissive'].value = float(emissive)
             prog['u_style'].value = style
+            accent = self._ship_shapes()[2]
+            prog['u_thrust'].value = float(max(0.0, level - 0.15) / 0.85)
+            prog['u_glow'].value = tuple(float(c) for c in _mix(accent, (1.0, 0.86, 0.45), 0.5))
             # Eine zelle breit, auch im hochaufgeloesten foto (dort sind die
             # ZELLEN k-fach, nicht die linie im zellraster).
             self._set_line_width(1.0 / float(getattr(self, 'capture_scale', 1.0) or 1.0))
@@ -159,13 +223,14 @@ class ShipPixelMixin:
             self._ship_cell_textures[0].use(location=0)
             self._ship_cell_textures[1].use(location=1)
             self._body_cell_clean_vao.render(moderngl.TRIANGLE_STRIP)
+
+            self._ship_heat_pass(sim, scale, (ox - origin[0], oy - origin[1]), k, n)
         except Exception as exc:
             self.debug_info['ship_pixel_error'] = f"cells: {type(exc).__name__}: {exc}"
             return False
         finally:
             ctx.enable(moderngl.BLEND)
 
-        plume = self._ship_plume_intensity(body, getattr(self, '_frame_real_dt', 0.0))
         accent = self._ship_shapes()[2]
         hull_rgb = tuple(float(c) for c in rgb)
         rim = _mix(_mix((0.80, 0.84, 0.92), hull_rgb, 0.3), _HUD_INK, 0.5)
@@ -194,13 +259,10 @@ class ShipPixelMixin:
             prog['u_rim'].value = rim
             prog['u_ink'].value = tuple(float(c) for c in ink)
             prog['u_accent'].value = tuple(float(c) for c in accent)
-            prog['u_plume'].value = float(max(0.0, min(1.0, plume)))
-            prog['u_center'].value = (float(ox), float(oy))
-            prog['u_head'].value = (hx, hy)
-            prog['u_scale'].value = float(scale)
             prog['u_alpha'].value = 1.0
             self._ship_clean_textures[0].use(location=0)
             self._ship_clean_textures[1].use(location=1)
+            self._ship_heat_tex.use(location=2)
             self._ship_pixel_vao.render(moderngl.TRIANGLE_STRIP)
         except Exception as exc:
             self.debug_info['ship_pixel_error'] = f"compose: {type(exc).__name__}: {exc}"
