@@ -54,7 +54,11 @@ Ownership follows the *drawer*, not the subject: the ship's own look is under
 `ship_zoom_shrink_*`, `ship_build`, `ship_pixel_style`, `ship_build_colors`,
 `ship_plume_idle`, `ship_plume_*`) because the
 renderer owns it — `ship` holds the flight-model knobs. Same for what gets
-written next to a body: `body_label_mode` / `body_label_min_radius_px`.
+written next to a body: `body_label_mode` / `body_label_min_radius_px`, and for
+the prediction line's look (`prediction_line_style`, `_color`, `_mark_color`,
+`_fade_steps`, `_fade_min`, and `prediction_line_styles`: {style: {setting:
+value}}, merged over `render/prediction_pixel.py::DEFAULT_STYLE_SETTINGS`, so
+a missing setting takes the default and an unknown one is ignored).
 
 `background` is the one section that is **not** just a bag of values: its key
 set, the attributes of `background.BackgroundLayer` and the sliders in the

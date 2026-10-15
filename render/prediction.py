@@ -690,10 +690,24 @@ class PredictionDrawMixin:
         self._prediction_line_cache_points = sampled_runs
         self._prediction_line_cache_stats = dict(stats)
         draw_t0 = time.perf_counter()
-        for run in sampled_runs:
-            if len(run) < 2:
-                continue
-            self._draw_polyline(run, color=(1.0, 1.0, 1.0, 0.6), width=2.0)
+        # Zeichenweise: `render/prediction_pixel.py`. "klassisch" (oder ein
+        # fehlender shader) ist die alte glatte GL-linie, jetzt in der
+        # eingestellten farbe.
+        t_head = t_end = None
+        try:
+            t_head = float(path_points[0][2])
+            t_end = float(path_points[input_count - 1][2])
+        except Exception:
+            pass
+        styled = False
+        if t_head is not None and t_end is not None and t_end > t_head:
+            styled = self._draw_prediction_styled(sampled_runs, t_head, t_end)
+        if not styled:
+            color, width = self.classic_prediction_line()
+            for run in sampled_runs:
+                if len(run) < 2:
+                    continue
+                self._draw_polyline(run, color=color, width=width)
         self._draw_apsis_markers(predictor, camera, camera_frame_xy)
         stats['draw_ms'] = (time.perf_counter() - draw_t0) * 1000.0
         stats['drawn'] = sum(len(run) for run in sampled_runs)
@@ -1172,6 +1186,7 @@ class PredictionDrawMixin:
             # wie der bildschirm es zeigt, und nur dort, wo etwas zu sehen
             # ist. Schlaegt das fehl (kein tangenten-paar, kein stapel-
             # rahmen, kein budget), bleibt es bei den groben punkten.
+            refined = dense = None
             budget = getattr(self, '_prediction_detail_budget', None)
             if budget is not None:
                 eps_m, eps_px, rung = budget
@@ -1189,6 +1204,22 @@ class PredictionDrawMixin:
                     if dense is not None:
                         screen_points, visible_count, coords = dense
 
+            # Zeitquelle fuer die pixel-linie (`render/prediction_pixel.py`):
+            # die dichteste projizierte kurve MIT ihren zeiten. Die runs
+            # danach (clip, RDP, verdichtung) tragen keine zeit mehr, liegen
+            # aber auf dieser kurve.
+            try:
+                if refined is not None and dense is not None:
+                    src_t = refined[:, 2]
+                else:
+                    src_t = np.asarray(path_points)[np.asarray(indices), 2]
+                self._pred_time_src = (
+                    np.ascontiguousarray(coords[0], dtype=np.float64),
+                    np.ascontiguousarray(coords[1], dtype=np.float64),
+                    np.ascontiguousarray(src_t, dtype=np.float64))
+            except Exception:
+                self._pred_time_src = None
+
             scanned_count = (len(coords[0]) if screen_points is None
                              else len(screen_points))
             stats['scanned'] = stats.get('scanned', 0) + scanned_count
@@ -1201,6 +1232,7 @@ class PredictionDrawMixin:
         prev_world = None
         prev_time = None
         world_accum = 0.0
+        src_times = []
 
         for i in indices:
             point = path_points[i]
@@ -1254,6 +1286,7 @@ class PredictionDrawMixin:
                 stats['visible'] = stats.get('visible', 0) + 1
 
             screen_points.append((sx, sy))
+            src_times.append(sample_time if sample_time is not None else float(i))
 
             prev_world = (px, py)
             prev_time = sample_time
@@ -1261,6 +1294,11 @@ class PredictionDrawMixin:
                 stats['clipped_or_rejected'] = stats.get('clipped_or_rejected', 0) + max(0, raw_count - i - 1)
                 break
 
+        if len(screen_points) >= 2:
+            arr = np.asarray(screen_points, dtype=np.float64)
+            self._pred_time_src = (np.ascontiguousarray(arr[:, 0]),
+                                   np.ascontiguousarray(arr[:, 1]),
+                                   np.asarray(src_times, dtype=np.float64))
         return self._runs_from_screen_points(
             screen_points, camera, tolerance_px, min_step_px, max_segment_px,
             max_points, margin_px, stats)

@@ -25,6 +25,7 @@ class ShaderPipelineMixin:
         self._init_body_pipeline()
         self._init_texquad_pipeline()
         self._init_background_pipeline()
+        self._init_prediction_pixel_pipeline()
 
     def _load_shader_source(self, filename):
         path = os.path.join(self._shader_dir, filename)

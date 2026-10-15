@@ -40,6 +40,16 @@ def _ship_colors(value):
             for build, roles in value.items() if isinstance(roles, dict)}
 
 
+def _pred_line_styles(value):
+    """`renderer.prediction_line_styles`: {zeichenweise: {einstellung: zahl}}.
+    Unbekannte namen verwirft `render/prediction_pixel.py::_pred_settings`
+    beim zeichnen; hier wird nur die form geprueft."""
+    if not isinstance(value, dict):
+        raise ValueError("erwartet {zeichenweise: {einstellung: zahl}}")
+    return {str(style): {str(k): v for k, v in vals.items()}
+            for style, vals in value.items() if isinstance(vals, dict)}
+
+
 def _strip_jsonc(text):
     """Entfernt kommentare und abschliessende kommata aus einem JSON-text.
 
@@ -518,6 +528,13 @@ class ConfigLoader:
             ('prediction_render_max_raw_scan', 'prediction_render_max_raw_scan', int),
             ('prediction_render_max_draw_points', 'prediction_render_max_draw_points', int),
             ('prediction_bypass_fxaa', 'prediction_bypass_fxaa', bool),
+            # Zeichenweise der vorhersagelinie (render/prediction_pixel.py)
+            ('prediction_line_style', 'prediction_line_style', str),
+            ('prediction_line_color', 'prediction_line_color', str),
+            ('prediction_line_mark_color', 'prediction_line_mark_color', str),
+            ('prediction_line_fade_steps', 'prediction_line_fade_steps', int),
+            ('prediction_line_fade_min', 'prediction_line_fade_min', float),
+            ('prediction_line_styles', 'prediction_line_styles', _pred_line_styles),
             # Aufloesungsgetriebene verfeinerung der vorhersagelinie.
             ('prediction_hermite_enabled', 'prediction_hermite_enabled', bool),
             ('prediction_detail_scale', 'prediction_detail_scale', float),
