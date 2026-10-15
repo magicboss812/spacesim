@@ -18,7 +18,7 @@ uniform vec2 u_head;
 uniform vec3 u_light;
 uniform float u_light_exp;
 uniform float u_emissive;
-uniform int u_style;     // 1 led, 2 halbton, 3 blaupause, 4 sprite, 5 signal
+uniform int u_style;     // 2 halbton, 4 sprite
 
 layout(location = 0) out vec4 o_cell;
 layout(location = 1) out vec4 o_id;
@@ -44,14 +44,6 @@ vec3 ramp(vec3 c, int t) {
 void main() {
     ivec2 c = ivec2(floor(gl_FragCoord.xy));
     vec3 base = v_col;
-    if (u_style == 5) {
-        // Signal: der rumpf in HUD-schrift, nur die helligkeit bleibt --
-        // gespreizt, die panelfarben liegen alle zwischen 0.10 und 0.35.
-        float l = dot(base, vec3(0.299, 0.587, 0.114));
-        float t5 = clamp((l - 0.08) / 0.30, 0.0, 1.0);
-        base = HUD_INK * vec3(0.78, 0.92, 1.0) * (0.30 + 0.55 * t5);
-    }
-
     if (abs(v_tag - 0.85) < 0.05) {
         // Akzent: leuchtet selbst, immer die hellste stufe, voller punkt.
         o_cell = vec4(min(v_col * 1.15 + 0.04, vec3(1.0)), 1.0);
@@ -76,7 +68,7 @@ void main() {
 
     // Panelfarben des mockups sind dunkel (#2f3550 ...): fuer die rampe eine
     // stufe angehoben, sonst laege der ganze rumpf unter der schattenstufe.
-    vec3 lifted = u_style == 5 ? base : min(base * 1.55 + 0.03, vec3(1.0));
+    vec3 lifted = min(base * 1.55 + 0.03, vec3(1.0));
     float b = bayer4(c);
     int t;
     if (u_style == 4) {

@@ -25,6 +25,7 @@ import numpy as np
 
 from render import background
 from bodies import icon as body_icon
+from ship import builds as ship_builds
 
 try:
     from imgui_bundle import imgui
@@ -1073,12 +1074,36 @@ def draw_dev_panels(c: "DevContext"):
             _slider("fahne im leerlauf", c.renderer, 'ship_plume_idle', 0.0, 1.0, "%.2f",
                     tooltip="Grundhelligkeit der abgasfahne ohne schub.\n"
                             "Unter schub faehrt sie immer auf 1.0.")
-            styles = ["vektor", "1 led", "2 halbton", "3 blaupause", "4 sprite", "5 signal",
-                      "6 rasterpunkt", "7 linienraster", "8 rautenraster"]
-            cur = max(0, min(len(styles) - 1, int(getattr(c.renderer, 'ship_pixel_style', 0))))
-            changed, idx = imgui.combo("pixel-stil", cur, styles)
+            r = c.renderer
+            # Bauform x zeichenweise, und je bauform ihre farbrollen
+            # (`ship/builds.py`). Geaendert wird `ship_build_colors`, der
+            # renderer baut neu, sobald sich bauform oder eine farbe aendert.
+            build_names = list(ship_builds.BUILDS)
+            cur_b = build_names.index(r._ship_build_name())
+            changed, idx = imgui.combo("bauform", cur_b, build_names)
             if changed:
-                c.renderer.ship_pixel_style = int(idx)
+                r.ship_build = build_names[idx]
+            modes = ["halbton", "sprite", "vector"]
+            cur_m = modes.index(r.ship_pixel_style) if r.ship_pixel_style in modes else 0
+            changed, idx = imgui.combo("zeichenweise", cur_m, modes)
+            if changed:
+                r.ship_pixel_style = modes[idx]
+            if imgui.tree_node("farben der bauform"):
+                build = r._ship_build_name()
+                colors = r._ship_colors()
+                own = r.ship_build_colors.setdefault(build, {})
+                for role, value in colors.items():
+                    rgb = ship_builds.art._hex_rgb(value)
+                    changed, col = imgui.color_edit3(role, list(rgb))
+                    if changed:
+                        own[role] = '#%02x%02x%02x' % tuple(
+                            int(round(min(1.0, max(0.0, float(v))) * 255.0)) for v in col)
+                if imgui.button("vorgaben"):
+                    r.ship_build_colors[build] = {}
+                if imgui.is_item_hovered():
+                    imgui.set_tooltip("Farben dieser bauform auf die vorgaben\n"
+                                      "aus ship/builds.py zuruecksetzen.")
+                imgui.tree_pop()
             _slider("min. zellen (laenge)", c.renderer, 'ship_pixel_min_cells', 12.0, 80.0, "%.0f",
                     tooltip="So viele zellen lang bleibt das schiff mindestens;\n"
                             "darunter werden die zellen kleiner (bis 1 px).")

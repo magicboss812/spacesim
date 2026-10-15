@@ -37,10 +37,9 @@ SHIP_LENGTH = 230.0     # x=32 .. x=262, die volle silhouette
 SHIP_HEIGHT = 118.0     # y=26 .. y=144, inklusive der radiatoren
 
 # Platzhalter fuer die akzentfarbe: ueberall dort, wo das mockup
-# `{{ accent }}` einsetzt. `build()` ersetzt ihn durch den uebergebenen wert.
+# `{{ accent }}` einsetzt. `builds.resolve()` ersetzt ihn durch die rolle
+# `accent` der bauform.
 ACCENT = "@accent"
-
-DEFAULT_ACCENT = "#4de1e8"
 
 
 # --- kleine geometrie-helfer ------------------------------------------------
@@ -317,31 +316,34 @@ class ShipGeometry:
     `verts` haelt ALLE punkte (rumpf und fahne) in einem array; die eintraege
     in `ops` / `plume_ops` sind nur `(mode, rgba, width, start, count)`-slices
     darauf. Der renderer dreht und skaliert damit einmal pro frame ein
-    einziges array statt dutzender kleiner.
+    einziges array statt dutzender kleiner. `key` sagt, aus welcher bauform
+    und welchen farben sie gebaut ist (der cache vergleicht ihn).
     """
 
-    __slots__ = ("verts", "ops", "plume_ops", "accent", "length", "height")
+    __slots__ = ("verts", "ops", "plume_ops", "key", "length", "height")
 
-    def __init__(self, verts, ops, plume_ops, accent):
+    def __init__(self, verts, ops, plume_ops, key, height):
         self.verts = verts
         self.ops = ops
         self.plume_ops = plume_ops
-        self.accent = accent
+        self.key = key
         self.length = SHIP_LENGTH
-        self.height = SHIP_HEIGHT
+        self.height = height
 
 
-def build(accent=DEFAULT_ACCENT):
+def _height(shapes):
+    """Volle hoehe der silhouette in einheiten (2 x groesstes |y|)."""
+    top = max((abs(y) for points, *_ in shapes for _x, y in points), default=SHIP_HEIGHT / 2)
+    return 2.0 * top
+
+
+def build(shapes, accent_rgb, key=None):
     """Die grafik in GL-taugliche batches uebersetzen.
 
-    accent: hex-farbe fuer alles, was im mockup `{{ accent }}` benutzt --
-            duesen-lippe, modulstreifen, instrumente und die abgasfahne.
+    shapes: aus `ship/builds.py::resolve` -- lokale punkte, farben schon
+            aufgeloest ((r, g, b), art).
+    accent_rgb: farbe der abgasfahne.
     """
-    accent_rgb = _hex_rgb(accent)
-
-    def resolve(color):
-        return accent_rgb if color == ACCENT else _hex_rgb(color)
-
     verts = []
 
     def emit(bucket, mode, rgba, width, points):
@@ -356,14 +358,15 @@ def build(accent=DEFAULT_ACCENT):
     # Alle schichten gehen in EINEN draw-call. Bei src-alpha-blending ohne
     # tiefentest blendet jedes dreieck einzeln und in abgabereihenfolge gegen
     # den framebuffer -- die ueberlagerung der schichten, aus der der verlauf
-    # entsteht, bleibt also erhalten.
+    # entsteht, bleibt also erhalten. Sie sitzt bei jeder bauform an derselben
+    # stelle (die duesen liegen alle bei x = -98 .. -115).
     plume_ops = []
     layer_alpha = 1.0 - (1.0 - PLUME_ALPHA) ** (1.0 / PLUME_LAYERS)
     plume_tris = []
     for poly in _plume_polygons():
         for tri in _triangulate(_to_local(poly)):
             plume_tris.extend(tri)
-    emit(plume_ops, "tris", accent_rgb + (layer_alpha,), 1.0, plume_tris)
+    emit(plume_ops, "tris", tuple(accent_rgb) + (layer_alpha,), 1.0, plume_tris)
 
     # --- rumpf ---------------------------------------------------------------
     #
@@ -372,8 +375,7 @@ def build(accent=DEFAULT_ACCENT):
     # genau die `<g>`-geschwister (radiator-paneele, luken, streben), die
     # einander nicht ueberlappen -- die umsortierung innerhalb der gruppe ist
     # damit unsichtbar, spart aber gut ein drittel der draw-calls. Ueber
-    # gruppengrenzen hinweg bleibt die zeichenreihenfolge des mockups
-    # unangetastet.
+    # gruppengrenzen hinweg bleibt die zeichenreihenfolge unangetastet.
     hull_ops = []
     group_key = None
     fills, strokes = [], []
@@ -383,17 +385,16 @@ def build(accent=DEFAULT_ACCENT):
             return
         fill, stroke, width, alpha = group_key
         if fill is not None:
-            emit(hull_ops, "tris", resolve(fill) + (alpha,), 1.0, fills)
+            emit(hull_ops, "tris", tuple(fill[0]) + (alpha,), 1.0, fills)
         if stroke is not None:
-            emit(hull_ops, "lines", resolve(stroke) + (alpha,), width, strokes)
+            emit(hull_ops, "lines", tuple(stroke[0]) + (alpha,), width, strokes)
 
-    for points, closed, fill, stroke, width, alpha in _shapes():
-        key = (fill, stroke, width, alpha)
-        if key != group_key:
+    for local, closed, fill, stroke, width, alpha in shapes:
+        gkey = (fill, stroke, width, alpha)
+        if gkey != group_key:
             flush_group()
-            group_key = key
+            group_key = gkey
             fills, strokes = [], []
-        local = _to_local(points)
         if fill is not None:
             for tri in _triangulate(local):
                 fills.extend(tri)
@@ -406,24 +407,22 @@ def build(accent=DEFAULT_ACCENT):
 
     arr = np.ascontiguousarray(
         np.asarray(verts, dtype=np.float64).reshape((-1, 2)))
-    return ShipGeometry(arr, tuple(hull_ops), tuple(plume_ops), accent)
+    return ShipGeometry(arr, tuple(hull_ops), tuple(plume_ops), key, _height(shapes))
 
 
 # --- pixel-stil: dieselben formen als zellen --------------------------------
 #
 # Fuer den zellpass (`render/ship_pixel.py`) zaehlen nur FLAECHEN: jede
 # fuellung wird eine region, und die grenzen zwischen regionen zieht der
-# zusammenbau als 1-px-striche. Die feinen konturen des mockups fallen weg,
-# bis auf die holme der radiatoren (zwei je paneel), die als ganze zellreihe
-# noch lesbar sind. Die streben alle 8 einheiten und die schotten im
-# 10-einheiten-abstand laegen bei ~40 zellen fast auf jeder zelle und
-# machten radiator und rumpf zu rauschen.
-# Akzent-konturen (duesenlippe, instrumente) bleiben: sie werden einzelne
-# leuchtende zellen.
-CELL_LINE_COLORS = ("#7d8496",)
+# zusammenbau als 1-px-striche. Konturen fallen weg bis auf zwei arten
+# (`builds.py`: rollen `rail` und `accent`): holme, die als ganze zellreihe
+# noch lesbar sind, und akzente, die einzelne leuchtende zellen werden. Die
+# streben alle 8 einheiten und die schotten im 10-einheiten-abstand des
+# originals laegen bei ~40 zellen fast auf jeder zelle und machten radiator
+# und rumpf zu rauschen.
 
 # Kennzeichen im zellpuffer (wie `body_cell_*.frag`): 1.0 rumpf-flaeche,
-# 0.7 konturzelle, 0.85 akzent (leuchtet selbst, nie gestrichen).
+# 0.7 holm, 0.85 akzent (leuchtet selbst, nie gestrichen).
 CELL_TAG_HULL = 1.0
 CELL_TAG_LINE = 0.7
 CELL_TAG_ACCENT = 0.85
@@ -432,50 +431,44 @@ CELL_TAG_ACCENT = 0.85
 class ShipCells:
     """Die grafik fuer den zellpass: zwei float32-tabellen (x, y, r, g, b,
     kennzeichen) im lokalen schiffsraum, dreiecke und linien, in der
-    zeichenreihenfolge des mockups."""
+    zeichenreihenfolge."""
 
-    __slots__ = ("tris", "lines", "accent", "length", "height")
+    __slots__ = ("tris", "lines", "key", "length", "height")
 
-    def __init__(self, tris, lines, accent):
+    def __init__(self, tris, lines, key, height):
         self.tris = tris
         self.lines = lines
-        self.accent = accent
+        self.key = key
         self.length = SHIP_LENGTH
-        self.height = SHIP_HEIGHT
+        self.height = height
 
 
-def build_cells(accent=DEFAULT_ACCENT):
-    accent_rgb = _hex_rgb(accent)
-    keep = {_hex_rgb(c) for c in CELL_LINE_COLORS}
+def build_cells(shapes, key=None):
     tris, lines = [], []
-
-    def resolve(color):
-        return accent_rgb if color == ACCENT else _hex_rgb(color)
-
-    for points, closed, fill, stroke, width, alpha in _shapes():
-        local = _to_local(points)
+    for local, closed, fill, stroke, width, alpha in shapes:
         if fill is not None:
-            rgb = resolve(fill)
-            tag = CELL_TAG_ACCENT if fill == ACCENT else CELL_TAG_HULL
+            rgb, kind = fill
+            tag = CELL_TAG_ACCENT if kind == "accent" else CELL_TAG_HULL
             for tri in _triangulate(local):
                 for x, y in tri:
-                    tris.append((x, y) + rgb + (tag,))
+                    tris.append((x, y) + tuple(rgb) + (tag,))
         if stroke is None or fill is not None:
             continue
-        if stroke == ACCENT:
-            rgb, tag = accent_rgb, CELL_TAG_ACCENT
-        elif _hex_rgb(stroke) in keep:
-            rgb, tag = _hex_rgb(stroke), CELL_TAG_LINE
+        rgb, kind = stroke
+        if kind == "accent":
+            tag = CELL_TAG_ACCENT
+        elif kind == "rail":
+            tag = CELL_TAG_LINE
         else:
             continue
         ring = local + local[:1] if closed else local
         for a, b in zip(ring, ring[1:]):
-            lines.append(a + rgb + (tag,))
-            lines.append(b + rgb + (tag,))
+            lines.append(tuple(a) + tuple(rgb) + (tag,))
+            lines.append(tuple(b) + tuple(rgb) + (tag,))
 
     def table(rows):
         if not rows:
             return np.zeros((0, 6), dtype=np.float32)
         return np.ascontiguousarray(np.asarray(rows, dtype=np.float32))
 
-    return ShipCells(table(tris), table(lines), accent)
+    return ShipCells(table(tris), table(lines), key, _height(shapes))

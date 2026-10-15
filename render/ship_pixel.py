@@ -10,8 +10,8 @@ Dieselben zwei schritte wie `render/body_pixel.py`, nur mit drehung:
 
 Das zellraster haengt an der auf ganze pixel gerundeten schiffsmitte und
 steht achsparallel zum schirm wie das der koerper; dreht das schiff, wird
-die silhouette neu gerastert. `renderer.ship_pixel_style` waehlt eine von
-fuenf auspraegungen, 0 ist die vektor-zeichnung. Regeln:
+die silhouette neu gerastert. `renderer.ship_pixel_style` waehlt "halbton"
+oder "sprite"; "vector" ist die vektor-zeichnung. Regeln:
 .claude/rules/body-art.md, "Pixel ship".
 """
 import math
@@ -20,17 +20,20 @@ import moderngl
 
 from render.body_pixel import _HUD_GROUND, _HUD_INK, _mix
 from ship import art as ship_art
-from ui import theme as ui_theme
 
 # Groesster puffer in zellen; ein schiff, das mehr braucht, bekommt groessere
 # zellen statt eines groesseren puffers.
 _SHIP_CELL_CAP = 160
 
+# Zeichenweise -> u_style im shader. Andere werte (auch "vector") zeichnen
+# die vektor-grafik.
+SHIP_PIXEL_STYLES = {"halbton": 2, "sprite": 4}
+
 
 class ShipPixelMixin:
 
     def _ship_pixel_ready(self):
-        return (int(self.ship_pixel_style) > 0
+        return (str(self.ship_pixel_style) in SHIP_PIXEL_STYLES
                 and self._ship_cell_program is not None
                 and self._ship_pixel_program is not None
                 and self._ship_pixel_vao is not None
@@ -46,11 +49,12 @@ class ShipPixelMixin:
         return max(1, min(small, fit))
 
     def _ship_cells(self):
+        key, shapes, _accent = self._ship_shapes()
         geo = self._ship_cells_cache
-        if geo is not None and geo.accent == self.ship_accent_color:
+        if geo is not None and geo.key == key:
             return geo
         self._release_ship_cell_buffers()
-        geo = ship_art.build_cells(self.ship_accent_color)
+        geo = ship_art.build_cells(shapes, key)
         prog = self._ship_cell_program
         vaos = []
         for table, mode in ((geo.tris, moderngl.TRIANGLES), (geo.lines, moderngl.LINES)):
@@ -97,15 +101,15 @@ class ShipPixelMixin:
             geo = self._ship_cells()
         except Exception as exc:
             self.debug_info['ship_pixel_error'] = f"setup: {type(exc).__name__}: {exc}"
-            self.ship_pixel_style = 0
+            self.ship_pixel_style = "vector"
             return False
 
         w, h = int(self.width), int(self.height)
         length_px = self._ship_length_px()
         k = self._ship_cell_size(length_px)
         scale = length_px / geo.length
-        # Reichweite um die mitte: nase bis ende der fahne (x = 2 im SVG,
-        # also 145 einheiten hinter der mitte), radiatoren +-59.
+        # Reichweite um die mitte: nase bis ende der fahne (145 einheiten
+        # hinter der mitte); jede bauform bleibt in |y| <= 60.
         reach = 147.0 * scale + 2.0 * k
         while k < 64 and 2.0 * reach / k + 4 > _SHIP_CELL_CAP:
             k += 1
@@ -122,7 +126,7 @@ class ShipPixelMixin:
 
         light, emissive = self._body_light_dir(body, x, y)
         light3 = tuple(float(c) for c in light)
-        style = int(self.ship_pixel_style)
+        style = SHIP_PIXEL_STYLES[str(self.ship_pixel_style)]
         ctx = self.ctx
         try:
             fbo = self._ship_cell_fbo
@@ -162,11 +166,10 @@ class ShipPixelMixin:
             ctx.enable(moderngl.BLEND)
 
         plume = self._ship_plume_intensity(body, getattr(self, '_frame_real_dt', 0.0))
-        accent = ui_theme.rgba(self.ship_accent_color)[:3]
+        accent = self._ship_shapes()[2]
         hull_rgb = tuple(float(c) for c in rgb)
         rim = _mix(_mix((0.80, 0.84, 0.92), hull_rgb, 0.3), _HUD_INK, 0.5)
-        ink = _mix(ui_theme.rgba(ui_theme.SCHEME[0])[:3], _HUD_INK, 0.35) \
-            if style == 3 else _HUD_INK
+        ink = _HUD_INK
         grout = tuple(c * 2.0 for c in _HUD_GROUND)
 
         x0, y0 = max(0, origin[0]), max(0, origin[1])

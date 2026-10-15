@@ -635,8 +635,9 @@ silhouette and size, no heavy restyle.
 
 **Result:** The ship is drawn on the bodies' cell grid (`render/ship_pixel.py`,
 `ship_cell.{vert,frag}`, `ship_pixel.frag`), same silhouette and size, in
-five selectable looks (`renderer.ship_pixel_style` 1–5, dev UI "pixel-stil";
-0 = old vector). Default 1 (LED, the body treatment). Cells are 2 px at
+two looks (`renderer.ship_pixel_style` "halbton" / "sprite", "vector" =
+old art) and five builds with per-role colours (`ship/builds.py`,
+`ship_build`, `ship_build_colors`; later follow-up, 2026-10-15). Cells are 2 px at
 1280×800 and 3 px at 2560×1440: the ship needs ~36 cells along its length or
 rotated silhouettes collapse (26 cells at 3 px failed). Verified on contact
 sheets of 4 angles × 6 styles at both resolutions, idle and under thrust, and

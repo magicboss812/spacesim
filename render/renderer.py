@@ -454,17 +454,22 @@ class Renderer(
         # spieler-regler daneben (dev-UI, reiter "Ship").
         self.ship_length_px = 78.0
         self.ship_render_scale = 1.0
-        self.ship_accent_color = ship_art.DEFAULT_ACCENT
+        # Bauform und farben (`ship/builds.py`): `ship_build` waehlt eine von
+        # BUILDS, `ship_build_colors` haelt je bauform {rolle: "#rrggbb"} und
+        # ueberschreibt damit die vorgaben (config, dev-UI "Ship").
+        self.ship_build = "original"
+        self.ship_build_colors = {}
         # Grundhelligkeit der abgasfahne ohne schub; unter schub faehrt sie
         # auf 1.0 hoch (siehe _draw_ship_sprite).
         self.ship_plume_idle = 0.22
         self._ship_geometry_cache = None
+        self._ship_shapes_cache = None
         self._ship_plume_level = 0.0
-        # Pixel-stil des schiffs (`render/ship_pixel.py`): 0 = vektor-
-        # zeichnung, 1..8 die auspraegungen (led, halbton, blaupause, sprite,
-        # signal, rasterpunkt, linienraster, rautenraster). Das schiff bleibt mindestens so viele zellen lang, sonst
-        # werden die zellen kleiner.
-        self.ship_pixel_style = 1
+        # Zeichenweise (`render/ship_pixel.py`): "halbton" oder "sprite" im
+        # pixel-stil der koerper, "vector" die vektor-zeichnung. Das schiff
+        # bleibt mindestens `ship_pixel_min_cells` zellen lang, sonst werden
+        # die zellen kleiner.
+        self.ship_pixel_style = "halbton"
         self.ship_pixel_min_cells = 36.0
         self._ship_cell_program = None
         self._ship_pixel_program = None

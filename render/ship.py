@@ -14,6 +14,7 @@ import numpy as np
 from physics.reference_frames import apparent_orbital_directions
 from physics.vec import Vec2
 from ship import art as ship_art
+from ship import builds as ship_builds
 
 
 class ShipDrawMixin:
@@ -213,13 +214,42 @@ class ShipDrawMixin:
             return 7.0 * max(0.05, float(getattr(self, '_ship_zoom_factor', 1.0)))
         return self._ship_length_px() * 0.5 * geo.height / geo.length
 
+    def _ship_build_name(self):
+        name = str(getattr(self, 'ship_build', 'original'))
+        return name if name in ship_builds.BUILDS else 'original'
+
+    def _ship_colors(self):
+        """{rolle: hex} der aktuellen bauform: vorgaben + config/dev-UI."""
+        build = self._ship_build_name()
+        overrides = (getattr(self, 'ship_build_colors', None) or {}).get(build)
+        return ship_builds.colors_for(build, overrides)
+
+    def _ship_shapes(self):
+        """(schluessel, formliste) der aktuellen bauform mit ihren farben.
+        Der schluessel wechselt mit bauform ODER einer farbe; beide caches
+        (vektor und zellen) vergleichen ihn."""
+        build = self._ship_build_name()
+        colors = self._ship_colors()
+        key = (build, tuple(sorted(colors.items())))
+        cache = self._ship_shapes_cache
+        if cache is None or cache[0] != key:
+            cache = (key, ship_builds.resolve(build, colors), ship_art._hex_rgb(colors['accent']))
+            self._ship_shapes_cache = cache
+        return cache
+
     def _ship_geometry(self):
-        """Die gebaute schiffs-grafik, gecacht bis die akzentfarbe wechselt."""
+        """Die gebaute vektor-grafik, gecacht bis bauform oder farbe wechseln."""
+        try:
+            key, shapes, accent = self._ship_shapes()
+        except Exception as exc:
+            print(f"RENDERER WARNING: schiffs-bauform unbrauchbar ({exc})")
+            self.ship_sprite_enabled = False
+            return None
         cache = self._ship_geometry_cache
-        if cache is not None and cache.accent == self.ship_accent_color:
+        if cache is not None and cache.key == key:
             return cache
         try:
-            cache = ship_art.build(self.ship_accent_color)
+            cache = ship_art.build(shapes, accent, key)
         except Exception as exc:
             print(f"RENDERER WARNING: schiffs-grafik konnte nicht gebaut werden ({exc})")
             self.ship_sprite_enabled = False

@@ -3,6 +3,7 @@ paths:
   - "bodies/style.py"
   - "bodies/icon.py"
   - "ship/art.py"
+  - "ship/builds.py"
   - "render/bodies.py"
   - "render/ship.py"
   - "render/ship_pixel.py"
@@ -281,32 +282,49 @@ off, 5.6–7.3 ms on; this machine's noise is ±2 ms between runs.
 
 ## Pixel ship: the same cell grid, rotated content (2026-10-15)
 
-`render/ship_pixel.py` (`ShipPixelMixin`) draws the ship in the body idiom;
-`renderer.ship_pixel_style` picks one of five looks, 0 is the vector path
-below. Same two passes as the bodies, minus the window layer (the ship is
-drawn after the FXAA resolve anyway, straight into `_frame_output_fbo`):
+`render/ship_pixel.py` (`ShipPixelMixin`) draws the ship in the body idiom.
+`renderer.ship_pixel_style` is `"halbton"`, `"sprite"` or `"vector"` (the
+vector path below); `renderer.ship_build` picks one of five builds. Same two
+passes as the bodies, minus the window layer (the ship is drawn after the
+FXAA resolve anyway, straight into `_frame_output_fbo`):
 
 1. **Cell pass** (`ship_cell.{vert,frag}`): the fills of
    `ship/art.py::build_cells` rotated and scaled into a cell buffer, one
-   fragment per cell, blending off, paint order of the mockup. `o_cell.a`
-   carries the **light** (not a halftone level), so every style derives its
-   own fill from it. Then the bodies' clean pass, unchanged.
+   fragment per cell, blending off, in paint order. `o_cell.a` carries the
+   **light** (not a halftone level), so each style derives its own fill from
+   it. Then the bodies' clean pass, unchanged.
 2. **Compose** (`ship_pixel.frag` on `body_pixel.vert`), `u_style`:
-   `1 led` (body treatment: ramp, 1-px region strokes, bright lit rim; LED
-   gaps only from 4-px cells), `2 halbton` (light → coverage: shrinking
-   square from 4-px cells, ordered dither inside the cell below), `3
-   blaupause` (dark panels, every region boundary a HUD-ink stroke), `4
-   sprite` (dithered ramp over all four steps, selout, 1-px outline one step
-   above the ground), `5 signal` (monochrome HUD ink, every cell an LED).
-   `6 rasterpunkt`, `7 linienraster`, `8 rautenraster` are halftones on a
-   **separate print screen** (pitch 2 cells, anchored at the grid origin):
-   the silhouette stays on the fine cells and only the tone is screened,
-   as square dots (chamfered from 4 px), horizontal lines in HUD ink, or
-   diamonds on a half-offset screen. Tone = luma of the shaded cell, capped
-   at 0.80: uncapped, a lit panel filled solid and lost its screen. Style 2
-   screens inside the cell and has only two dot sizes at 2-px cells.
-   The plume is a dot matrix outside the cells, `s = −(X²+Y²)/(2X)` being the
-   closed form of the mockup's nested ellipses shrunk toward the nozzle.
+   `2 halbton` (light → coverage: shrinking square from 4-px cells, ordered
+   dither inside the cell below; dark seams between regions, bright rim on
+   the lit side) and `4 sprite` (dithered ramp over all four steps, selout,
+   1-px outline one step above the ground). The plume is drawn outside the
+   cells, `s = −(X²+Y²)/(2X)` being the closed form of the mockup's nested
+   ellipses shrunk toward the nozzle: dots for halbton, stepped cells for
+   sprite. LED, blueprint, signal and three print-screen halftones were
+   built and removed again on request (commit history, 2026-10-15).
+
+**Builds and colours** (`ship/builds.py`): `original` (the mockup),
+`ringschiff`, `pfeil`, `schlepper`, `segler`. Shapes name **colour roles**,
+not hex values (`"cargo_a:2"` = role `cargo_a`, shade 2), and `resolve(build,
+colors)` turns them into `(local points, closed, fill, stroke, width, alpha)`
+with `fill`/`stroke = ((r, g, b), kind)`, kind `accent` / `rail` / `plain`.
+`renderer.ship_build_colors` (config, dev UI "Ship › farben der bauform")
+overrides `DEFAULT_COLORS` per build and role.
+- **One role carries a family of near tones.** Large areas are split into
+  plates; each plate takes `shade(rgb, k)` (±9 % value per step, slightly
+  warmer hue, slightly less saturated). The player sets one colour per role
+  and still gets the variation.
+- **The original stays the mockup.** Its shapes keep hex values; each hex
+  belongs to a role and is recoloured **proportionally** (`hex · new /
+  default`), so the defaults reproduce the mockup exactly.
+- **Every build is 230 units long with its nozzles at x = −98 … −115.** The
+  plume (`ship_pixel.frag`, `art._plume_polygons`) is fixed behind that, and
+  `_ship_length_px` normalises on the length. Stay within |y| ≤ 60 (the
+  compose reach).
+- **Bright defaults wash out.** Cells are lifted ×1.55 before the ramp, so a
+  role above ~#8a… goes near white on the lit side (seen on the first sail).
+- The caches (`_ship_shapes`, vector geometry, cell VBOs) compare a key
+  `(build, sorted colours)`; a dev-UI edit rebuilds on the next frame.
 
 Rules, each from a seen failure:
 - **The ship needs about 36 cells along its length**
@@ -319,22 +337,20 @@ Rules, each from a seen failure:
   the bodies; rotation re-rasterises the silhouette, translation moves it in
   1-px steps.
 - **Only fills and two kinds of strokes become cells.** Accent strokes
-  (nozzle lip, instruments) become single emissive cells, the radiator rails
-  (`#7d8496`) one cell row. Struts every 8 units and bulkheads every 10 land
-  on almost every cell and turned radiator and hull into noise.
+  become single emissive cells, rail strokes one cell row. The original's
+  struts every 8 units and bulkheads every 10 land on almost every cell and
+  turned radiator and hull into noise.
 - **Tags: 1.0 hull, 0.7 rail, 0.85 accent, tested as a band.** A plain
   `tag > 0.8` matched the hull, which then drew as flat accent colour with no
   outline.
 - **The light is steeper than for the bodies** (`z ≥ 0.75`) **plus a 0.40
   ambient**: from above a flat ship is lit grazing most of the time, and the
-  hull sat entirely in the shadow step. The mockup's panel colours are all
-  dark navy (#1c2135 to #454d70), so they are lifted ×1.55 before the ramp,
-  and the boundaries carry the drawing, as the light outlines do in the mockup.
+  hull sat entirely in the shadow step.
 - **Line width in the cell pass is 1 cell**, divided by `capture_scale`,
   because `_set_line_width` multiplies by it.
 
 Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms, pixel 0.54–0.66 ms
-per frame.
+per frame (original build).
 
 ## Die Marke — `bodies/icon.py`
 
@@ -604,8 +620,9 @@ es sechs Uniform-Schreibvorgänge, der Rest läuft über `_set_uniform`.
   Claude Design mockup `Ship Mockup.dc.html`
   (project `7c1401de-e967-41a5-818a-742e9a6015b3`). The shape lists are kept
   in the mockup's own **SVG coordinates** (y down, viewBox `0 0 300 170`) so
-  they can be diffed against it line by line; `build(accent)` flips them into
-  local ship space (+x = nose, +y up, origin at the visual centre), flattens
+  they can be diffed against it line by line; `builds.resolve()` flips them
+  into local ship space (+x = nose, +y up, origin at the visual centre) and
+  `build(shapes, accent_rgb)` flattens
   the beziers/arcs/dashes, ear-clips every fill into triangles and merges the
   result into ~37 `(mode, rgba, width, start, count)` batches over one shared
   vertex array. Pure numbers — no pygame, no GL, no numba. **Order is the
