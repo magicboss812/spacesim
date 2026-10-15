@@ -334,6 +334,8 @@ styles only; the vector path keeps its nested-ellipse plume.
 - **Temperature per particle**: `(0.22 + 0.78 s) · U(0.85, 1.12)` at
   emission, dropping 55 % over its life. The scatter is what makes the
   colour live; low thrust also flickers harder (`±(0.10 + 0.22·(1 − s))`).
+  The flicker is a new target every ~0.08 s, approached with τ 0.04 s; a
+  fresh random value per frame strobed at the frame rate.
   The hull light and the glow follow the spool too: red at low thrust, warm
   white with a blue touch at full.
 - **Fixed light points on top of the simulation:** a glow at each nozzle
@@ -378,7 +380,14 @@ styles only; the vector path keeps its nested-ellipse plume.
   heat-weighted centroids of the particles, bucketed by age (age ≈ distance).
   `ship_cell.frag` puts each cell centre into that frame and sums
   `strength · (0.35 + 0.65·max(N·L, 0)) / (1 + d² / 4r²)`, with the lights
-  9 units above the plane so the top of the hull is reached too. The sum is
+  9 units above the plane so the top of the hull is reached too.
+  **The lights are smoothed over time and do not flicker**: fixed slots
+  (nozzles, then four age buckets), each eased with τ 0.20 s
+  (`LIGHT_TAU_S`), and the bucket lights are gated by `spool / 0.15`, so
+  at idle only the steady nozzle light remains. Every change of `lit`
+  switches halbton pixels; with the per-frame flicker and the raw particle
+  centroids the hull changed 459 px per held frame at idle (halbton,
+  1280×800), now 2.9 (0.2 by more than a faint colour step). The sum is
   capped at 1.3, adds `0.60 · glow` in a warm mix of the accent to the
   colour and lifts the light (so halbton coverage grows near the fire). It
   changes colour only, not the region id, so no seams appear. Bending the
@@ -446,6 +455,14 @@ Rules, each from a seen failure:
 - **The grid is screen-aligned and hangs on the rounded ship centre**, like
   the bodies; rotation re-rasterises the silhouette, translation moves it in
   1-px steps.
+- **Every Bayer pattern counts from the ship centre, never from the buffer
+  corner** (`u_anchor` in `ship_pixel.frag`, `u_center / u_cell` in
+  `ship_cell.frag`). The corner moves by whole cells with the plume's
+  `extent()`, which at idle jumps with the random pilot-flame particles;
+  counted from the corner, each jump shifted the whole hull dither by 2 px
+  (half the 4×4 period). Measured with the smoothed lights already in: 19.5
+  (halbton) and 115 (sprite) strongly changed hull px per held idle frame,
+  0.2 and 0.8 after.
 - **Only fills and two kinds of strokes become cells.** Accent strokes
   become single emissive cells, rail strokes one cell row. The original's
   struts every 8 units and bulkheads every 10 land on almost every cell and

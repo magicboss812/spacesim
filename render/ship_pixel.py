@@ -307,6 +307,7 @@ class ShipPixelMixin:
             prog['u_rect'].value = (x0 / fw * 2.0 - 1.0, y0 / fh * 2.0 - 1.0,
                                     x1 / fw * 2.0 - 1.0, y1 / fh * 2.0 - 1.0)
             prog['u_origin'].value = (float(origin[0]), float(origin[1]))
+            prog['u_anchor'].value = (ox - origin[0], oy - origin[1])
             prog['u_grid'].value = (n, n)
             prog['u_k'].value = int(k)
             prog['u_style'].value = style

@@ -53,6 +53,14 @@ SPOOL_DOWN_S = 0.12
 NOZZLE_HEAT_S = 0.10
 NOZZLE_COOL_S = 0.80
 FIRING = 0.04          # ab diesem spool gilt das triebwerk als laufend
+# Flackern: ein neuer zielwert alle FLICKER_HOLD_S, weich angelaufen. Ein
+# frischer zufallswert JE FRAME war ein stroboskop bei der bildrate.
+FLICKER_HOLD_S = 0.08
+FLICKER_TAU_S = 0.04
+# Rumpflicht: zeitlich geglaettet. Die schwerpunkte zufaelliger partikel
+# springen von frame zu frame, und jede aenderung schaltet halbton-pixel um.
+LIGHT_TAU_S = 0.20
+N_LIGHT_BUCKETS = 4
 
 
 def _approach(value, target, dt, tau):
@@ -82,6 +90,9 @@ class PlumeParticles:
         self._firing = False
         self._speed = 0.0
         self._flicker = 1.0
+        self._flicker_target = 1.0
+        self._flicker_hold = 0.0
+        self._lights = None        # (n, 4) geglaettet: x, y, staerke, radius
 
     # Altname: der renderer las frueher `level` (0..1) -- jetzt der spool.
     @property
@@ -95,6 +106,9 @@ class PlumeParticles:
         self.nozzle_temp = 0.0
         self.front = 0.0
         self._firing = False
+        self._flicker = self._flicker_target = 1.0
+        self._flicker_hold = 0.0
+        self._lights = None
 
     def step(self, dt, throttle, idle, head, nozzles, rate, speed, life, spread):
         """Ein echtzeit-schritt. throttle 0..1 = hebelstellung, mit der die
@@ -109,8 +123,13 @@ class PlumeParticles:
         target = max(0.0, min(1.0, float(throttle)))
         # Flackern: bei wenig schub (niedriger kammerdruck, unruhige
         # verbrennung) deutlich staerker als bei vollem.
-        amp = 0.10 + 0.22 * (1.0 - self.spool)
-        self._flicker = float(1.0 + rng.uniform(-amp, amp * 0.5))
+        self._flicker_hold -= dt
+        if self._flicker_hold <= 0.0:
+            amp = 0.10 + 0.22 * (1.0 - self.spool)
+            self._flicker_target = float(1.0 + rng.uniform(-amp, amp * 0.5))
+            self._flicker_hold += FLICKER_HOLD_S * rng.uniform(0.6, 1.4)
+            self._flicker_hold = max(self._flicker_hold, 0.0)
+        self._flicker = _approach(self._flicker, self._flicker_target, dt, FLICKER_TAU_S)
 
         # --- triebwerk -----------------------------------------------------
         self.spool = _approach(self.spool, target, dt,
@@ -145,6 +164,7 @@ class PlumeParticles:
         self._carry = want - count
         if count and self.nozzles:
             self._emit(count, s, ex_speed, life, spread)
+        self._smooth_lights(dt)
 
     def _ignite(self, speed):
         """Zuendpuff: wenige, langsame, weit gestreute partikel an der duese
@@ -243,32 +263,67 @@ class PlumeParticles:
         out = np.concatenate(parts, axis=0)
         return np.ascontiguousarray(out, dtype=np.float32)
 
+    def _raw_lights(self):
+        """Feste plaetze: je duese ein licht, dann N_LIGHT_BUCKETS
+        alters-eimer. Ein leerer eimer bleibt mit staerke 0 stehen (statt zu
+        verschwinden), damit die glaettung je platz weiterlaeuft. Ohne
+        flackern: das gehoert der flamme, nicht dem rumpf -- auf dem halbton
+        schaltete es jedes frame pixel um, auch im leerlauf."""
+        hx, hy = self.head
+        rows = []
+        for x, y, r in self.nozzles:
+            lx, ly = x - 0.25 * r, y
+            strength = 0.25 * min(1.0, self.idle / 0.22) + 1.0 * self.nozzle_temp
+            rows.append((hx * lx - hy * ly, hy * lx + hx * ly, strength, 1.6 * r))
+        a = self.alive
+        t = np.clip(self.age[a] / self.life[a], 0.0, 1.0)
+        heat = self.heat0[a] * (1.0 - t) ** 1.7
+        pos = self.pos[a]
+        size = self.size0[a] * (1.0 + 1.7 * t)
+        for lo, hi in ((0.0, 0.2), (0.2, 0.45), (0.45, 0.7), (0.7, 1.01)):
+            sel = (t >= lo) & (t < hi)
+            w = heat[sel]
+            total = float(w.sum())
+            if total <= 1e-6:
+                rows.append((math.nan, math.nan, 0.0, 0.0))
+                continue
+            cx = float((pos[sel, 0] * w).sum() / total)
+            cy = float((pos[sel, 1] * w).sum() / total)
+            # Nur der hauptstrom leuchtet den rumpf an; die paar partikel der
+            # zuendflamme kommen und gehen zufaellig und liessen den halbton
+            # im leerlauf kriechen. Dort bleibt allein das (ruhige) duesenlicht.
+            gate = min(1.0, self.spool / 0.15)
+            rows.append((cx, cy, 0.035 * total * gate, float(size[sel].mean()) * 2.0))
+        return np.asarray(rows, dtype=float).reshape(-1, 4)
+
+    def _smooth_lights(self, dt):
+        raw = self._raw_lights()
+        cur = self._lights
+        if cur is None or cur.shape != raw.shape:
+            self._lights = np.where(np.isnan(raw), 0.0, raw)
+            return
+        k = 1.0 - math.exp(-dt / LIGHT_TAU_S)
+        empty = np.isnan(raw[:, 0])
+        fresh = cur[:, 2] <= 1e-4          # war aus: ort sofort uebernehmen
+        for i in range(raw.shape[0]):
+            if empty[i]:
+                cur[i, 2] += (0.0 - cur[i, 2]) * k
+            elif fresh[i]:
+                cur[i, :2] = raw[i, :2]
+                cur[i, 3] = raw[i, 3]
+                cur[i, 2] += (raw[i, 2] - cur[i, 2]) * k
+            else:
+                cur[i] += (raw[i] - cur[i]) * k
+
     def light_sources(self, max_lights=8):
         """Die fahne als punktlichter fuer den rumpf: je duese das gluehen am
         austritt, dazu bis zu vier hitzegewichtete schwerpunkte der partikel
-        (nach alter gebuendelt, alter ~ abstand). Zeilen (x, y, staerke,
-        radius) im selben raum wie die partikel."""
-        out = []
-        hx, hy = self.head
-        for x, y, r in self.nozzles:
-            lx, ly = x - 0.25 * r, y
-            strength = (0.25 * min(1.0, self.idle / 0.22) + 1.0 * self.nozzle_temp) * self._flicker
-            out.append((hx * lx - hy * ly, hy * lx + hx * ly, strength, 1.6 * r))
-        a = self.alive
-        if a.any():
-            t = np.clip(self.age[a] / self.life[a], 0.0, 1.0)
-            heat = self.heat0[a] * (1.0 - t) ** 1.7
-            pos = self.pos[a]
-            size = self.size0[a] * (1.0 + 1.7 * t)
-            for lo, hi in ((0.0, 0.2), (0.2, 0.45), (0.45, 0.7), (0.7, 1.01)):
-                sel = (t >= lo) & (t < hi)
-                w = heat[sel]
-                total = float(w.sum())
-                if total < 0.05:
-                    continue
-                cx = float((pos[sel, 0] * w).sum() / total)
-                cy = float((pos[sel, 1] * w).sum() / total)
-                out.append((cx, cy, 0.035 * total, float(size[sel].mean()) * 2.0))
+        (nach alter gebuendelt, alter ~ abstand), zeitlich geglaettet
+        (`LIGHT_TAU_S`). Zeilen (x, y, staerke, radius) im selben raum wie
+        die partikel."""
+        if self._lights is None:
+            return []
+        out = [tuple(float(v) for v in row) for row in self._lights if row[2] > 1e-3]
         return out[:max_lights]
 
     def extent(self):
