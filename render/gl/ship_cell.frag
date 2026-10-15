@@ -24,6 +24,11 @@ uniform int u_style;     // 2 halbton, 4 sprite
 uniform vec4 u_plights[8];
 uniform int u_plight_n;
 uniform vec3 u_glow;     // farbe dieses lichts
+// Schiffsmitte im puffer (wie im vertex-shader). Das bayer-muster zaehlt
+// von der mitte aus, nicht von der pufferecke: die ecke wandert mit der
+// reichweite der fahne, und jede verschiebung warf das ganze muster um.
+uniform vec2 u_center;
+uniform float u_cell;
 
 layout(location = 0) out vec4 o_cell;
 layout(location = 1) out vec4 o_id;
@@ -74,7 +79,7 @@ void main() {
     // Panelfarben des mockups sind dunkel (#2f3550 ...): fuer die rampe eine
     // stufe angehoben, sonst laege der ganze rumpf unter der schattenstufe.
     vec3 lifted = min(base * 1.55 + 0.03, vec3(1.0));
-    float b = bayer4(c);
+    float b = bayer4(c - ivec2(floor(u_center / u_cell + 0.5)));
     int t;
     if (u_style == 4) {
         // Sprite: jede stufengrenze gedithert, ein verlauf ueber den
