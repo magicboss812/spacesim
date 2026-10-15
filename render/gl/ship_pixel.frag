@@ -98,7 +98,13 @@ vec4 fire(float h, float smoke, float b) {
     if (hh > 0.62) return vec4(mix(u_accent, yellow, 0.38), 1.0);
     if (hh > 0.32) return vec4(u_accent, 1.0);
     if (hh > 0.14) return vec4(u_accent * 0.55, 0.92);
-    if (smoke + (b - 0.5) * 0.12 > 0.10) return vec4(mix(u_grout, u_ink, 0.22), 0.50);
+    if (smoke + (b - 0.5) * 0.12 > 0.10) {
+        // Rauch im schein der glut: je mehr hitze in der zelle, desto
+        // waermer und heller -- kalt am ende der fahne.
+        vec3 cold = mix(u_grout, u_ink, 0.22);
+        vec3 warm = mix(u_accent * 0.55, vec3(1.0, 0.75, 0.45), 0.25);
+        return vec4(mix(cold, warm, clamp(h * 6.0, 0.0, 0.85)), 0.50 + 0.25 * clamp(h * 6.0, 0.0, 1.0));
+    }
     return vec4(0.0);
 }
 

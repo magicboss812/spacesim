@@ -206,7 +206,11 @@ class ShipPixelMixin:
             prog['u_emissive'].value = float(emissive)
             prog['u_style'].value = style
             accent = self._ship_shapes()[2]
-            prog['u_thrust'].value = float(max(0.0, level - 0.15) / 0.85)
+            lights = sim.light_sources(8) if sim is not None else []
+            packed = [tuple(float(v) for v in L) for L in lights]
+            packed += [(0.0, 0.0, 0.0, 1.0)] * (8 - len(packed))
+            prog['u_plights'].value = packed
+            prog['u_plight_n'].value = len(lights)
             prog['u_glow'].value = tuple(float(c) for c in _mix(accent, (1.0, 0.86, 0.45), 0.5))
             # Eine zelle breit, auch im hochaufgeloesten foto (dort sind die
             # ZELLEN k-fach, nicht die linie im zellraster).

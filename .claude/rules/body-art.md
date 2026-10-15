@@ -326,10 +326,19 @@ styles only; the vector path keeps its nested-ellipse plume.
   and Pfeil plumes stayed red.
 - **Ignition burst** of 70 particles when thrust crosses 0.45; idle emits
   `rate · level^2.5` (at 0.22 about 2 % of full thrust, a flicker).
-- **The hull rear glows** under thrust (`u_thrust`, `u_glow` in
-  `ship_cell.frag`), colour only, so no seams appear. Write that falloff as
-  `1 − smoothstep(lo, hi, x)`: GLSL's smoothstep is undefined for edge0 >
-  edge1.
+- **The plume lights the hull per cell.** `PlumeParticles.light_sources()`
+  gives up to 8 point lights each frame: one glow per nozzle plus up to four
+  heat-weighted centroids of the particles, bucketed by age (age ≈ distance).
+  `ship_cell.frag` puts each cell centre into that frame and sums
+  `strength · (0.35 + 0.65·max(N·L, 0)) / (1 + d² / 4r²)`, with the lights
+  9 units above the plane so the top of the hull is reached too. The sum is
+  capped at 1.3, adds `0.60 · glow` in a warm mix of the accent to the
+  colour and lifts the light (so halbton coverage grows near the fire). It
+  changes colour only, not the region id, so no seams appear. Bending the
+  plume moves the light with it. Smoke in the compose takes warm light from
+  the heat in its own cell.
+- **Never write `smoothstep(hi, lo, x)`.** GLSL leaves edge0 ≥ edge1
+  undefined; the first rear glow used it.
 - The grid reach follows the plume (`extent()`, capped at 320 units); a
   capture does not step the particles.
 - Tunables: `ship_plume_particles`, `ship_plume_rate` (900/s),
@@ -383,8 +392,8 @@ Rules, each from a seen failure:
   because `_set_line_width` multiplies by it.
 
 Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms; pixel 0.54–0.66 ms
-without particles, 1.27 ms idle and 1.79 ms at full thrust with them
-(original build, ~470 particles). The Python part is ≤ 0.31 ms (step 0.22 +
+without particles, 1.40 ms idle and 1.81 ms at full thrust with particles
+and plume light (original build, ~470 particles). The Python part is ≤ 0.31 ms (step 0.22 +
 point build 0.09); the rest is the heat pass and the extra texel fetch in
 software GL.
 

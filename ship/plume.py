@@ -139,6 +139,35 @@ class PlumeParticles:
         out = np.concatenate(parts, axis=0) if parts else np.zeros((0, 5))
         return np.ascontiguousarray(out, dtype=np.float32)
 
+    def light_sources(self, max_lights=8):
+        """Die fahne als punktlichter fuer den rumpf: je duese das gluehen am
+        austritt, dazu bis zu vier hitzegewichtete schwerpunkte der partikel
+        (nach alter gebuendelt, alter ~ abstand). Zeilen (x, y, staerke,
+        radius) im selben raum wie die partikel."""
+        out = []
+        hx, hy = self.head
+        lvl = self.level
+        for x, y, r in self.nozzles:
+            lx, ly = x - 0.25 * r, y
+            out.append((hx * lx - hy * ly, hy * lx + hx * ly,
+                        (0.25 + 1.0 * lvl) * self._flicker, 1.6 * r))
+        a = self.alive
+        if a.any():
+            t = np.clip(self.age[a] / self.life[a], 0.0, 1.0)
+            heat = self.heat0[a] * (1.0 - t) ** 1.7
+            pos = self.pos[a]
+            size = self.size0[a] * (1.0 + 1.7 * t)
+            for lo, hi in ((0.0, 0.2), (0.2, 0.45), (0.45, 0.7), (0.7, 1.01)):
+                sel = (t >= lo) & (t < hi)
+                w = heat[sel]
+                total = float(w.sum())
+                if total < 0.05:
+                    continue
+                cx = float((pos[sel, 0] * w).sum() / total)
+                cy = float((pos[sel, 1] * w).sum() / total)
+                out.append((cx, cy, 0.035 * total, float(size[sel].mean()) * 2.0))
+        return out[:max_lights]
+
     def extent(self):
         """Groesster abstand eines partikels von der schiffsmitte (+ groesse)."""
         a = self.alive

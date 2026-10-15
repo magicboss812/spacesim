@@ -19,7 +19,10 @@ uniform vec3 u_light;
 uniform float u_light_exp;
 uniform float u_emissive;
 uniform int u_style;     // 2 halbton, 4 sprite
-uniform float u_thrust;  // 0..1: das triebwerk beleuchtet das heck
+// Die fahne als lichtquelle (`ship/plume.py::light_sources`): punktlichter
+// im schiffszentrierten, nicht mitdrehenden raum (x, y, staerke, radius).
+uniform vec4 u_plights[8];
+uniform int u_plight_n;
 uniform vec3 u_glow;     // farbe dieses lichts
 
 layout(location = 0) out vec4 o_cell;
@@ -85,11 +88,27 @@ void main() {
     if (abs(v_tag - 0.7) < 0.05) {
         col = mix(col, ramp(lifted * 0.8, t), 0.6);   // holm: nur eine spur heller als das paneel
     }
-    // Heck im schein der fahne: warm, zur duese hin staerker. Nur die
-    // farbe, nicht die regions-kennung -- sonst zoegen sich naehte.
-    float rear = u_thrust * (1.0 - smoothstep(-112.0, -55.0, v_local.x));
-    col = min(col + u_glow * 0.55 * rear, vec3(1.0));
-    lit = max(lit, 0.40 + 0.5 * rear);
+    // Licht der fahne, je ZELLE: die zellmitte im raum der lichter, gegen
+    // die normale der zelle. Die lichter liegen leicht ueber der ebene,
+    // damit auch die oberseite etwas abbekommt (umgriff 0.35), und fallen
+    // mit dem abstand weich ab (radius = groesse der quelle). Nur die
+    // farbe aendert sich -- die regions-kennung bleibt, sonst zoegen sich
+    // naehte durch den schein.
+    vec2 ps = vec2(u_head.x * v_local.x - u_head.y * v_local.y,
+                   u_head.y * v_local.x + u_head.x * v_local.y);
+    float glow = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        if (i >= u_plight_n) break;
+        vec4 L = u_plights[i];
+        vec3 dl = vec3(L.xy - ps, 9.0);
+        float d2 = dot(dl, dl);
+        float ndl = max(dot(n, dl * inversesqrt(d2)), 0.0) * 0.65 + 0.35;
+        float r = max(L.w, 4.0);
+        glow += L.z * ndl / (1.0 + d2 / (r * r * 4.0));
+    }
+    glow = min(glow, 1.3);
+    col = min(col + u_glow * 0.60 * glow, vec3(1.0));
+    lit = min(1.0, lit + 0.45 * glow);
     // alpha traegt das LICHT; die auspraegungen lesen daraus fuge und halbton.
     o_cell = vec4(col, lit);
     o_id = vec4(base, v_tag);
