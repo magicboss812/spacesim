@@ -94,9 +94,40 @@ class ShipPixelMixin:
         self._ship_cell_textures, self._ship_cell_fbo = pair()
         self._ship_clean_textures, self._ship_clean_fbo = pair()
         heat = self.ctx.texture(cap, 2, dtype='f2')
-        heat.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        # LINEAR fuer den weichzeichner (zwei texel je abgriff); der
+        # zusammenbau liest die hitze mit texelFetch, ungefiltert.
+        heat.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        heat.repeat_x = heat.repeat_y = False
         self._ship_heat_tex = heat
         self._ship_heat_fbo = self.ctx.framebuffer(color_attachments=[heat])
+        glow = []
+        for _ in range(2):
+            t = self.ctx.texture(cap, 1, dtype='f2')
+            t.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            t.repeat_x = t.repeat_y = False
+            glow.append(t)
+        self._ship_glow_tex = tuple(glow)
+        self._ship_glow_fbo = tuple(self.ctx.framebuffer(color_attachments=[t]) for t in glow)
+
+    def _ship_glow_pass(self, sigma_cells, n):
+        """Die hitze in zwei richtungen weichzeichnen: hitze -> a -> b."""
+        prog = self._ship_glow_program
+        prog['u_rect'].value = (-1.0, -1.0, 1.0, 1.0)
+        prog['u_grid'].value = (n, n)
+        prog['u_sigma'].value = float(sigma_cells)
+        src = self._ship_heat_tex
+        for i, d in enumerate(((1, 0), (0, 1))):
+            fbo = self._ship_glow_fbo[i]
+            fbo.use()
+            fbo.viewport = (0, 0, n, n)
+            prog['u_dir'].value = d
+            src.use(location=0)
+            self._ship_glow_vao.render(moderngl.TRIANGLE_STRIP)
+            src = self._ship_glow_tex[i]
+
+    def _ship_glow_on(self):
+        return (self._ship_glow_vao is not None
+                and float(getattr(self, 'ship_plume_glow', 0.0)) > 0.0)
 
     def _ship_plume_step(self, build, head):
         """Die partikel einen echtzeit-schritt weiter; im foto (capture)
@@ -172,7 +203,12 @@ class ShipPixelMixin:
         # Reichweite um die mitte: nase (115) bzw. so weit, wie die fahne
         # gerade reicht (gedeckelt); jede bauform bleibt in |y| <= 60.
         span = 147.0 if sim is None else min(320.0, max(147.0, sim.extent()))
-        reach = span * scale + 2.0 * k
+        # Der schein erst ab sichtbarem schub: im leerlauf ist er ohnehin
+        # unsichtbar und kostete zwei weichzeichner-paesse und ein groesseres
+        # raster. Ueber 1.5 sigma hinaus bleibt er unter der ersten stufe.
+        glow = self._ship_glow_on() and sim is not None and level > 0.30
+        glow_r = float(self.ship_plume_glow_radius) if glow else 0.0
+        reach = (span + 1.5 * glow_r) * scale + 2.0 * k
         while k < 64 and 2.0 * reach / k + 4 > _SHIP_CELL_CAP:
             k += 1
         oy_up = self._ortho_y(y)
@@ -229,6 +265,15 @@ class ShipPixelMixin:
             self._body_cell_clean_vao.render(moderngl.TRIANGLE_STRIP)
 
             self._ship_heat_pass(sim, scale, (ox - origin[0], oy - origin[1]), k, n)
+            glow_gain = 0.0
+            if glow:
+                ctx.disable(moderngl.BLEND)
+                self._ship_glow_pass(max(0.5, glow_r * scale / k), n)
+                glow_gain = float(self.ship_plume_glow)
+            else:
+                fbo = self._ship_glow_fbo[1]
+                fbo.use()
+                fbo.clear(0.0, 0.0, 0.0, 0.0, viewport=(0, 0, n, n))
         except Exception as exc:
             self.debug_info['ship_pixel_error'] = f"cells: {type(exc).__name__}: {exc}"
             return False
@@ -267,6 +312,8 @@ class ShipPixelMixin:
             self._ship_clean_textures[0].use(location=0)
             self._ship_clean_textures[1].use(location=1)
             self._ship_heat_tex.use(location=2)
+            self._ship_glow_tex[1].use(location=3)
+            prog['u_glow_gain'].value = glow_gain
             self._ship_pixel_vao.render(moderngl.TRIANGLE_STRIP)
         except Exception as exc:
             self.debug_info['ship_pixel_error'] = f"compose: {type(exc).__name__}: {exc}"

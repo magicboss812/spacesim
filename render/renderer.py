@@ -496,6 +496,14 @@ class Renderer(
         self._ship_plume_vbo = None
         self._ship_heat_tex = None
         self._ship_heat_fbo = None
+        # Schein der fahne: verstaerkung und gauss-radius (sigma) in
+        # einheiten der bauform; 0 schaltet ihn ab.
+        self.ship_plume_glow = 1.0
+        self.ship_plume_glow_radius = 22.0
+        self._ship_glow_program = None
+        self._ship_glow_vao = None
+        self._ship_glow_tex = ()
+        self._ship_glow_fbo = ()
         # --- zoom-abhaengige verkleinerung des schiffs -------------------
         # Das schiff bleibt in bildschirm-pixeln gezeichnet (siehe oben),
         # aber NICHT ueber jede zoomstufe gleich gross: weit herausgezoomt --

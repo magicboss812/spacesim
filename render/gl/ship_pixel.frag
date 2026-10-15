@@ -12,6 +12,9 @@
 // (`ship/plume.py`, `ship_plume.{vert,frag}`), gefaerbt ueber eine
 // geditherte glut-rampe aus der akzentfarbe -- weissgluehender kern, gelb,
 // akzent, glut, rauch. Halbton als punkte, sprite in ganzen zellen.
+// Darunter der SCHEIN: die hitze, in zwei gauss-paessen weichgezeichnet
+// (`ship_glow.frag`), hier je BILDSCHIRMPIXEL bilinear abgetastet und in
+// alpha-stufen mit 1-px-bayer gedithert -- weich im verlauf, hart im pixel.
 //
 // Koordinaten: GL-pixel (y nach OBEN); u_origin ist die linke UNTERE ecke der
 // zelle (0, 0), eine ganze pixelposition. Fuge und eigene kanten liegen wie
@@ -20,6 +23,8 @@
 uniform sampler2D u_cells;     // farbe + licht (0..1)
 uniform sampler2D u_ids;       // regions-kennung + kennzeichen
 uniform sampler2D u_heat;      // einheit 2: hitze + rauch der partikel
+uniform sampler2D u_glow;      // einheit 3: weichgezeichnete hitze (schein), LINEAR
+uniform float u_glow_gain;
 uniform vec2 u_origin;
 uniform ivec2 u_grid;
 uniform int u_k;
@@ -161,11 +166,22 @@ void main() {
 
     vec2 hs = (c.x >= 0 && c.y >= 0 && c.x < u_grid.x && c.y < u_grid.y)
             ? texelFetch(u_heat, c, 0).rg : vec2(0.0);
+
+    // Schein an diesem pixel: stetig zwischen den zellmitten, dann in
+    // stufen von 0.10 alpha gedithert (je pixel, nicht je zelle).
+    vec2 guv = (gl_FragCoord.xy - u_origin) / float(k) / vec2(textureSize(u_glow, 0));
+    float g = texture(u_glow, guv).r * u_glow_gain;
+    float gb = bayer4(ivec2(floor(gl_FragCoord.xy)));
+    float ga = clamp(floor(g * 0.80 / 0.10 + gb) * 0.10, 0.0, 0.70);
+    vec3 gc = mix(u_accent, vec3(1.0, 0.82, 0.48), clamp(g * 0.9, 0.0, 0.75));
+
     if (hs.x > 0.02 || hs.y > 0.02) {
         vec4 f = fire(hs.x, hs.y, bayer4(c));
         if (f.a > 0.0) {
             if (u_style == 4) {
-                fragColor = out_col(f.rgb, f.a);
+                // Rauch (halb durchsichtig) liegt UEBER dem schein.
+                fragColor = out_col(mix(gc, f.rgb, f.a < 1.0 && ga > 0.0 ? f.a : 1.0),
+                                    max(f.a, ga));
                 return;
             }
             // Halbton: deckung aus der hitze, wie beim rumpf (ab 4-px-zellen
@@ -181,10 +197,15 @@ void main() {
                 ink = bayer4(rel) < cov;
             }
             if (ink) {
-                fragColor = out_col(f.rgb, f.a);
+                fragColor = out_col(mix(gc, f.rgb, f.a < 1.0 && ga > 0.0 ? f.a : 1.0),
+                                    max(f.a, ga));
                 return;
             }
         }
+    }
+    if (ga > 0.0) {
+        fragColor = out_col(gc, ga);
+        return;
     }
     discard;
 }

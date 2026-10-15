@@ -12,6 +12,7 @@ paths:
   - "render/gl/ship_pixel.frag"
   - "render/gl/ship_plume.vert"
   - "render/gl/ship_plume.frag"
+  - "render/gl/ship_glow.frag"
   - "ship/plume.py"
   - "render/gl/body_icon.vert"
   - "render/gl/body_icon.frag"
@@ -337,13 +338,26 @@ styles only; the vector path keeps its nested-ellipse plume.
   changes colour only, not the region id, so no seams appear. Bending the
   plume moves the light with it. Smoke in the compose takes warm light from
   the heat in its own cell.
+- **Glow per screen pixel.** `ship_glow.frag` blurs the heat buffer in two
+  separable gaussian passes (σ = `ship_plume_glow_radius`, 22 units, in
+  cells) into a LINEAR float texture. Each tap reads between two texels
+  (heat is LINEAR too; the compose still reads it with `texelFetch`), which
+  halves the fetches: thrust frame 3.43 → 2.6–2.9 ms in llvmpipe. The
+  compose samples the glow **bilinearly at every screen pixel** and
+  quantises `0.8 · g` into 0.10 alpha steps with a 1-px Bayer dither (cap
+  0.70): the falloff is smooth, and each pixel is still one of a few hard
+  levels. The colour runs from the accent to warm yellow as `g` rises.
+  Smoke lies over it. The glow runs only above 0.30 thrust (invisible at
+  idle, and it would cost two passes and a bigger grid), and the reach grows
+  by only 1.5 σ: beyond that it stays below the first step.
 - **Never write `smoothstep(hi, lo, x)`.** GLSL leaves edge0 ≥ edge1
   undefined; the first rear glow used it.
 - The grid reach follows the plume (`extent()`, capped at 320 units); a
   capture does not step the particles.
 - Tunables: `ship_plume_particles`, `ship_plume_rate` (900/s),
   `ship_plume_speed` (340 units/s), `ship_plume_life_s` (0.55),
-  `ship_plume_spread` (0.10 rad), also in the dev UI.
+  `ship_plume_spread` (0.10 rad), `ship_plume_glow` (1.0, 0 = off),
+  `ship_plume_glow_radius` (22 units), also in the dev UI.
 
 **Builds and colours** (`ship/builds.py`): `original` (the mockup),
 `ringschiff`, `pfeil`, `schlepper`, `segler`. Shapes name **colour roles**,
@@ -392,8 +406,8 @@ Rules, each from a seen failure:
   because `_set_line_width` multiplies by it.
 
 Cost (1280×800, llvmpipe, `gl.finish()`): vector 0.81 ms; pixel 0.54–0.66 ms
-without particles, 1.40 ms idle and 1.81 ms at full thrust with particles
-and plume light (original build, ~470 particles). The Python part is ≤ 0.31 ms (step 0.22 +
+without particles; with particles, plume light and glow 1.35 ms idle and
+2.6–2.9 ms at full thrust (original / Schlepper, ~470 particles). The Python part is ≤ 0.31 ms (step 0.22 +
 point build 0.09); the rest is the heat pass and the extra texel fetch in
 software GL.
 

@@ -1115,6 +1115,11 @@ def draw_dev_panels(c: "DevContext"):
                     tooltip="Austrittstempo; das schiff ist 230 einheiten lang.")
             _slider("lebensdauer (s)", c.renderer, 'ship_plume_life_s', 0.15, 1.5, "%.2f")
             _slider("streuung (rad)", c.renderer, 'ship_plume_spread', 0.0, 0.4, "%.2f")
+            _slider("schein", c.renderer, 'ship_plume_glow', 0.0, 3.0, "%.2f",
+                    tooltip="Staerke des scheins um die fahne; 0 = aus.")
+            _slider("schein-radius", c.renderer, 'ship_plume_glow_radius', 4.0, 60.0, "%.0f",
+                    tooltip="Gauss-sigma des scheins in einheiten der bauform\n"
+                            "(das schiff ist 230 lang).")
             _slider("min. zellen (laenge)", c.renderer, 'ship_pixel_min_cells', 12.0, 80.0, "%.0f",
                     tooltip="So viele zellen lang bleibt das schiff mindestens;\n"
                             "darunter werden die zellen kleiner (bis 1 px).")

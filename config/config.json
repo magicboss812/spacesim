@@ -246,6 +246,8 @@
     "ship_plume_speed": 340.0,
     "ship_plume_life_s": 0.55,
     "ship_plume_spread": 0.1,
+    "ship_plume_glow": 1.0,
+    "ship_plume_glow_radius": 22.0,
     "selection_marker_enabled": true,
     "selection_arrow_length_px": 13.0,
     "selection_arrow_width_px": 11.0,

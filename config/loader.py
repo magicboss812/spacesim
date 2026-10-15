@@ -574,6 +574,8 @@ class ConfigLoader:
             ('ship_plume_speed', 'ship_plume_speed', float),
             ('ship_plume_life_s', 'ship_plume_life_s', float),
             ('ship_plume_spread', 'ship_plume_spread', float),
+            ('ship_plume_glow', 'ship_plume_glow', float),
+            ('ship_plume_glow_radius', 'ship_plume_glow_radius', float),
             ('ship_pixel_min_cells', 'ship_pixel_min_cells', float),
             # Zoom-abhaengige verkleinerung des schiffs (px je meter)
             ('ship_zoom_shrink_enabled', 'ship_zoom_shrink_enabled', bool),
