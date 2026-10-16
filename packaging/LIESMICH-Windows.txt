@@ -1,0 +1,19 @@
+SpaceSim fuer Windows 10/11
+===========================
+
+1. SpaceSim-Windows.zip entpacken (Rechtsklick > Alle extrahieren), NICHT
+   direkt aus dem Zip starten. Der Ordner darf nicht unter "C:\Programme"
+   liegen (dort ist er schreibgeschuetzt), z. B. Desktop oder Dokumente.
+
+2. SpaceSim.exe starten. Windows SmartScreen warnt bei unsignierten
+   Programmen: "Weitere Informationen" > "Trotzdem ausfuehren".
+
+3. Der ERSTE Start dauert etwa eine Minute (die Physik wird fuer diesen
+   Rechner kompiliert). Ab dem zweiten Start geht es deutlich schneller.
+
+Einstellungen: SpaceSim\config\config.json und
+SpaceSim\config\solar_system.json mit einem Texteditor bearbeiten und
+SpaceSim neu starten. Eine geloeschte Datei wird mit den Standardwerten neu
+angelegt. F12-Screenshots landen in SpaceSim\screenshots\.
+
+Falls SpaceSim abstuerzt, steht die Fehlermeldung in SpaceSim\crash.log.

@@ -10,3 +10,6 @@ docs/.claude/
 orbital-mechanics-notes-main
 # F12-bildschirmfotos (config.json -> screenshot.directory)
 screenshots/
+# PyInstaller (spacesim.spec)
+build/
+dist/

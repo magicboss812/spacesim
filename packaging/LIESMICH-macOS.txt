@@ -1,0 +1,41 @@
+SpaceSim fuer macOS (Apple Silicon, M1 und neuer)
+=================================================
+
+1. SpaceSim-macOS.zip entpacken (Doppelklick) und SpaceSim.app in den
+   Ordner "Programme" ziehen.
+
+2. Die App ist nicht bei Apple notarisiert. Beim ersten Oeffnen meldet macOS
+   deshalb "SpaceSim ist beschaedigt" oder "kann nicht geoeffnet werden".
+   Einmalig im Terminal (Programme > Dienstprogramme > Terminal) eingeben:
+
+       xattr -dr com.apple.quarantine /Applications/SpaceSim.app
+
+   Danach startet SpaceSim normal per Doppelklick.
+
+   Alternative ohne Terminal: einmal oeffnen versuchen, dann
+   Systemeinstellungen > Datenschutz & Sicherheit > ganz unten
+   "Dennoch oeffnen" klicken.
+
+3. Der ERSTE Start dauert etwa eine Minute, das Fenster bleibt so lange
+   schwarz (die Physik wird fuer diesen Rechner kompiliert). Nicht beenden.
+   Ab dem zweiten Start geht es deutlich schneller.
+
+Einstellungen
+-------------
+Nach dem ersten Start liegen die beiden Dateien hier:
+
+    ~/Library/Application Support/spacesim/config/config.json
+    ~/Library/Application Support/spacesim/config/solar_system.json
+
+Im Finder: Gehe zu > Gehe zum Ordner... und den Pfad oben einfuegen.
+Mit TextEdit bearbeiten (Format > In reinen Text umwandeln), speichern,
+SpaceSim neu starten. Eine geloeschte Datei wird beim naechsten Start mit
+den Standardwerten neu angelegt.
+
+F12-Screenshots landen in ~/Library/Application Support/spacesim/screenshots/.
+
+Falls SpaceSim abstuerzt
+------------------------
+Die Fehlermeldung steht in
+    ~/Library/Application Support/spacesim/crash.log
+Diese Datei bitte zuruecksenden.

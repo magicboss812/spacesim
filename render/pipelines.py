@@ -5,6 +5,7 @@ gefunden -- `_load_shader_source` ist die einzige stelle, die sie oeffnet.
 """
 import os
 import struct
+import sys
 
 import numpy as np
 
@@ -373,6 +374,12 @@ class ShaderPipelineMixin:
         # Beim hochaufgeloesten foto k-fach (runtime/screenshot.py), damit
         # eine linie im 8K-bild so dick wirkt wie im fenster.
         width = float(width) * float(getattr(self, 'capture_scale', 1.0))
+        # macOS kennt im core profile (runtime/window.py) NUR breite 1.0;
+        # alles darueber ist GL_INVALID_VALUE und zeichnet trotzdem 1 px.
+        # Also gleich 1.0 setzen -- dann bleibt glGetError fuer echte fehler
+        # frei (tools/game_shot.py --check-gl-errors im macOS-CI-lauf).
+        if sys.platform == 'darwin':
+            width = 1.0
         if self._gl_line_width == width:
             return
         self.ctx.line_width = width

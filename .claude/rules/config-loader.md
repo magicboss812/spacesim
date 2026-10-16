@@ -4,6 +4,9 @@ paths:
   - "config/config.json"
   - "config/solar_system.json"
   - "runtime/system_loader.py"
+  - "runtime/paths.py"
+  - "spacesim.spec"
+  - ".github/workflows/build.yml"
 ---
 
 # Config and system loading
@@ -95,3 +98,30 @@ switch a body to the star or gas-giant drawing and marker
 (`.claude/rules/body-art.md`); Sonne carries `is_star`, the four giants
 `is_gas`. Within a body a seeded ~14 % of the figures switch to
 an accent shape, which is what stops a planet reading as one repeated stamp.
+
+## Where `config/` lives — `runtime/paths.py` and the frozen build
+
+Both loaders resolve relative paths from `runtime/paths.py::config_dir()`, the
+screenshot folder from `user_dir()`. Never from `__file__` again: in a
+PyInstaller build `__file__` points into the bundled, read-only part, so an
+edited `config.json` next to the exe would be silently ignored.
+
+- **Repo:** the repo root, as always.
+- **Frozen Windows/Linux:** the exe's folder (`SpaceSim/config/`).
+- **Frozen macOS:** `~/Library/Application Support/spacesim/`. Not next to the
+  `.app`: Gatekeeper runs a downloaded app from a random read-only path (app
+  translocation), and a file changed inside the `.app` breaks its signature.
+
+`prepare_frozen()` (first call in `main.py`) copies a missing file from the
+bundled template and installs an excepthook writing `crash.log` there, since a
+`console=False` app has no stderr anyone sees. Numba needs nothing: frozen, it
+uses its own user-wide cache. Measured in a Linux build: first start 54 s,
+second 17 s, `NUMBA_CACHE_DIR` not involved.
+
+**Build:** `pyinstaller spacesim.spec` on the target OS (no cross-compiling).
+`.github/workflows/build.yml` builds both; its macOS job also runs the frozen
+app 150 frames twice and `tools/game_shot.py --check-gl-errors` on the
+runner's Apple software renderer, so a Mac build is checked without a Mac.
+Verified locally in a Linux build: an edited external `config.json` takes
+effect, a missing `solar_system.json` is restored, a broken one ends in
+`crash.log` with exit 1.

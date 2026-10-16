@@ -3,7 +3,9 @@
 Die KOERPER aus `solar_system.json` laedt `runtime/system_loader.py`.
 
 `config.json` und `solar_system.json` liegen neben diesem modul, damit alles
-einstellbare an einem ort steht.
+einstellbare an einem ort steht -- in der gebauten app dort, wo
+`runtime/paths.py::config_dir` hinzeigt (neben der exe bzw. Application
+Support), nicht in der app selbst.
 """
 import json
 import re
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from render import background
+from runtime.paths import config_dir, user_dir
 
 DEFAULT_CONFIG_FILE = "config.json"
 
@@ -111,7 +114,7 @@ class ConfigLoader:
     """
 
     def __init__(self, filepath: str | Path | None = None):
-        base_dir = Path(__file__).parent
+        base_dir = config_dir()
         if filepath is None:
             self.filepath = base_dir / DEFAULT_CONFIG_FILE
         else:
@@ -411,14 +414,15 @@ class ConfigLoader:
     def screenshot_dir(self) -> str:
         """Zielordner der F12-fotos (`screenshot.directory`).
 
-        Ein relativer pfad gilt ab der REPO-WURZEL, nicht ab der config-datei:
+        Ein relativer pfad gilt ab der REPO-WURZEL (in der gebauten app ab
+        `runtime/paths.py::user_dir`), nicht ab der config-datei:
         SPACESIM_CONFIG zeigt bei messlaeufen auf eine kopie im temp-ordner,
         und die fotos sollen trotzdem neben dem code landen.
         """
         raw = self.get_str('screenshot.directory', 'screenshots') or 'screenshots'
         path = Path(raw).expanduser()
         if not path.is_absolute():
-            path = Path(__file__).resolve().parent.parent / path
+            path = user_dir() / path
         return str(path)
 
     def screenshot_resolution(self) -> str:
