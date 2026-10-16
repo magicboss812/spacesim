@@ -75,9 +75,12 @@ class TextMixin:
         raw = self.ui_px(self.hud_font_size_body_label)
         step = self._DISPLAY_PIXEL_STEP
         size_px = max(self._DISPLAY_PIXEL_MIN, int(round(raw / step)) * step)
+        # Ab der repo-wurzel, nicht ab render/: seit der umstrukturierung
+        # liegt diese datei eine ebene tiefer, und `render/ui/assets` gibt es
+        # nicht -- die namen fielen still auf font_small zurueck.
         path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), 'ui', 'assets',
-            'ui-display.ttf',
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'ui', 'assets', 'ui-display.ttf',
         )
         if not os.path.isfile(path):
             return self.font_small

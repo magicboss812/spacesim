@@ -3,6 +3,7 @@
 Einmalige einrichtung, die mit der simulation nichts zu tun hat.
 """
 import os
+import sys
 
 import moderngl
 import pygame
@@ -74,9 +75,36 @@ class Window:
             flags |= NOFRAME
         elif bool(config.get('window.resizable', True)):
             flags |= RESIZABLE
-        self.screen = pygame.display.set_mode(
-            (self.width, self.height), flags, vsync=1 if self.vsync else 0
+        # OpenGL 3.3 CORE, forward-compatible -- auf JEDER plattform, nicht nur
+        # macOS. macOS gibt ohne diese anfrage einen 2.1-legacy-context, an
+        # dem alle `#version 330`-shader scheitern; Windows/Linux geben sonst
+        # einen compatibility-context, der regelwidriges (breite linien,
+        # fehlendes VAO) stillschweigend schluckt. Gleicher context ueberall
+        # heisst: was hier laeuft, laeuft auch auf dem Mac. Scheitert die
+        # anfrage (alter treiber), faellt es auf den default-context zurueck.
+        core = (
+            (pygame.GL_CONTEXT_MAJOR_VERSION, 3),
+            (pygame.GL_CONTEXT_MINOR_VERSION, 3),
+            (pygame.GL_CONTEXT_PROFILE_MASK, pygame.GL_CONTEXT_PROFILE_CORE),
+            (pygame.GL_CONTEXT_FORWARD_COMPATIBLE_FLAG, 1),
         )
+        for attr, value in core:
+            pygame.display.gl_set_attribute(attr, value)
+        try:
+            self.screen = pygame.display.set_mode(
+                (self.width, self.height), flags, vsync=1 if self.vsync else 0
+            )
+        except pygame.error as exc:
+            if sys.platform == 'darwin':
+                raise
+            print(f"GL: 3.3-core-context abgelehnt ({exc}), nehme default")
+            pygame.display.gl_set_attribute(pygame.GL_CONTEXT_PROFILE_MASK, 0)
+            pygame.display.gl_set_attribute(pygame.GL_CONTEXT_FORWARD_COMPATIBLE_FLAG, 0)
+            pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 0)
+            pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 0)
+            self.screen = pygame.display.set_mode(
+                (self.width, self.height), flags, vsync=1 if self.vsync else 0
+            )
         if self.borderless:
             # Die echte flaeche gewinnt -- SDL kann bei DPI/skalierung minimal
             # abweichen, und Camera/Renderer brauchen die tatsaechlichen masse.

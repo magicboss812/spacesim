@@ -1,0 +1,95 @@
+# Baut SpaceSim fuer Windows und macOS (Apple Silicon) mit spacesim.spec.
+# Der macOS-teil STARTET die gebaute app auch (Apple-software-renderer auf
+# dem runner) und legt einen screenshot mit core-profile-GL-fehlerpruefung
+# bei -- so ist der Mac-build geprueft, bevor er verschickt wird.
+#
+# Ergebnis: Actions > dieser lauf > Artifacts.
+name: build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    tags: ['v*']
+    paths:
+      - 'spacesim.spec'
+      - '.github/workflows/build.yml'
+      - 'runtime/paths.py'
+      - 'runtime/window.py'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pygame moderngl numpy numba imgui-bundle pyinstaller
+      - run: pyinstaller spacesim.spec --noconfirm
+      - name: Pruefen, dass die aenderbare config neben der exe liegt
+        shell: bash
+        run: |
+          test -f dist/SpaceSim/SpaceSim.exe
+          test -f dist/SpaceSim/config/config.json
+          test -f dist/SpaceSim/config/solar_system.json
+          cp packaging/LIESMICH-Windows.txt dist/SpaceSim/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpaceSim-Windows
+          path: dist/SpaceSim/
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pygame moderngl numpy numba imgui-bundle pyinstaller
+      - run: pyinstaller spacesim.spec --noconfirm
+      - name: Ad-hoc signieren und signatur pruefen
+        run: |
+          codesign --force --deep --sign - dist/SpaceSim.app
+          codesign --verify --deep --strict --verbose=2 dist/SpaceSim.app
+          lipo -archs dist/SpaceSim.app/Contents/MacOS/SpaceSim
+
+      - name: Gebaute app starten (kalt, dann warm)
+        run: |
+          set -e
+          APPDIR="$HOME/Library/Application Support/spacesim"
+          rm -rf "$APPDIR"
+          for run in 1 2; do
+            start=$(date +%s)
+            SPACESIM_MAX_FRAMES=150 dist/SpaceSim.app/Contents/MacOS/SpaceSim > run$run.log 2>&1 \
+              || { cat run$run.log; cat "$APPDIR/crash.log" 2>/dev/null; exit 1; }
+            echo "lauf $run: $(( $(date +%s) - start )) s"
+            grep -m1 -i "core profile\|opengl\|metal" run$run.log || true
+          done
+          test -f "$APPDIR/config/config.json"
+          test -f "$APPDIR/config/solar_system.json"
+          test ! -f "$APPDIR/crash.log"
+          tail -n 3 run2.log
+
+      - name: Screenshot aus dem quelltext, mit GL-fehlerpruefung
+        run: |
+          python tools/game_shot.py 1600 1000 -o mac_shot.png --frames 60 --check-gl-errors
+          python tools/game_shot.py 1600 1000 -o mac_shot_node.png --frames 60 --node 800,0 --check-gl-errors
+
+      - name: Paket schnueren
+        run: |
+          ditto -c -k --keepParent dist/SpaceSim.app SpaceSim-macOS.zip
+          mkdir out
+          mv SpaceSim-macOS.zip out/
+          cp packaging/LIESMICH-macOS.txt out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SpaceSim-macOS
+          path: out/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macOS-pruefung
+          path: |
+            mac_shot*.png
+            run*.log

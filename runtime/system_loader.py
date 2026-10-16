@@ -9,11 +9,12 @@ import json
 from pathlib import Path
 
 from physics.vec import Vec2
+from runtime.paths import config_dir
 from bodies.body import body, schiff
 
 # Die systemdatei liegt bei der konfiguration, nicht bei diesem modul --
 # `config/` ist das verzeichnis, in dem ALLE einstellbaren daten stehen.
-SYSTEM_DIR = Path(__file__).parent.parent / "config"
+SYSTEM_DIR = config_dir()
 DEFAULT_SYSTEM_FILE = "solar_system.json"
 
 

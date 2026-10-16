@@ -7,6 +7,7 @@ den framebuffer VOR present(), also genau das, was im fenster stuende.
                               [--node PRO,NRM] [--zoom SCALE]
                               [--hide all|KEY,KEY,...] [--dv PRO]
                               [--horizon METRES] [--focus NAME]
+                              [--check-gl-errors]
 """
 import argparse
 import json
@@ -46,6 +47,9 @@ parser.add_argument('--horizon', type=float, default=None,
 parser.add_argument('--focus', default=None,
                     help='kamera auf diesen koerper (name aus '
                          'solar_system.json), z. B. "Jupiter"')
+parser.add_argument('--check-gl-errors', action='store_true',
+                    help='glGetError nach jedem frame; exit 1, wenn einer '
+                         'kam -- fuer den CI-lauf auf macOS (core profile)')
 args = parser.parse_args()
 
 W, H = args.width, args.height
@@ -113,7 +117,14 @@ if args.zoom is not None:
     app.camera.target_scale = float(args.zoom)
 
 
+_gl_errors = []
+
+
 def one_frame():
+    if args.check_gl_errors:
+        err = gl.error
+        if err != 'GL_NO_ERROR':
+            _gl_errors.append(err)
     pygame.event.pump()
     if app.hud is not None:
         app.hud.update()
@@ -171,6 +182,8 @@ for i in range(max(1, args.frames)):
     if i < args.frames - 1:
         app.renderer.present()
 
+if args.check_gl_errors and gl.error != 'GL_NO_ERROR':
+    _gl_errors.append('nach dem letzten frame')
 data = gl.screen.read(viewport=(0, 0, W, H), components=3, dtype='f1')
 frame = np.frombuffer(data, dtype=np.uint8).reshape(H, W, 3)[::-1]
 out = args.out or os.path.join(
@@ -179,3 +192,6 @@ pygame.image.save(pygame.surfarray.make_surface(frame.transpose(1, 0, 2)), out)
 print('geschrieben:', out, f'({W}x{H})')
 app.maneuver_preview.shutdown()
 app.window.close()
+if args.check_gl_errors:
+    print('GL-fehler:', len(_gl_errors), sorted(set(_gl_errors)))
+    sys.exit(1 if _gl_errors else 0)

@@ -9,6 +9,8 @@
 **Spiel Starten**: `python main.py`  (aus dem ordner `spacesim/` heraus)
 ![spiel-starten](https://i.imgur.com/kVPjbHY.gif)
 
+**Als Programm bauen** (Windows-exe / macOS-app, config bleibt aenderbar): `pip install pyinstaller`, dann `pyinstaller spacesim.spec` auf dem jeweiligen System. Ohne Mac: GitHub Actions, Workflow `build` (`.github/workflows/build.yml`) baut und testet beide. Anleitungen fuer Empfaenger: `packaging/LIESMICH-*.txt`.
+
 ## Neuerungen bis zum letzten Commit:
 - Ordnerstruktur überarbeitet & in jeweilige Spielbereiche eingeteilt (siehe Kapitel "Repo-Struktur)
 - unabhängige Konfigurationsdatei von nötigen Parametern aus dem Spielcode (default Werte stehen trotzdem im Code)

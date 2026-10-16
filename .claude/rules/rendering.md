@@ -139,6 +139,19 @@ Not compensated on purpose: body disc/icon thresholds and the line-detail
 budget see the larger pixel radius and draw more detail, which is what a
 higher resolution is for.
 
+## The GL context is 3.3 CORE, forward-compatible, on every platform
+
+`runtime/window.py` requests it before `set_mode`. macOS without the request
+hands out a 2.1 legacy context and every `#version 330` shader fails; asking
+for it everywhere means Windows/Linux run the same rules the Mac does.
+Measured under Mesa: core vs. the old compatibility context renders a
+**bit-identical** frame (0 of 1.44 M pixels differ), 0 GL errors over 80
+frames with a maneuver node. If the driver refuses, non-macOS falls back to
+the default context. **macOS core allows line width 1.0 only**, so
+`_set_line_width` sets 1.0 there; `orbit_line_width` (1.6) and the F12
+multiplier have no effect on a Mac. Thicker lines there would have to become
+quads.
+
 ## `render/renderer.py`
 
 - `render/renderer.py` — moderngl `Renderer`: bodies, trajectories, HUD, FXAA.
