@@ -583,6 +583,12 @@ widgets that take their geometry from outside `ui/`, and each for one reason:
 uppercase, letterspaced and hard-rastered (`_build_body_label_font` rounds to
 the same multiple of five as `ui/text.py`). It is the only caption *inside* the
 picture, and in the system grotesque it read as foreign to the surface.
+**The font path is resolved from the repo root** (`ui/assets/ui-display.ttf`,
+two `dirname`s up from `render/text.py`). A missing file falls back to
+`font_small` *silently*, so a wrong path looks like a style choice: after the
+2026-09-03 restructure it pointed at `render/ui/assets/`, and every name drew
+mixed-case in the system font until 2026-10-16. Check a shot after touching
+it: `ERDE` in capitals means the file loaded.
 Consequence for the renderer's cache: `_get_label_texture` keys on
 `(text, id(font), height, antialias, tracking)` — two fonts can report the same
 height, and the old key would have served one font's glyphs under the other's
